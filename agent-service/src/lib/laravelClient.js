@@ -1,15 +1,15 @@
 /**
  * HTTP client for Laravel customer/on-demand APIs.
- * POSTs to LARAVEL_API_BASE_URL with optional user_id and access_token in the body.
+ * POSTs to LARAVEL_API_BASE_URL with optional user_id, provider_id, and access_token in the body.
  */
 
 import { LARAVEL_API_BASE_URL } from '../config/index.js';
 
 /**
- * POST to a Laravel customer API path.
- * @param {string} path - Path relative to base URL (e.g. 'customer/on-demand/provider-list').
+ * POST to a Laravel customer or provider API path.
+ * @param {string} path - Path relative to base URL (e.g. 'customer/on-demand/provider-list' or 'on-demand/package-list').
  * @param {Record<string, unknown>} body - Request body (will be JSON).
- * @param {{ userId?: number; accessToken?: string }} [auth] - Optional user_id and access_token to merge into body.
+ * @param {{ userId?: number; providerId?: number; accessToken?: string }} [auth] - Optional user_id (customer), provider_id (seller), and access_token to merge into body.
  * @returns {Promise<Record<string, unknown>>} Parsed JSON response.
  * @throws {Error} On HTTP error or when response.status === 0 with a message.
  */
@@ -18,6 +18,7 @@ export async function post(path, body, auth = {}) {
   const payload = {
     ...body,
     ...(auth.userId != null && { user_id: auth.userId }),
+    ...(auth.providerId != null && { provider_id: auth.providerId }),
     ...(auth.accessToken != null && { access_token: auth.accessToken }),
   };
 
