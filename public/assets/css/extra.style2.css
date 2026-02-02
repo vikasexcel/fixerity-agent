@@ -1,0 +1,108 @@
+/*
+Upadted by Avichal Sanepara.
+* Date: 09-01-2019
+* pre loader css
+*/
+/*pre-loader without refresh page start*/
+.pre-loader {
+    display: none;
+    position: fixed;
+    z-index: 9999;
+    top: 0;
+    left: 0;
+    height: 5px;
+    width: 80%;
+    background: #2196f3;
+    -webkit-animation: barfiller 2.0s;
+    animation: barfiller 2.0s
+}
+body.loading {
+    overflow: hidden;
+}
+body.loading .pre-loader {
+    display: block;
+}
+/*pre-loader without refresh page end*/
+
+/*ride status*/
+.ride-status a{
+    display: block;
+    color: #55d090;
+}
+.ride-status span{
+    font-size: 12px;
+    width: auto;
+    padding: 2px 5px;
+    color: white;
+    border-radius: 5px;
+}
+.ride-status .cancelled ,.ride-status .failed {
+    background: #E57373;
+}
+
+.ride-status .pending {
+    background: #B0BEC5;
+}
+
+.ride-status .approved {
+    background: #99bbff;
+}
+
+.ride-status .running {
+    background-color: #4db8ff;
+}
+
+.ride-status .completed {
+    background: #16D39A;
+}
+
+/*Ride full details page style*/
+.ride-detail-table {
+    max-width: 100%;
+}
+.ride-detail-table-header {
+    padding: 20px 0;
+}
+.ride-detail-table-header h5 {
+    margin-bottom: 10px;
+    color: #333;
+    font-size: 15px;
+    font-weight: 700;
+    display: inline-block;
+    margin-right: 10px;
+    line-height: 1.1;
+    position: relative;
+}
+.ride-detail-table-header h5:after {
+    content: "";
+    background-color: #d2d2d2;
+    width: 60px;
+    height: 1px;
+    position: absolute;
+    bottom: -20px;
+    left: 0;
+}
+.ride-detail-table table tr {
+    padding-bottom: 0 !important;
+}
+.ride-detail-table .table td {
+    white-space: unset;
+    word-break: break-word;
+    vertical-align: middle;
+}
+.ride-detail-table .table th {
+    vertical-align: top;
+}
+.ride-detail-table .table td, .ride-detail-table .table th {
+    padding: .70rem;
+    border-top: none;
+    border-bottom: 1px solid #dee2e6;
+}
+
+
+/* other service horizontal nav css */
+.external-horizontal-nav {
+    position: relative;
+    top: 0;
+    left: 0;
+}

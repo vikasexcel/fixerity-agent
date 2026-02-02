@@ -1,0 +1,128 @@
+<?php
+return [
+    "0" => "Không tìm thấy dữ liệu",
+    "1" => "Thành công",
+    "2" => "Email hoặc số liên lạc đang chờ xác minh",
+    "3" => "Tài khoản của bạn hiện đang bị chặn, do đó không được phép cho phép bất kỳ hoạt động nào!",
+    "4" => "Phiên đăng nhập của bạn đã hết hạn, vui lòng đăng nhập lại",
+    "5" => "Không tìm thấy người dùng ứng dụng",
+    "6" => "Lựa chọn dịch vụ của bạn đang chờ xử lý",
+    "7" => "Dịch vụ của bạn đang chờ phê duyệt",
+    "8" => "Dịch vụ bạn đã chọn bị từ chối",
+    "9" => "Đã xảy ra sự cố",
+    "10" => "Bạn đã nhập mật khẩu không đúng",
+    "11" => "Địa chỉ email đã đăng ký",
+    "12" => "Số điện thoại di động đã đăng ký",
+
+    "14" => "Không đăng ký làm Nhà cung cấp dịch vụ vận tải",
+    "15" => "Không tìm thấy thông tin tài xế",
+
+    "20" => "Tài xế đã hủy chuyến đi.",
+
+    "23" => "Rất tiếc, bạn đã quá muộn để chấp nhận chuyến đi",
+
+    "24" => "Xin lỗi, yêu cầu đi xe của bạn đã bị người dùng hủy",
+    "25" => "Xin lỗi, yêu cầu đi xe của bạn đã không thành công",
+    "26" => "không tìm thấy thông tin chi tiết về chuyến đi",
+
+    "28" => "cửa hàng không chấp nhận yêu cầu của người dùng",
+    "29" => "Rất tiếc, đơn hàng giao hàng của bạn đã bị cửa hàng từ chối",
+    "30" => "Rất tiếc, yêu cầu giao hàng của bạn đã bị người dùng hủy",
+    "31" => "Rất tiếc, bạn đã quá muộn để nhận chuyến đi",
+
+    "36" => "Người dùng hủy đơn hàng",
+    "37" => "Tài xế đã chấp nhận đơn hàng",
+    "38" => "Tài xế đã đến cửa hàng.",
+    "39" => "Tài xế đã thu tiền thành công",
+    "40" => "Tài xế đã hoàn tất việc giao hàng tại cửa hàng.",
+    "41" => "Đơn hàng mới",
+    "42" => "Hủy đơn hàng",
+    "43" => "Giao hàng tại cửa hàng",
+    "44" => "Người dùng hủy đơn hàng tại cửa hàng",
+
+    "50" => "Chỉ định tài xế giao hàng",
+    "51" => "Đơn hàng đã được cửa hàng chấp nhận",
+    "52" => "Đơn hàng đã bị cửa hàng từ chối",
+    "53" => "Đơn hàng đã bị cửa hàng hủy",
+    "54" => "Bắt đầu đơn hàng Đang xử lý",
+    "55" => "Đang giao đơn hàng",
+    "56" => "Đã giao đơn hàng",
+    "57" => "Theo dõi đơn hàng của bạn",
+    "58" => "Bạn không đăng ký làm cửa hàng",
+    "59" => "Không tìm thấy chi tiết đơn hàng",
+
+    "61" => "Không tìm thấy bất kỳ cửa hàng nào đang mở",
+    "62" => "Không tìm thấy ưu đãi",
+    "63" => "Không tìm thấy danh mục cửa hàng",
+
+    "65" => "Hủy chuyến đi",
+    "66" => "không tìm thấy tài liệu bắt buộc",
+    "68" => "Thời gian của nhà cung cấp chưa được đặt",
+    "69" => "cửa hàng hiện không khả dụng",
+    "70" => "khách hàng không được phép hủy đơn hàng này",
+    "71" => "xin lỗi, chúng tôi vẫn chưa ở đây! tại sao bạn không thử một vị trí khác?",
+    "72" => "Bạn không đăng ký làm nhà cung cấp",
+
+    "77" => "chi tiết xe và tài liệu của bạn đã được gửi thành công",
+    "78" => "vui lòng tải lên tất cả các tài liệu bắt buộc",
+
+    "80" => "lý do hủy bắt buộc",
+    "81" => "lý do từ chối bắt buộc",
+    "82" => "Số tiền không khớp",
+    "83" => "Đang chờ xử lý thanh toán",
+    "84" => "không có tài xế nào chấp nhận chuyến đi",
+    "85" => "đang chờ xử lý đơn hàng",
+    "86" => "vị trí của bạn không được phép!",
+    "87" => "otp không hợp lệ",
+    "88" => "Chi tiết người dùng đang chờ xử lý",
+    "89" => "Mã xác minh không hợp lệ!",
+    "90" => "Bạn có yêu cầu mới!",
+    "91" => "Thông báo mới",
+    "92" => "Người dùng chỉ thêm năm địa chỉ, nếu bạn thêm địa chỉ mới thì xóa địa chỉ cũ!",
+    "93" => "Mã khuyến mại không được phép trong đơn hàng này!",
+    "94" => "Bạn không đăng ký làm cửa hàng!",
+    "95" => "Không có nhà hàng yêu thích nào",
+    "96" => "Chưa có đánh giá nào",
+
+    "98" => "nhà hàng không có tại thời điểm đặt hàng theo lịch trình của bạn",
+    "99" => "Không tìm thấy bất kỳ nhà hàng nào",
+    "100" => "Địa chỉ giao hàng của bạn nằm ngoài phạm vi giao hàng của cửa hàng! Vui lòng thay đổi địa chỉ giao hàng của bạn.",
+    "101" => "Bạn không thể thanh toán số tiền đơn hàng thông qua Ví vì số dư trong ví của bạn không đủ.",
+
+    "157" => "Sản phẩm đã thêm hiện không khả dụng!",
+
+
+    '73' => 'Không tìm thấy thông tin chi tiết về nhà cung cấp!',
+    '13' => 'Đăng nhập bằng Tài khoản mạng xã hội',
+    '74' => 'Nhà cung cấp từ chối đơn hàng!',
+    '111' => 'Quản trị viên hủy đơn hàng!',
+    '112' => 'Quản trị viên đã hoàn tất đơn hàng!',
+    '76' => 'Đơn hàng không thành công!',
+    '117' => 'Bạn có thể bắt đầu dịch vụ trước :value phút của thời gian yêu cầu.',
+    '79' => 'Không tìm thấy thông tin chi tiết về ngân hàng!',
+    '262' => 'Đã nhận được số tiền trong ví',
+    '263' => 'Đã nhận được số tiền trong ví thành công',
+    '264' => "Rất tiếc, Hiện tại Dịch vụ đặt hàng của bạn đang chạy nên bạn không thể xóa tài khoản tại thời điểm đó. Hãy thử lại sau!",
+
+    '303' => "Bạn không thể chấp nhận đơn hàng, bạn đã có một đơn hàng cho cùng khung giờ đó.",
+    "310" => "Rất tiếc, Hiện tại bạn đang chạy dịch vụ đặt hàng",
+
+    '311' => 'Nhà cung cấp đang trên đường',
+    '312' => 'Nhà cung cấp đã đến đích',
+    "329" => "đơn hàng đã được quản trị viên nhà cung cấp hoàn tất!",
+    '313' => "Rất tiếc, bạn không thể xóa nhà cung cấp đã cố định. Vì vậy, vui lòng thử với nhà cung cấp khác",
+    "323" => "Không tìm thấy người dùng!",
+
+    "324" => "Mã OTP mới đã được gửi đến số điện thoại đã đăng ký của bạn!",
+
+    //cash out
+    '332' => "Không đủ số dư ví để yêu cầu rút tiền",
+    '333' => "Yêu cầu rút tiền bị Quản trị viên từ chối",
+    '334' => "Yêu cầu rút tiền được Quản trị viên chấp nhận",
+    '335' => "Không đủ số dư ví để chấp nhận yêu cầu",
+    "336" => "Rất tiếc, bạn không thể rút số tiền nhỏ hơn :amount",
+    "337" => "Rất tiếc, bạn không thể rút số tiền lớn hơn :amount",
+    "338" => "Yêu cầu rút tiền thành công!",
+    "339" => "Xin lỗi, ví của bạn có số tiền ít hơn :amount",
+    '340' => 'Dịch vụ bạn đã đăng ký hiện không khả dụng.'
+];
