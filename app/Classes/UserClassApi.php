@@ -76,7 +76,8 @@ class UserClassApi
                     "message_code" => 4,
                 ]);
             }
-            if ($user_details->verified_at == Null) {
+            // Bypass OTP verification when APP_ENV=local for testing
+            if (!app()->environment('local') && $user_details->verified_at == Null) {
                 return response()->json([
                     'status' => 2,
 //                    'message' => "User Not Verified!",
