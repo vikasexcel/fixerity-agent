@@ -5,10 +5,9 @@ import { useRouter } from 'next/navigation';
 import { JobCard } from '@/components/buyer/job-card';
 import { JobDetailModal } from '@/components/buyer/job-detail-modal';
 import { CreateJobModal } from '@/components/buyer/create-job-modal';
-import { AgentRunner } from '@/components/buyer/agent-runner';
 import { Button } from '@/components/ui/button';
 import { getAuthSession, getAccessToken } from '@/lib/auth-context';
-import { listJobs, updateJobStatus } from '@/lib/jobs-api';
+import { listJobs } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 export default function BuyerDashboard() {
@@ -18,8 +17,6 @@ export default function BuyerDashboard() {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [filter, setFilter] = useState<'open' | 'matched' | 'completed' | 'all'>('open');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showAgentRunner, setShowAgentRunner] = useState(false);
-  const [runningJob, setRunningJob] = useState<Job | null>(null);
   const user = getAuthSession().user;
 
   useEffect(() => {
@@ -38,27 +35,14 @@ export default function BuyerDashboard() {
   }, [user]);
 
   const handleJobCreate = (newJob: Job) => {
-    setJobs([...jobs, newJob]);
+    setJobs((prev) => [...prev, newJob]);
     setShowCreateModal(false);
-    setRunningJob(newJob);
-    setShowAgentRunner(true);
-  };
-
-  const handleAgentComplete = async (newDeals: Deal[]) => {
-    setDeals((prev) => [...prev, ...newDeals]);
-    if (runningJob) {
-      setJobs((prev) =>
-        prev.map((j) => (j.id === runningJob.id ? { ...j, status: 'matched' as const } : j))
-      );
-      const token = getAccessToken();
-      const uid = user?.id;
-      if (token && uid && runningJob.id.startsWith('job_')) {
-        const jobId = parseInt(runningJob.id.replace('job_', ''), 10);
-        if (!isNaN(jobId)) {
-          updateJobStatus(Number(uid), token, jobId, 'matched').catch(() => {});
-        }
-      }
+    try {
+      sessionStorage.setItem(`buyer_job_${newJob.id}`, JSON.stringify(newJob));
+    } catch {
+      // ignore
     }
+    router.push(`/buyer/jobs/${encodeURIComponent(newJob.id)}/chat`);
   };
 
   const filteredJobs = filter === 'all' ? jobs : jobs.filter((j) => j.status === filter);
@@ -175,18 +159,6 @@ export default function BuyerDashboard() {
         <CreateJobModal 
           onClose={() => setShowCreateModal(false)}
           onJobCreate={handleJobCreate}
-        />
-      )}
-
-      {/* Agent Runner */}
-      {showAgentRunner && runningJob && (
-        <AgentRunner 
-          job={runningJob}
-          onComplete={handleAgentComplete}
-          onClose={() => {
-            setShowAgentRunner(false);
-            setRunningJob(null);
-          }}
         />
       )}
     </div>

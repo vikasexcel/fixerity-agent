@@ -25,10 +25,15 @@ function getClient() {
 
 /**
  * Entity id for buyer-scoped memory (avoids collision with seller/provider ids).
+ * When jobId is provided, memory is scoped to that job's conversation.
  * @param {number|string} userId - Customer user id.
+ * @param {string} [jobId] - Optional job id for job-scoped memory.
  * @returns {string}
  */
-function buyerEntityId(userId) {
+function buyerEntityId(userId, jobId) {
+  if (jobId) {
+    return `buyer_${userId}_job_${jobId}`;
+  }
   return `buyer_${userId}`;
 }
 
@@ -36,17 +41,18 @@ function buyerEntityId(userId) {
  * Add a conversation turn to memory for a buyer.
  * @param {number|string} userId - Customer user id.
  * @param {Array<{ role: 'user' | 'assistant'; content: string }>} messages - One turn: user message + assistant reply.
- * @param {{ type?: 'order' | 'search' | 'feedback' }} [metadata] - Optional metadata for filtering.
+ * @param {{ type?: 'order' | 'search' | 'feedback'; jobId?: string }} [metadata] - Optional metadata; jobId for job-scoped memory.
  * @returns {Promise<void>}
  */
 export async function add(userId, messages, metadata = {}) {
   const client = getClient();
   if (!client) return;
-  const user_id = buyerEntityId(userId);
+  const { jobId, ...restMeta } = metadata;
+  const user_id = buyerEntityId(userId, jobId);
   try {
     await client.add(messages, {
       user_id,
-      metadata: Object.keys(metadata).length ? metadata : undefined,
+      metadata: Object.keys(restMeta).length ? restMeta : undefined,
     });
   } catch (err) {
     console.error('[Mem0] add failed:', err.message);
@@ -54,17 +60,17 @@ export async function add(userId, messages, metadata = {}) {
 }
 
 /**
- * Search memories for a buyer (user-scoped).
+ * Search memories for a buyer (user-scoped or job-scoped).
  * @param {number|string} userId - Customer user id.
  * @param {string} query - Natural-language query (e.g. current user message or summary).
- * @param {{ limit?: number }} [options] - Optional; limit defaults to 10.
+ * @param {{ limit?: number; jobId?: string }} [options] - Optional; limit defaults to 10; jobId for job-scoped search.
  * @returns {Promise<string>} Formatted string of relevant memories for injection into system prompt, or empty string.
  */
 export async function search(userId, query, options = {}) {
   const client = getClient();
   if (!client) return '';
   const limit = options.limit ?? 10;
-  const user_id = buyerEntityId(userId);
+  const user_id = buyerEntityId(userId, options.jobId);
   try {
     const results = await client.search(query, {
       filters: { user_id },

@@ -54,11 +54,11 @@ app.post('/agent/buyer/match', async (req, res) => {
 
 /**
  * POST /agent/buyer/chat
- * Body: { user_id: number, message: string, access_token: string }
+ * Body: { user_id: number, message: string, access_token: string, conversation_history?: Array<{role,content}>, job_id?: string, job_title?: string }
  * Returns: { reply: string }
  */
 app.post('/agent/buyer/chat', async (req, res) => {
-  const { user_id: userId, message, access_token: accessToken } = req.body ?? {};
+  const { user_id: userId, message, access_token: accessToken, conversation_history, job_id: jobId, job_title: jobTitle } = req.body ?? {};
 
   if (userId == null || typeof message !== 'string' || !message.trim() || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -66,8 +66,17 @@ app.post('/agent/buyer/chat', async (req, res) => {
     });
   }
 
+  const opts = {};
+  if (Array.isArray(conversation_history) && conversation_history.length > 0) {
+    opts.conversationHistory = conversation_history.filter(
+      (m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    );
+  }
+  if (jobId && typeof jobId === 'string' && jobId.trim()) opts.jobId = jobId.trim();
+  if (jobTitle && typeof jobTitle === 'string' && jobTitle.trim()) opts.jobTitle = jobTitle.trim();
+
   try {
-    const { reply } = await runBuyerAgent(userId, message.trim(), accessToken.trim());
+    const { reply } = await runBuyerAgent(userId, message.trim(), accessToken.trim(), opts);
     return res.json({ reply });
   } catch (err) {
     const message = err?.message ?? 'Agent request failed';

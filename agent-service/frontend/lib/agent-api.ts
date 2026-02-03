@@ -48,3 +48,42 @@ export async function matchJobToProviders(
   }
   return data.deals ?? [];
 }
+
+export type ConversationTurn = { role: 'user' | 'assistant'; content: string };
+
+export async function sendBuyerChatMessage(
+  userId: number,
+  accessToken: string,
+  message: string,
+  options?: { jobId?: string; jobTitle?: string; conversationHistory?: ConversationTurn[] }
+): Promise<string> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/buyer/chat`;
+  const body: {
+    user_id: number;
+    access_token: string;
+    message: string;
+    job_id?: string;
+    job_title?: string;
+    conversation_history?: ConversationTurn[];
+  } = {
+    user_id: userId,
+    access_token: accessToken,
+    message,
+  };
+  if (options?.jobId) body.job_id = options.jobId;
+  if (options?.jobTitle) body.job_title = options.jobTitle;
+  if (options?.conversationHistory && options.conversationHistory.length > 0) {
+    body.conversation_history = options.conversationHistory;
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { reply?: string; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Chat request failed');
+  }
+  return data.reply ?? '';
+}

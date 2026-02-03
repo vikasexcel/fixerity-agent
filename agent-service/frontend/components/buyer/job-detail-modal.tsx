@@ -1,6 +1,7 @@
 'use client';
 
-import { Star, Sparkles, Target, X } from 'lucide-react';
+import Link from 'next/link';
+import { Star, Sparkles, Target, X, MessageCircle } from 'lucide-react';
 import { Job, Deal } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -170,9 +171,12 @@ export function JobDetailModal({ job, deals, onClose }: JobDetailModalProps) {
           <Button onClick={onClose} variant="outline" className="flex-1 bg-transparent">
             Close
           </Button>
-          <Button className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground">
-            Post Job
-          </Button>
+          <Link href={`/buyer/jobs/${encodeURIComponent(job.id)}/chat`} className="flex-1">
+            <Button className="w-full bg-primary hover:bg-primary/90 text-primary-foreground flex items-center justify-center gap-2">
+              <MessageCircle size={18} />
+              Open Chat
+            </Button>
+          </Link>
         </div>
       </div>
     </div>
