@@ -273,8 +273,11 @@ export default function JobChatPage() {
                     )}
                   </div>
                 </div>
-                {msg.phase === 'error' && msg.error && (
+                {(msg.phase === 'error' && msg.error) && (
                   <p className="text-sm text-muted-foreground">You can still ask follow-up questions about this job.</p>
+                )}
+                {msg.phase === 'complete' && (
+                  <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
                 )}
                 {msg.phase === 'complete' && msg.deals && msg.deals.length > 0 && (
                   <div className="mt-2 space-y-2">

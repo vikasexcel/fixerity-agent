@@ -1,20 +1,50 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Star, Sparkles, Target, X, MessageCircle } from 'lucide-react';
+import { Star, Sparkles, Target, X, MessageCircle, Loader2 } from 'lucide-react';
 import { Job, Deal } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RoleAvatar } from '@/components/ui/role-avatar';
+import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { matchJobToProviders } from '@/lib/agent-api';
 
 interface JobDetailModalProps {
   job: Job;
-  deals: Deal[];
+  deals?: Deal[];
   onClose: () => void;
 }
 
-export function JobDetailModal({ job, deals, onClose }: JobDetailModalProps) {
-  const jobDeals = deals.filter((d) => d.jobId === job.id);
+export function JobDetailModal({ job, deals: dealsProp = [], onClose }: JobDetailModalProps) {
+  const [matches, setMatches] = useState<Deal[] | null>(null);
+  const [matchesLoading, setMatchesLoading] = useState(true);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+  const user = getAuthSession().user;
+  const token = getAccessToken();
+
+  useEffect(() => {
+    if (!job || !user || user.role !== 'buyer' || !token) {
+      setMatchesLoading(false);
+      setMatches(null);
+      return;
+    }
+    setMatchesLoading(true);
+    setMatchesError(null);
+    matchJobToProviders(job, Number(user.id), token)
+      .then((deals) => {
+        const withJobId = (deals ?? []).map((d) => ({ ...d, jobId: d.jobId || job.id }));
+        setMatches(withJobId);
+        setMatchesLoading(false);
+      })
+      .catch((err) => {
+        setMatchesError(err instanceof Error ? err.message : 'Failed to load matches');
+        setMatches([]);
+        setMatchesLoading(false);
+      });
+  }, [job?.id, user?.id, token]);
+
+  const jobDeals = (matches !== null ? matches : dealsProp.filter((d) => d.jobId === job.id));
 
   const getPriorityIcon = (level: string) => {
     const iconClass = 'text-primary mt-1 flex-shrink-0';
@@ -114,8 +144,18 @@ export function JobDetailModal({ job, deals, onClose }: JobDetailModalProps) {
           {/* Matched Agents */}
           <div>
             <h3 className="text-lg font-semibold text-foreground mb-4">
-              Recommended Agents ({jobDeals.length} Matches)
+              Recommended Agents ({matchesLoading ? '…' : jobDeals.length} Matches)
             </h3>
+            {matchesLoading && (
+              <div className="flex items-center gap-2 text-muted-foreground py-4">
+                <Loader2 size={20} className="animate-spin shrink-0" />
+                <span className="text-sm">Loading recommended agents…</span>
+              </div>
+            )}
+            {!matchesLoading && matchesError && (
+              <p className="text-sm text-muted-foreground py-2">{matchesError}</p>
+            )}
+            {!matchesLoading && !matchesError && (
             <div className="space-y-3">
               {jobDeals.map((deal) => (
                 <div key={deal.id} className="bg-secondary/30 rounded-lg p-4 border border-accent/30">
@@ -163,6 +203,7 @@ export function JobDetailModal({ job, deals, onClose }: JobDetailModalProps) {
                 </div>
               ))}
             </div>
+            )}
           </div>
         </div>
 
