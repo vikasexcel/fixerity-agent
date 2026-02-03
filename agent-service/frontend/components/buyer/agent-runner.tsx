@@ -3,8 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Zap, Check, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { runBuyerAgent, generateMatchExplanation } from '@/lib/agent-engine';
-import { dummyAgents } from '@/lib/dummy-data';
+import { matchJobToProviders } from '@/lib/agent-api';
+import { getAuthSession, getAccessToken } from '@/lib/auth-context';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 interface AgentRunnerProps {
@@ -14,10 +14,11 @@ interface AgentRunnerProps {
 }
 
 interface AgentStatus {
-  phase: 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete';
+  phase: 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
   agentsScanned: number;
   currentAgent?: string;
   progress: number;
+  error?: string;
 }
 
 export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
@@ -27,67 +28,53 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
     progress: 0,
   });
 
-  const [matches, setMatches] = useState<any[]>([]);
+  const [matches, setMatches] = useState<Deal[]>([]);
   const [isRunning, setIsRunning] = useState(true);
 
   useEffect(() => {
     if (!isRunning) return;
 
     const runAgent = async () => {
-      // Phase 1: Initializing
-      await new Promise(resolve => setTimeout(resolve, 800));
-      setStatus(prev => ({ ...prev, phase: 'scanning', progress: 15 }));
-
-      // Phase 2: Scanning agents
-      const agents = [...dummyAgents].filter(a => a.type === 'seller');
-      for (let i = 0; i < agents.length; i++) {
-        await new Promise(resolve => setTimeout(resolve, 300));
-        setStatus(prev => ({
+      const user = getAuthSession().user;
+      const token = getAccessToken();
+      if (!user || !token) {
+        setStatus((prev) => ({
           ...prev,
-          agentsScanned: i + 1,
-          currentAgent: agents[i].name,
-          progress: 15 + ((i + 1) / agents.length) * 30,
+          phase: 'error',
+          error: 'Please sign in to run the agent.',
         }));
+        setIsRunning(false);
+        return;
       }
 
-      // Phase 3: Evaluating
-      setStatus(prev => ({ ...prev, phase: 'evaluating', progress: 50 }));
-      await new Promise(resolve => setTimeout(resolve, 800));
+      setStatus((prev) => ({ ...prev, phase: 'scanning', progress: 20 }));
 
-      // Phase 4: Ranking and matching
-      setStatus(prev => ({ ...prev, phase: 'ranking', progress: 80 }));
-      await new Promise(resolve => setTimeout(resolve, 600));
-
-      // Get matches
-      const matchResults = runBuyerAgent(job, dummyAgents);
-      const deals: Deal[] = matchResults.map((result, idx) => ({
-        id: `deal_${job.id}_${idx}`,
-        jobId: job.id,
-        sellerId: result.agent.userId,
-        sellerAgent: result.agent,
-        matchScore: Math.round(result.score),
-        matchReasons: result.reasons,
-        status: 'proposed' as const,
-        createdAt: new Date().toISOString().split('T')[0],
-      }));
-
-      setMatches(deals);
-      setStatus(prev => ({ ...prev, phase: 'complete', progress: 100 }));
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      setIsRunning(false);
-      onComplete(deals);
+      try {
+        const deals = await matchJobToProviders(job, Number(user.id), token);
+        setStatus((prev) => ({ ...prev, phase: 'complete', progress: 100 }));
+        setMatches(deals);
+        onComplete(deals);
+      } catch (err) {
+        setStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          error: err instanceof Error ? err.message : 'Matching failed. Please try again.',
+        }));
+      } finally {
+        setIsRunning(false);
+      }
     };
 
     runAgent();
-  }, []);
+  }, [job.id]);
 
-  const phases = {
+  const phases: Record<AgentStatus['phase'], string> = {
     initializing: 'Initializing buyer agent...',
-    scanning: `Scanning available agents (${status.agentsScanned}/${dummyAgents.filter(a => a.type === 'seller').length})`,
-    evaluating: 'Evaluating agent capabilities...',
+    scanning: 'Scanning available providers...',
+    evaluating: 'Evaluating capabilities...',
     ranking: 'Ranking and matching...',
     complete: 'Matching complete!',
+    error: status.error ?? 'Error',
   };
 
   return (
@@ -107,13 +94,13 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
         {/* Current Status */}
         <div className="bg-secondary/30 rounded-lg p-4 mb-6">
           <div className="flex items-center gap-3 mb-2">
-            {status.phase === 'complete' && (
-              <Check size={20} className="text-accent" />
+            {(status.phase === 'complete' || status.phase === 'error') && (
+              <Check size={20} className={status.phase === 'complete' ? 'text-accent' : 'text-destructive'} />
             )}
             <p className="font-semibold text-foreground">{phases[status.phase]}</p>
           </div>
-          {status.currentAgent && status.phase !== 'complete' && (
-            <p className="text-sm text-muted-foreground ml-7">Currently evaluating: {status.currentAgent}</p>
+          {status.phase === 'error' && status.error && (
+            <p className="text-sm text-destructive mt-2">{status.error}</p>
           )}
         </div>
 
@@ -206,18 +193,20 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
             className="flex-1 bg-transparent"
             disabled={isRunning}
           >
-            Back
+            {status.phase === 'error' ? 'Close' : 'Back'}
           </Button>
-          <Button
-            onClick={() => {
-              onComplete(matches);
-              onClose();
-            }}
-            className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground"
-            disabled={!matches.length || isRunning}
-          >
-            View Matches
-          </Button>
+          {status.phase !== 'error' && (
+            <Button
+              onClick={() => {
+                onComplete(matches);
+                onClose();
+              }}
+              className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground"
+              disabled={!matches.length || isRunning}
+            >
+              View Matches
+            </Button>
+          )}
         </div>
       </div>
     </div>

@@ -28,6 +28,10 @@ export interface Job {
   createdAt: string;
   deadline?: string;
   status: 'open' | 'matched' | 'completed';
+  service_category_id?: number;
+  sub_category_id?: number;
+  lat?: number;
+  long?: number;
 }
 
 export interface Agent {
@@ -55,6 +59,7 @@ export interface Deal {
   matchReasons: string[];
   status: 'proposed' | 'rejected' | 'accepted';
   createdAt: string;
+  job?: Job; // Optional: included when returned from match API
 }
 
 // Dummy Users

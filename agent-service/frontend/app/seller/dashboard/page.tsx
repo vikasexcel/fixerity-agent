@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { dummyDeals, dummyAgents, dummyJobs } from '@/lib/dummy-data';
+import type { Job, Deal, Agent } from '@/lib/dummy-data';
 import { DealCard } from '@/components/seller/deal-card';
 import { DealDetailModal } from '@/components/seller/deal-detail-modal';
 import { SellerAgentRunner } from '@/components/seller/seller-agent-runner';
@@ -10,7 +10,6 @@ import { Button } from '@/components/ui/button';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 import { Star, Check, X } from 'lucide-react';
 import { getAuthSession } from '@/lib/auth-context';
-import type { Deal } from '@/lib/dummy-data';
 
 export default function SellerDashboard() {
   const router = useRouter();
@@ -25,14 +24,30 @@ export default function SellerDashboard() {
     }
   }, [user, router]);
 
-  const currentAgent = dummyAgents.find((a) => a.type === 'seller' && a.id !== 'agent_1');
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+
+  const currentAgent: Agent | null = user
+    ? {
+        id: `agent_${user.id}`,
+        userId: user.id,
+        name: user.name ?? 'Seller',
+        type: 'seller',
+        rating: 4.5,
+        jobsCompleted: 0,
+        licensed: true,
+        references: true,
+        bio: '',
+        createdAt: new Date().toISOString().split('T')[0],
+      }
+    : null;
 
   const filteredDeals =
     filter === 'all'
-      ? dummyDeals
+      ? deals
       : filter === 'high'
-        ? dummyDeals.filter((d) => d.matchScore >= 85)
-        : dummyDeals.filter((d) => d.matchScore >= 70 && d.matchScore < 85);
+        ? deals.filter((d) => d.matchScore >= 85)
+        : deals.filter((d) => d.matchScore >= 70 && d.matchScore < 85);
 
   return (
     <div className="min-h-screen bg-background">
@@ -117,22 +132,22 @@ export default function SellerDashboard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="bg-card rounded-lg border border-border p-5">
             <p className="text-muted-foreground text-sm mb-2">Available Deals</p>
-            <p className="text-3xl font-bold text-foreground">{dummyDeals.length}</p>
+            <p className="text-3xl font-bold text-foreground">{deals.length}</p>
           </div>
           <div className="bg-card rounded-lg border border-border p-5">
             <p className="text-muted-foreground text-sm mb-2">High Match (85%+)</p>
-            <p className="text-3xl font-bold text-primary">{dummyDeals.filter((d) => d.matchScore >= 85).length}</p>
+            <p className="text-3xl font-bold text-primary">{deals.filter((d) => d.matchScore >= 85).length}</p>
           </div>
           <div className="bg-card rounded-lg border border-border p-5">
             <p className="text-muted-foreground text-sm mb-2">Avg Match Score</p>
             <p className="text-3xl font-bold text-accent">
-              {Math.round(dummyDeals.reduce((acc, d) => acc + d.matchScore, 0) / dummyDeals.length)}%
+              {deals.length > 0 ? Math.round(deals.reduce((acc, d) => acc + d.matchScore, 0) / deals.length) : 0}%
             </p>
           </div>
           <div className="bg-card rounded-lg border border-border p-5">
             <p className="text-muted-foreground text-sm mb-2">Contacted</p>
             <p className="text-3xl font-bold text-foreground">
-              {dummyDeals.filter((d) => d.status !== 'proposed').length}
+              {deals.filter((d) => d.status !== 'proposed').length}
             </p>
           </div>
         </div>
@@ -158,7 +173,7 @@ export default function SellerDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {filteredDeals.length > 0 ? (
             filteredDeals.map((deal) => (
-              <DealCard key={deal.id} deal={deal} onView={setSelectedDeal} />
+              <DealCard key={deal.id} deal={deal} job={deal.job} onView={setSelectedDeal} />
             ))
           ) : (
             <div className="lg:col-span-2 text-center py-12">
@@ -175,6 +190,7 @@ export default function SellerDashboard() {
       {selectedDeal && (
         <DealDetailModal
           deal={selectedDeal}
+          job={selectedDeal.job}
           onClose={() => setSelectedDeal(null)}
           onAccept={() => {
             alert('Contact request sent to buyer!');
@@ -187,7 +203,7 @@ export default function SellerDashboard() {
       {showAgentRunner && currentAgent && (
         <SellerAgentRunner
           agent={currentAgent}
-          availableJobs={dummyJobs}
+          availableJobs={jobs}
           onClose={() => setShowAgentRunner(false)}
         />
       )}

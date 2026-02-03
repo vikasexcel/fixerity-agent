@@ -1,19 +1,20 @@
 'use client';
 
 import { Star, Sparkles, Target, X, Check } from 'lucide-react';
-import { Deal, dummyJobs } from '@/lib/dummy-data';
+import type { Deal, Job } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 
 interface DealDetailModalProps {
   deal: Deal;
+  job?: Job | null;
   onClose: () => void;
   onAccept?: () => void;
 }
 
-export function DealDetailModal({ deal, onClose, onAccept }: DealDetailModalProps) {
-  const job = dummyJobs.find((j) => j.id === deal.jobId);
+export function DealDetailModal({ deal, job: jobProp, onClose, onAccept }: DealDetailModalProps) {
+  const job = jobProp ?? deal.job;
 
   if (!job) return null;
 

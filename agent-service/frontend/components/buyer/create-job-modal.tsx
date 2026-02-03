@@ -2,10 +2,13 @@
 
 import React from "react"
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { Job, Priority } from '@/lib/dummy-data';
+import { createJob } from '@/lib/jobs-api';
+import { fetchServiceCategories, fetchSubCategories, fetchAddressList, type ServiceCategory, type AddressItem } from '@/lib/services-api';
+import { getAuthSession, getAccessToken } from '@/lib/auth-context';
 
 interface CreateJobModalProps {
   onClose: () => void;
@@ -21,7 +24,15 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
     maxBudget: '',
     startDate: '',
     endDate: '',
+    serviceCategoryId: '',
+    subCategoryId: '',
+    addressId: '',
   });
+  const [services, setServices] = useState<ServiceCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<Array<{ id: number; name: string }>>([]);
+  const [addresses, setAddresses] = useState<AddressItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [priorities, setPriorities] = useState<Priority[]>([
     {
@@ -36,6 +47,38 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
       description: 'Must be licensed',
     },
   ]);
+
+  useEffect(() => {
+    const user = getAuthSession().user;
+    const token = getAccessToken();
+    if (!user || !token || user.role !== 'buyer') return;
+    const userId = Number(user.id);
+    const load = async () => {
+      try {
+        const [svc, addr] = await Promise.all([
+          fetchServiceCategories(userId, token),
+          fetchAddressList(userId, token),
+        ]);
+        setServices(svc);
+        setAddresses(addr);
+      } catch {
+        setServices([]);
+        setAddresses([]);
+      }
+    };
+    load();
+  }, []);
+
+  useEffect(() => {
+    const user = getAuthSession().user;
+    const token = getAccessToken();
+    const sid = formData.serviceCategoryId ? Number(formData.serviceCategoryId) : 0;
+    if (!user || !token || !sid) {
+      setSubCategories([]);
+      return;
+    }
+    fetchSubCategories(Number(user.id), token, sid).then(setSubCategories).catch(() => setSubCategories([]));
+  }, [formData.serviceCategoryId]);
 
   const handleBasicSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -72,27 +115,43 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
     setPriorities(priorities.filter((_, i) => i !== index));
   };
 
-  const handleCreateJob = (e: React.FormEvent) => {
+  const handleCreateJob = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+    const user = getAuthSession().user;
+    const token = getAccessToken();
+    if (!user || !token) {
+      setError('Please sign in to create a job.');
+      return;
+    }
+    const userId = Number(user.id);
+    const selectedAddr = addresses.find((a) => String(a.address_id) === formData.addressId);
+    const lat = selectedAddr ? parseFloat(selectedAddr.lat) : 0;
+    const long = selectedAddr ? parseFloat(selectedAddr.long) : 0;
+    const serviceCategoryId = formData.serviceCategoryId ? Number(formData.serviceCategoryId) : undefined;
+    const subCategoryId = formData.subCategoryId ? Number(formData.subCategoryId) : undefined;
 
-    const newJob: Job = {
-      id: `job_${Date.now()}`,
-      buyerId: 'user_1',
-      title: formData.title,
-      description: formData.description,
-      budget: {
-        min: Number(formData.minBudget),
-        max: Number(formData.maxBudget),
-      },
-      startDate: formData.startDate,
-      endDate: formData.endDate,
-      priorities: priorities.filter(p => p.type && p.level),
-      createdAt: new Date().toISOString().split('T')[0],
-      status: 'open',
-      deadline: '8 days',
-    };
-
-    onJobCreate(newJob);
+    setLoading(true);
+    try {
+      const newJob = await createJob(userId, token, {
+        title: formData.title,
+        description: formData.description,
+        budget_min: Number(formData.minBudget),
+        budget_max: Number(formData.maxBudget),
+        start_date: formData.startDate || undefined,
+        end_date: formData.endDate || undefined,
+        service_category_id: serviceCategoryId,
+        sub_category_id: subCategoryId,
+        lat: lat || undefined,
+        long: long || undefined,
+        priorities: priorities.filter((p) => p.type && p.level),
+      });
+      onJobCreate(newJob);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create job');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -198,6 +257,56 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
 
           {step === 'budget' && (
             <form onSubmit={handleBudgetSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Service Category</label>
+                <select
+                  value={formData.serviceCategoryId}
+                  onChange={(e) => setFormData({ ...formData, serviceCategoryId: e.target.value, subCategoryId: '' })}
+                  className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="">Select service category</option>
+                  {services.map((s) => (
+                    <option key={s.service_category_id} value={s.service_category_id}>
+                      {s.service_category_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {formData.serviceCategoryId && subCategories.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-foreground mb-2">Sub Category</label>
+                  <select
+                    value={formData.subCategoryId}
+                    onChange={(e) => setFormData({ ...formData, subCategoryId: e.target.value })}
+                    className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                  >
+                    <option value="">Select sub category</option>
+                    {subCategories.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-foreground mb-2">Location (Address)</label>
+                <select
+                  value={formData.addressId}
+                  onChange={(e) => setFormData({ ...formData, addressId: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="">Select address</option>
+                  {addresses.map((a) => (
+                    <option key={a.address_id} value={a.address_id}>
+                      {a.address}
+                    </option>
+                  ))}
+                </select>
+                {addresses.length === 0 && (
+                  <p className="text-xs text-muted-foreground mt-1">Add an address in your profile first.</p>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-foreground mb-2">Min Budget ($)</label>
@@ -267,6 +376,11 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
 
           {step === 'priorities' && (
             <form onSubmit={handleCreateJob} className="space-y-4">
+              {error && (
+                <div className="bg-destructive/10 text-destructive px-4 py-2 rounded-lg text-sm">
+                  {error}
+                </div>
+              )}
               <div className="bg-secondary/30 border border-secondary rounded-lg p-4 mb-4">
                 <p className="text-sm text-foreground font-semibold mb-2">Set Priority Levels</p>
                 <p className="text-xs text-muted-foreground">
@@ -352,8 +466,9 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
                 <Button
                   type="submit"
                   className="flex-1 bg-accent hover:bg-accent/90 text-accent-foreground"
+                  disabled={loading}
                 >
-                  Create Job & Run Agent
+                  {loading ? 'Creating...' : 'Create Job & Run Agent'}
                 </Button>
               </div>
             </form>

@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Http\Controllers\Api\CustomerApiController;
 use App\Http\Controllers\Api\Auth\LoginController;
 use App\Http\Controllers\Api\Auth\RegisterController;
+use App\Http\Controllers\Api\OtherService\BuyerJobController;
 use App\Http\Controllers\Api\OtherService\UserController;
 use App\Http\Controllers\Api\OtherService\ProviderController;
 use App\Http\Controllers\Api\Auth\UpdateRegisterController;
@@ -128,6 +129,9 @@ Route::group(['middleware' => 'setLocaleLang'], function () {
                 Route::post('/order-rating', [UserController::class,'postOtherServiceOrderRating'])->name('post:other_service:order_rating');
                 Route::post('/provider-review', [UserController::class,'postOtherServiceProviderReview'])->name('post:other_service:provider_review');
                 Route::post('/provider-gallery', [UserController::class,'postOtherServiceProviderGallery'])->name('post:other_service:provider_gallery');
+                Route::post('/job/create', [BuyerJobController::class,'create'])->name('post:other_service:job_create');
+                Route::post('/job/list', [BuyerJobController::class,'list'])->name('post:other_service:job_list');
+                Route::post('/job/update-status', [BuyerJobController::class,'updateStatus'])->name('post:other_service:job_update_status');
             });
 
             Route::post('/support-pages', [CustomerApiController::class,'postMyCheckoutSupportPages'])->name('post:support_pages');

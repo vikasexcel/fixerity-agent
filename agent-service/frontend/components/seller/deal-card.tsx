@@ -1,17 +1,15 @@
 'use client';
 
-import { Deal, dummyJobs } from '@/lib/dummy-data';
+import type { Deal, Job } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 
 interface DealCardProps {
   deal: Deal;
+  job?: Job | null;
   onView?: (deal: Deal) => void;
 }
 
-export function DealCard({ deal, onView }: DealCardProps) {
-  const job = dummyJobs.find((j) => j.id === deal.jobId);
-
+export function DealCard({ deal, job, onView }: DealCardProps) {
   if (!job) return null;
 
   const getMatchColor = () => {
@@ -40,7 +38,7 @@ export function DealCard({ deal, onView }: DealCardProps) {
         </div>
         <div className="bg-secondary/50 rounded p-3">
           <p className="text-xs text-muted-foreground mb-1">Timeline</p>
-          <p className="font-semibold text-foreground">{job.deadline}</p>
+          <p className="font-semibold text-foreground">{job.deadline ?? `${job.startDate} - ${job.endDate}`}</p>
         </div>
       </div>
 

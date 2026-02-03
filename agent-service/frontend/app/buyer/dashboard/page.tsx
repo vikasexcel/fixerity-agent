@@ -2,19 +2,19 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { dummyJobs, dummyDeals, dummyAgents } from '@/lib/dummy-data';
 import { JobCard } from '@/components/buyer/job-card';
 import { JobDetailModal } from '@/components/buyer/job-detail-modal';
 import { CreateJobModal } from '@/components/buyer/create-job-modal';
 import { AgentRunner } from '@/components/buyer/agent-runner';
 import { Button } from '@/components/ui/button';
-import { getAuthSession } from '@/lib/auth-context';
+import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { listJobs, updateJobStatus } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 export default function BuyerDashboard() {
   const router = useRouter();
-  const [jobs, setJobs] = useState<Job[]>(dummyJobs);
-  const [deals, setDeals] = useState<Deal[]>(dummyDeals);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [filter, setFilter] = useState<'open' | 'matched' | 'completed' | 'all'>('open');
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -28,6 +28,15 @@ export default function BuyerDashboard() {
     }
   }, [user, router]);
 
+  useEffect(() => {
+    if (!user || user.role !== 'buyer') return;
+    const token = getAccessToken();
+    if (!token) return;
+    listJobs(Number(user.id), token)
+      .then(setJobs)
+      .catch(() => setJobs([]));
+  }, [user]);
+
   const handleJobCreate = (newJob: Job) => {
     setJobs([...jobs, newJob]);
     setShowCreateModal(false);
@@ -35,10 +44,20 @@ export default function BuyerDashboard() {
     setShowAgentRunner(true);
   };
 
-  const handleAgentComplete = (newDeals: Deal[]) => {
-    setDeals([...deals, ...newDeals]);
+  const handleAgentComplete = async (newDeals: Deal[]) => {
+    setDeals((prev) => [...prev, ...newDeals]);
     if (runningJob) {
-      setJobs(jobs.map(j => (j.id === runningJob.id ? { ...j, status: 'matched' as const } : j)));
+      setJobs((prev) =>
+        prev.map((j) => (j.id === runningJob.id ? { ...j, status: 'matched' as const } : j))
+      );
+      const token = getAccessToken();
+      const uid = user?.id;
+      if (token && uid && runningJob.id.startsWith('job_')) {
+        const jobId = parseInt(runningJob.id.replace('job_', ''), 10);
+        if (!isNaN(jobId)) {
+          updateJobStatus(Number(uid), token, jobId, 'matched').catch(() => {});
+        }
+      }
     }
   };
 
