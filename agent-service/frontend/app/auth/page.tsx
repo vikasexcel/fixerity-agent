@@ -273,10 +273,6 @@ export default function AuthPage() {
             </p>
           </div>
         </form>
-
-        <div className="mt-6 text-center text-xs text-muted-foreground">
-          <p>Uses Laravel API. Set NEXT_PUBLIC_API_URL in .env.local (see .env.example).</p>
-        </div>
       </div>
     </div>
   );
