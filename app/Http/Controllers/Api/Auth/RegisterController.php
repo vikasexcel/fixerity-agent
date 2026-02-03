@@ -288,6 +288,7 @@ class RegisterController extends Controller
                 } catch (\Exception $e) {}
             }
         }
+
         return $this->onDemandClassApi->onDemandLoginRegisterResponse($provider_details);
     }
 

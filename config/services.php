@@ -53,4 +53,9 @@ return [
         'caller_number' => env('TWILIO_CALLER_NUMBER', '+911234567890'),
     ],
 
+    'agent_webhook' => [
+        'url' => env('AGENT_SERVICE_WEBHOOK_URL'),
+        'secret' => env('AGENT_WEBHOOK_SECRET'),
+    ],
+
 ];

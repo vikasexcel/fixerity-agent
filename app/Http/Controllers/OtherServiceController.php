@@ -31,6 +31,7 @@ use App\Models\UserPackageBooking;
 use App\Models\UserPackageBookingQuantity;
 use App\Models\UserReferHistory;
 use App\Models\UserWalletTransaction;
+use App\Services\AgentWebhookService;
 use App\Services\FirebaseService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -1628,6 +1629,17 @@ class OtherServiceController extends Controller
                 $provider_service->save();
                 $provider->status = 1;
                 $provider->save();
+
+                $otherDetails = OtherServiceProviderDetails::query()->where('provider_id', $provider->id)->first();
+                $lat = $otherDetails && $otherDetails->lat !== null ? (float) $otherDetails->lat : null;
+                $long = $otherDetails && $otherDetails->long !== null ? (float) $otherDetails->long : null;
+                AgentWebhookService::notifyProviderRegistered(
+                    (int) $provider->id,
+                    (int) $provider_service->service_cat_id,
+                    null,
+                    $lat,
+                    $long
+                );
 
                 $general_settings = request()->get("general_settings");
                 if ($general_settings !=  Null) {
