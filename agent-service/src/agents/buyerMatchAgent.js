@@ -144,12 +144,20 @@ function createMatchJobTool(userId, accessToken) {
       try {
         const data = await post(path, payload, { userId, accessToken });
         if (data.status !== 1 || !data.provider_list || data.provider_list.length === 0) {
-          return JSON.stringify({ deals: [] });
+          return JSON.stringify({
+            deals: [],
+            message: data?.message || 'No providers found for this category and location.',
+          });
         }
         const deals = evaluateAndRank(data.provider_list, job);
         return JSON.stringify({ deals });
       } catch (err) {
-        return JSON.stringify({ deals: [], error: err.message });
+        const isNoData = err.message === 'Data Not Found' || /not found|no provider/i.test(err.message);
+        return JSON.stringify({
+          deals: [],
+          error: err.message,
+          ...(isNoData && { message: 'No providers found for this category and location.' }),
+        });
       }
     },
     {
