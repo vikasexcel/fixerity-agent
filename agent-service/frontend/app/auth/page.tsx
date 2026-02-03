@@ -1,7 +1,6 @@
 'use client';
 
-import React from "react"
-
+import React from 'react';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -11,34 +10,68 @@ import { login, signup } from '@/lib/auth-context';
 type AuthMode = 'signin' | 'signup';
 type UserRole = 'buyer' | 'seller';
 
+const COUNTRY_CODES = ['+1', '+44', '+91', '+81', '+86', '+49', '+33', '+61'];
+const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'JPY', 'AUD'];
+const LANGUAGES = ['en', 'es', 'fr', 'de', 'hi', 'ja'];
+
 export default function AuthPage() {
   const [mode, setMode] = useState<AuthMode>('signin');
   const [role, setRole] = useState<UserRole>('buyer');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [contactNumber, setContactNumber] = useState('');
+  const [countryCode, setCountryCode] = useState('+1');
+  const [currency, setCurrency] = useState('USD');
+  const [language, setLanguage] = useState('en');
+  const [gender, setGender] = useState<1 | 2>(1);
+  const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
     setIsLoading(true);
 
     try {
       if (mode === 'signin') {
-        login(email, password, role);
+        await login(email, password, role, {
+          select_country_code: countryCode,
+          select_currency: currency,
+          select_language: language,
+        });
       } else {
-        signup(email, name, password, role);
+        if (!contactNumber.trim()) {
+          setError('Contact number is required.');
+          return;
+        }
+        if (role === 'seller') {
+          await signup(email, name, password, role, {
+            contact_number: contactNumber.trim(),
+            gender,
+            select_country_code: countryCode,
+            select_currency: currency,
+            select_language: language,
+          });
+        } else {
+          await signup(email, name, password, role, {
+            contact_number: contactNumber.trim(),
+            select_country_code: countryCode,
+            select_currency: currency,
+            select_language: language,
+          });
+        }
       }
 
-      // Redirect based on role
       if (role === 'buyer') {
         router.push('/buyer/dashboard');
       } else {
         router.push('/seller/dashboard');
       }
-    } catch (error) {
-      console.error('Auth error:', error);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.');
+      console.error('Auth error:', err);
     } finally {
       setIsLoading(false);
     }
@@ -47,16 +80,15 @@ export default function AuthPage() {
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-foreground mb-2">AgentMatch</h1>
           <p className="text-muted-foreground">Intelligent Agent Matching Platform</p>
         </div>
 
-        {/* Role Selection */}
         <div className="bg-card rounded-lg p-6 border border-border mb-6">
           <div className="flex gap-3">
             <button
+              type="button"
               onClick={() => setRole('buyer')}
               className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                 role === 'buyer'
@@ -67,6 +99,7 @@ export default function AuthPage() {
               Buyer Agent
             </button>
             <button
+              type="button"
               onClick={() => setRole('seller')}
               className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
                 role === 'seller'
@@ -79,25 +112,65 @@ export default function AuthPage() {
           </div>
         </div>
 
-        {/* Auth Form */}
         <form onSubmit={handleAuth} className="bg-card rounded-lg p-6 border border-border">
           <div className="space-y-4">
-            {/* Sign Up Fields */}
             {mode === 'signup' && (
-              <div>
-                <label className="text-sm font-medium text-foreground block mb-2">Full Name</label>
-                <Input
-                  type="text"
-                  placeholder="Your name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                  className="bg-input border-border"
-                />
-              </div>
+              <>
+                <div>
+                  <label className="text-sm font-medium text-foreground block mb-2">Full Name</label>
+                  <Input
+                    type="text"
+                    placeholder="Your name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    required
+                    className="bg-input border-border"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-foreground block mb-2">
+                    Contact Number <span className="text-destructive">*</span>
+                  </label>
+                  <Input
+                    type="tel"
+                    inputMode="numeric"
+                    placeholder="e.g. 5551234567"
+                    value={contactNumber}
+                    onChange={(e) => setContactNumber(e.target.value.replace(/\D/g, ''))}
+                    required={mode === 'signup'}
+                    className="bg-input border-border"
+                  />
+                </div>
+                {role === 'seller' && (
+                  <div>
+                    <label className="text-sm font-medium text-foreground block mb-2">Gender</label>
+                    <div className="flex gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="gender"
+                          checked={gender === 1}
+                          onChange={() => setGender(1)}
+                          className="rounded-full border-border"
+                        />
+                        <span className="text-sm">Male</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="gender"
+                          checked={gender === 2}
+                          onChange={() => setGender(2)}
+                          className="rounded-full border-border"
+                        />
+                        <span className="text-sm">Female</span>
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
-            {/* Common Fields */}
             <div>
               <label className="text-sm font-medium text-foreground block mb-2">Email</label>
               <Input
@@ -122,7 +195,55 @@ export default function AuthPage() {
               />
             </div>
 
-            {/* Submit Button */}
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label className="text-sm font-medium text-foreground block mb-2">Country</label>
+                <select
+                  value={countryCode}
+                  onChange={(e) => setCountryCode(e.target.value)}
+                  className="w-full h-10 rounded-md border border-border bg-input px-3 text-sm"
+                >
+                  {COUNTRY_CODES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground block mb-2">Currency</label>
+                <select
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value)}
+                  className="w-full h-10 rounded-md border border-border bg-input px-3 text-sm"
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-foreground block mb-2">Language</label>
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value)}
+                  className="w-full h-10 rounded-md border border-border bg-input px-3 text-sm"
+                >
+                  {LANGUAGES.map((l) => (
+                    <option key={l} value={l}>
+                      {l}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {error && (
+              <p className="text-sm text-destructive bg-destructive/10 rounded-md p-2">{error}</p>
+            )}
+
             <Button
               type="submit"
               disabled={isLoading}
@@ -136,13 +257,15 @@ export default function AuthPage() {
             </Button>
           </div>
 
-          {/* Toggle Mode */}
           <div className="mt-6 text-center">
             <p className="text-sm text-muted-foreground">
               {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}
               <button
                 type="button"
-                onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}
+                onClick={() => {
+                  setMode(mode === 'signin' ? 'signup' : 'signin');
+                  setError('');
+                }}
                 className="text-primary hover:underline font-medium"
               >
                 {mode === 'signin' ? 'Sign up' : 'Sign in'}
@@ -151,10 +274,8 @@ export default function AuthPage() {
           </div>
         </form>
 
-        {/* Footer Note */}
         <div className="mt-6 text-center text-xs text-muted-foreground">
-          <p>Demo credentials:</p>
-          <p className="mt-1">buyer@example.com / seller@example.com</p>
+          <p>Uses Laravel API. Set NEXT_PUBLIC_API_URL in .env.local (see .env.example).</p>
         </div>
       </div>
     </div>
