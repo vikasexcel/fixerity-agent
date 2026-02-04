@@ -1,3 +1,6 @@
+'use client';
+
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   customerLogin,
   customerRegister,
@@ -61,6 +64,70 @@ function clearPersisted(): void {
 
 export function getAuthSession(): AuthSession {
   return currentSession;
+}
+
+/**
+ * Restores in-memory session from localStorage (client-only).
+ * Call once on app load so getAuthSession() returns the persisted user after refresh.
+ */
+export function hydrateSession(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const token = window.localStorage.getItem(TOKEN_KEY);
+    const userJson = window.localStorage.getItem(USER_KEY);
+    if (token && userJson) {
+      const user = JSON.parse(userJson) as AuthSession['user'];
+      if (user && typeof user.id === 'string' && (user.role === 'buyer' || user.role === 'seller')) {
+        currentSession = { user, isLoading: false };
+        return;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  currentSession = { user: null, isLoading: false };
+}
+
+export type AuthContextValue = {
+  session: AuthSession;
+  login: typeof login;
+  signup: typeof signup;
+  logout: () => void;
+};
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [session, setSession] = useState<AuthSession>({ user: null, isLoading: true });
+
+  useEffect(() => {
+    hydrateSession();
+    setSession(getAuthSession());
+  }, []);
+
+  const value: AuthContextValue = {
+    session,
+    login: async (...args) => {
+      await login(...args);
+      setSession(getAuthSession());
+    },
+    signup: async (...args) => {
+      await signup(...args);
+      setSession(getAuthSession());
+    },
+    logout: () => {
+      logout();
+      setSession(getAuthSession());
+    },
+  };
+
+  return React.createElement(AuthContext.Provider, { value }, children);
+}
+
+export function useAuth(): AuthContextValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  return ctx;
 }
 
 export function setAuthSession(session: AuthSession): void {

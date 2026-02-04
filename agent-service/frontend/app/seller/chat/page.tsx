@@ -7,7 +7,7 @@ import { ArrowLeft, Zap, Star, Send, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { matchSellerToJobs, sendSellerChatMessage } from '@/lib/agent-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import type { Deal } from '@/lib/dummy-data';
 
 type MatchPhase = 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
@@ -28,15 +28,16 @@ export default function SellerChatPage() {
   const [sending, setSending] = useState(false);
   const [deals, setDeals] = useState<Deal[]>([]);
 
-  const user = getAuthSession().user;
+  const { session } = useAuth();
+  const user = session.user;
   const token = getAccessToken();
 
   // Auth redirect
   useEffect(() => {
-    if (!user || user.role !== 'seller') {
+    if (!session.isLoading && (!user || user.role !== 'seller')) {
       router.push('/auth');
     }
-  }, [user, router]);
+  }, [session.isLoading, user, router]);
 
   // Run match when page loads
   useEffect(() => {

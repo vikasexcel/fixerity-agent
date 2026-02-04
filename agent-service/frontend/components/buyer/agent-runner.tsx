@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { Zap, Check, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { matchJobToProviders } from '@/lib/agent-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 interface AgentRunnerProps {
@@ -22,6 +22,7 @@ interface AgentStatus {
 }
 
 export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
+  const { session } = useAuth();
   const [status, setStatus] = useState<AgentStatus>({
     phase: 'initializing',
     agentsScanned: 0,
@@ -32,10 +33,10 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
   const [isRunning, setIsRunning] = useState(true);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning || !session.user) return;
 
     const runAgent = async () => {
-      const user = getAuthSession().user;
+      const user = session.user;
       const token = getAccessToken();
       if (!user || !token) {
         setStatus((prev) => ({
@@ -66,7 +67,7 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
     };
 
     runAgent();
-  }, [job.id]);
+  }, [job.id, session.user]);
 
   const phases: Record<AgentStatus['phase'], string> = {
     initializing: 'Initializing buyer agent...',

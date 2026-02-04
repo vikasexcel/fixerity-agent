@@ -7,7 +7,7 @@ import { ArrowLeft, Zap, Star, Send, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { matchJobToProviders, sendBuyerChatMessage } from '@/lib/agent-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs, updateJobStatus } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
@@ -36,7 +36,8 @@ export default function JobChatPage() {
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
 
-  const user = getAuthSession().user;
+  const { session } = useAuth();
+  const user = session.user;
   const token = getAccessToken();
 
   // Resolve job: sessionStorage first (from create), then listJobs
@@ -88,10 +89,10 @@ export default function JobChatPage() {
 
   // Auth redirect
   useEffect(() => {
-    if (!user || user.role !== 'buyer') {
+    if (!session.isLoading && (!user || user.role !== 'buyer')) {
       router.push('/auth');
     }
-  }, [user, router]);
+  }, [session.isLoading, user, router]);
 
   // Run match when job is resolved
   useEffect(() => {

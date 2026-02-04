@@ -8,7 +8,7 @@ import { DealDetailModal } from '@/components/seller/deal-detail-modal';
 import { Button } from '@/components/ui/button';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 import { Star, Check, X, Loader2 } from 'lucide-react';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { matchSellerToJobs, getSellerProfile } from '@/lib/agent-api';
 import { getProviderHome, type ProviderHomeResponse } from '@/lib/provider-api';
 
@@ -21,15 +21,16 @@ export default function SellerDashboard() {
   const [providerData, setProviderData] = useState<ProviderHomeResponse | null>(null);
   const [agentProfile, setAgentProfile] = useState<{ provider_name: string; average_rating: number; total_completed_order: number } | null>(null);
   const [deals, setDeals] = useState<Deal[]>([]);
-  const user = getAuthSession().user;
+  const { session, logout } = useAuth();
+  const user = session.user;
   const token = getAccessToken();
 
   useEffect(() => {
-    if (!user || user.role !== 'seller') {
+    if (!session.isLoading && (!user || user.role !== 'seller')) {
       router.push('/auth');
       return;
     }
-  }, [user, router]);
+  }, [session.isLoading, user, router]);
 
   // Fetch provider details: use agent profile (same source as match) for stats so total_completed_order matches
   useEffect(() => {
@@ -134,7 +135,7 @@ export default function SellerDashboard() {
               </Button>
               <button
                 onClick={() => {
-                  localStorage.clear();
+                  logout();
                   router.push('/auth');
                 }}
                 className="text-muted-foreground hover:text-foreground text-sm"

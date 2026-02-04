@@ -7,26 +7,31 @@ import { Job, Deal } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RoleAvatar } from '@/components/ui/role-avatar';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { matchJobToProviders } from '@/lib/agent-api';
+
+export type JobDetailModalMode = 'details-only' | 'with-recommendations';
 
 interface JobDetailModalProps {
   job: Job;
   deals?: Deal[];
+  mode?: JobDetailModalMode;
   onClose: () => void;
 }
 
-export function JobDetailModal({ job, deals: dealsProp = [], onClose }: JobDetailModalProps) {
-  const [matches, setMatches] = useState<Deal[] | null>(null);
-  const [matchesLoading, setMatchesLoading] = useState(true);
-  const [matchesError, setMatchesError] = useState<string | null>(null);
-  const user = getAuthSession().user;
+export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recommendations', onClose }: JobDetailModalProps) {
+  const { session } = useAuth();
+  const user = session.user;
   const token = getAccessToken();
+  const [matches, setMatches] = useState<Deal[] | null>(null);
+  const [matchesLoading, setMatchesLoading] = useState(mode === 'with-recommendations');
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+  const showRecommendations = mode === 'with-recommendations';
 
   useEffect(() => {
-    if (!job || !user || user.role !== 'buyer' || !token) {
+    if (!showRecommendations || !job || !user || user.role !== 'buyer' || !token) {
       setMatchesLoading(false);
-      setMatches(null);
+      if (!showRecommendations) setMatches(null);
       return;
     }
     setMatchesLoading(true);
@@ -42,7 +47,7 @@ export function JobDetailModal({ job, deals: dealsProp = [], onClose }: JobDetai
         setMatches([]);
         setMatchesLoading(false);
       });
-  }, [job?.id, user?.id, token]);
+  }, [showRecommendations, job?.id, user?.id, token]);
 
   const jobDeals = (matches !== null ? matches : dealsProp.filter((d) => d.jobId === job.id));
 
@@ -141,7 +146,8 @@ export function JobDetailModal({ job, deals: dealsProp = [], onClose }: JobDetai
             </div>
           </div>
 
-          {/* Matched Agents */}
+          {/* Matched Agents - only when mode is with-recommendations */}
+          {showRecommendations && (
           <div>
             <h3 className="text-lg font-semibold text-foreground mb-4">
               Recommended Agents ({matchesLoading ? '…' : jobDeals.length} Matches)
@@ -205,6 +211,7 @@ export function JobDetailModal({ job, deals: dealsProp = [], onClose }: JobDetai
             </div>
             )}
           </div>
+          )}
         </div>
 
         {/* Footer */}

@@ -3,27 +3,29 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { JobCard } from '@/components/buyer/job-card';
-import { JobDetailModal } from '@/components/buyer/job-detail-modal';
+import { JobDetailModal, type JobDetailModalMode } from '@/components/buyer/job-detail-modal';
 import { CreateJobModal } from '@/components/buyer/create-job-modal';
 import { Button } from '@/components/ui/button';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 export default function BuyerDashboard() {
   const router = useRouter();
+  const { session, logout } = useAuth();
+  const user = session.user;
   const [jobs, setJobs] = useState<Job[]>([]);
   const [deals, setDeals] = useState<Deal[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [detailModalMode, setDetailModalMode] = useState<JobDetailModalMode>('with-recommendations');
   const [filter, setFilter] = useState<'open' | 'matched' | 'completed' | 'all'>('open');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const user = getAuthSession().user;
 
   useEffect(() => {
-    if (!user || user.role !== 'buyer') {
+    if (!session.isLoading && (!user || user.role !== 'buyer')) {
       router.push('/auth');
     }
-  }, [user, router]);
+  }, [session.isLoading, user, router]);
 
   useEffect(() => {
     if (!user || user.role !== 'buyer') return;
@@ -32,17 +34,11 @@ export default function BuyerDashboard() {
     listJobs(Number(user.id), token)
       .then(setJobs)
       .catch(() => setJobs([]));
-  }, [user]);
+  }, [user?.id, user?.role]);
 
   const handleJobCreate = (newJob: Job) => {
     setJobs((prev) => [...prev, newJob]);
     setShowCreateModal(false);
-    try {
-      sessionStorage.setItem(`buyer_job_${newJob.id}`, JSON.stringify(newJob));
-    } catch {
-      // ignore
-    }
-    router.push(`/buyer/jobs/${encodeURIComponent(newJob.id)}/chat`);
   };
 
   const filteredJobs = filter === 'all' ? jobs : jobs.filter((j) => j.status === filter);
@@ -66,7 +62,7 @@ export default function BuyerDashboard() {
               </Button>
               <button
                 onClick={() => {
-                  localStorage.clear();
+                  logout();
                   router.push('/auth');
                 }}
                 className="text-muted-foreground hover:text-foreground text-sm"
@@ -129,7 +125,19 @@ export default function BuyerDashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {filteredJobs.length > 0 ? (
             filteredJobs.map((job) => (
-              <JobCard key={job.id} job={job} onView={setSelectedJob} />
+              <JobCard
+                key={job.id}
+                job={job}
+                onViewDetails={(j) => {
+                  setSelectedJob(j);
+                  setDetailModalMode('details-only');
+                }}
+                onStartAgent={(j) => router.push(`/buyer/jobs/${encodeURIComponent(j.id)}/chat`)}
+                onRecommendProviders={(j) => {
+                  setSelectedJob(j);
+                  setDetailModalMode('with-recommendations');
+                }}
+              />
             ))
           ) : (
             <div className="lg:col-span-2 text-center py-12">
@@ -147,10 +155,11 @@ export default function BuyerDashboard() {
 
       {/* Job Detail Modal */}
       {selectedJob && (
-        <JobDetailModal 
-          job={selectedJob} 
-          deals={deals.filter(d => d.jobId === selectedJob.id)} 
-          onClose={() => setSelectedJob(null)} 
+        <JobDetailModal
+          job={selectedJob}
+          deals={deals.filter(d => d.jobId === selectedJob.id)}
+          mode={detailModalMode}
+          onClose={() => setSelectedJob(null)}
         />
       )}
 

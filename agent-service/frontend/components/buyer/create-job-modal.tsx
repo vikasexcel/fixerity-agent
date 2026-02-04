@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import type { Job, Priority } from '@/lib/dummy-data';
 import { createJob } from '@/lib/jobs-api';
 import { fetchServiceCategories, fetchSubCategories, fetchAddressList, type ServiceCategory, type AddressItem } from '@/lib/services-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 
 interface CreateJobModalProps {
   onClose: () => void;
@@ -16,6 +16,7 @@ interface CreateJobModalProps {
 }
 
 export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
+  const { session } = useAuth();
   const [step, setStep] = useState<'basic' | 'budget' | 'priorities'>('basic');
   const [formData, setFormData] = useState({
     title: '',
@@ -49,7 +50,7 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
   ]);
 
   useEffect(() => {
-    const user = getAuthSession().user;
+    const user = session.user;
     const token = getAccessToken();
     if (!user || !token || user.role !== 'buyer') return;
     const userId = Number(user.id);
@@ -67,10 +68,10 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
       }
     };
     load();
-  }, []);
+  }, [session.user]);
 
   useEffect(() => {
-    const user = getAuthSession().user;
+    const user = session.user;
     const token = getAccessToken();
     const sid = formData.serviceCategoryId ? Number(formData.serviceCategoryId) : 0;
     if (!user || !token || !sid) {
@@ -78,7 +79,7 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
       return;
     }
     fetchSubCategories(Number(user.id), token, sid).then(setSubCategories).catch(() => setSubCategories([]));
-  }, [formData.serviceCategoryId]);
+  }, [session.user, formData.serviceCategoryId]);
 
   const handleBasicSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -118,7 +119,7 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
   const handleCreateJob = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    const user = getAuthSession().user;
+    const user = session.user;
     const token = getAccessToken();
     if (!user || !token) {
       setError('Please sign in to create a job.');
@@ -258,7 +259,14 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
           {step === 'budget' && (
             <form onSubmit={handleBudgetSubmit} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-foreground mb-2">Service Category</label>
+                <label className="block text-sm font-medium text-foreground mb-2">
+                  Service Category
+                  {formData.serviceCategoryId && (
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">
+                      (Category #{formData.serviceCategoryId})
+                    </span>
+                  )}
+                </label>
                 <select
                   value={formData.serviceCategoryId}
                   onChange={(e) => setFormData({ ...formData, serviceCategoryId: e.target.value, subCategoryId: '' })}
@@ -267,14 +275,21 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
                   <option value="">Select service category</option>
                   {services.map((s) => (
                     <option key={s.service_category_id} value={s.service_category_id}>
-                      {s.service_category_name}
+                      {s.service_category_name} (Category #{s.service_category_id})
                     </option>
                   ))}
                 </select>
               </div>
               {formData.serviceCategoryId && subCategories.length > 0 && (
                 <div>
-                  <label className="block text-sm font-medium text-foreground mb-2">Sub Category</label>
+                  <label className="block text-sm font-medium text-foreground mb-2">
+                    Sub Category
+                    {formData.subCategoryId && (
+                      <span className="ml-2 text-xs font-normal text-muted-foreground">
+                        (Sub category #{formData.subCategoryId})
+                      </span>
+                    )}
+                  </label>
                   <select
                     value={formData.subCategoryId}
                     onChange={(e) => setFormData({ ...formData, subCategoryId: e.target.value })}
@@ -283,7 +298,7 @@ export function CreateJobModal({ onClose, onJobCreate }: CreateJobModalProps) {
                     <option value="">Select sub category</option>
                     {subCategories.map((s) => (
                       <option key={s.id} value={s.id}>
-                        {s.name}
+                        {s.name} (Sub category #{s.id})
                       </option>
                     ))}
                   </select>
