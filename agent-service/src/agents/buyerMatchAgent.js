@@ -326,9 +326,7 @@ For follow-up questions (e.g. "Tell me the provider name", "Why is X ranked firs
   const finalReply = getFinalReply(result.messages ?? []);
   try {
     await redisChat.addTurn(sessionId, new HumanMessage(userMessageContent), new AIMessage(finalReply || 'No reply.'));
-  } catch (_) {
-    // Non-fatal: deals and reply still returned
-  }
+  } catch (_) {}
 
   let deals = extractDealsFromResult(result, job);
   if (deals.length === 0) {
@@ -344,9 +342,7 @@ For follow-up questions (e.g. "Tell me the provider name", "Why is X ranked firs
   if (deals.length > 0) {
     try {
       await redisChat.setMatchResult(sessionId, deals);
-    } catch (_) {
-      // Non-fatal
-    }
+    } catch (_) {}
   }
 
   const out = { deals };

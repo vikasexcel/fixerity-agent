@@ -106,17 +106,12 @@ function deserializeMessage(raw) {
  */
 export async function getHistory(sessionId) {
   const connected = await ensureConnected();
-  if (!connected) {
-    console.log(`${LOG_PREFIX} load sessionId=${sessionId} skipped (not connected)`);
-    return [];
-  }
+  if (!connected) return [];
   const client = getClient();
   const key = redisKey(sessionId);
   try {
     const rawList = await client.lRange(key, 0, -1);
-    const messages = rawList.map(deserializeMessage).filter(Boolean);
-    console.log(`${LOG_PREFIX} load sessionId=${sessionId} count=${messages.length}`);
-    return messages;
+    return rawList.map(deserializeMessage).filter(Boolean);
   } catch (err) {
     console.error(`${LOG_PREFIX} load sessionId=${sessionId} failed:`, err.message);
     return [];
@@ -128,20 +123,16 @@ export async function getHistory(sessionId) {
  * @param {string} sessionId
  * @param {HumanMessage} humanMessage
  * @param {AIMessage} aiMessage
- * @returns {Promise<void>} Resolves when done; logs and ignores errors so app keeps running
+ * @returns {Promise<void>}
  */
 export async function addTurn(sessionId, humanMessage, aiMessage) {
   const connected = await ensureConnected();
-  if (!connected) {
-    console.log(`${LOG_PREFIX} save sessionId=${sessionId} skipped (not connected)`);
-    return;
-  }
+  if (!connected) return;
   const client = getClient();
   const key = redisKey(sessionId);
   try {
     await client.rPush(key, serializeMessage(humanMessage), serializeMessage(aiMessage));
     await client.expire(key, SESSION_TTL_SECONDS);
-    console.log(`${LOG_PREFIX} save sessionId=${sessionId} turn added`);
   } catch (err) {
     console.error(`${LOG_PREFIX} save sessionId=${sessionId} failed:`, err.message);
   }
@@ -160,7 +151,6 @@ export async function setMatchResult(sessionId, deals) {
   const key = matchResultKey(sessionId);
   try {
     await client.set(key, JSON.stringify(deals), { EX: SESSION_TTL_SECONDS });
-    console.log(`${LOG_PREFIX} match result saved sessionId=${sessionId} deals=${deals.length}`);
   } catch (err) {
     console.error(`${LOG_PREFIX} setMatchResult sessionId=${sessionId} failed:`, err.message);
   }

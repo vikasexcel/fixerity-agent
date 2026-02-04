@@ -22,9 +22,8 @@ app.get('/', (req, res) => {
 
 /**
  * POST /agent/buyer/match
- * Body: { user_id: number, access_token: string, job: { id, title, budget, priorities, service_category_id?, ... }, message?: string }
- * - message: optional follow-up question (conversation stored in Redis per user+job).
- * Returns: { deals: Array, reply?: string } (reply present when message was sent or when agent returned text).
+ * Body: { user_id, access_token, job: { id, title, budget, priorities, service_category_id?, ... }, message?: string }
+ * Returns: { deals: Array, reply?: string }
  */
 app.post('/agent/buyer/match', async (req, res) => {
   const { user_id: userId, access_token: accessToken, job, message } = req.body ?? {};

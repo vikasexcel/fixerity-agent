@@ -71,13 +71,10 @@ export async function runSellerAgent(providerId, message, accessToken, opts = {}
   }
 
   if (historyMessages.length === 0 && Array.isArray(conversationHistory) && conversationHistory.length > 0) {
-    console.log('[SellerAgent] Redis unavailable, using request conversation_history');
     historyMessages = conversationHistory.map((m) =>
       m.role === 'user' ? new HumanMessage(m.content) : new AIMessage(m.content)
     );
   }
-
-  console.log(`[SellerAgent] sessionId=${sessionId} loaded ${historyMessages.length} messages, invoking agent`);
 
   const tools = createSellerTools({ providerId, accessToken });
   const llm = new ChatOpenAI({
@@ -100,10 +97,7 @@ export async function runSellerAgent(providerId, message, accessToken, opts = {}
 
   try {
     await redisChat.addTurn(sessionId, new HumanMessage(message), new AIMessage(reply));
-    console.log(`[SellerAgent] sessionId=${sessionId} reply length=${reply.length} turn persisted`);
-  } catch (_) {
-    // Non-fatal: reply still returned
-  }
+  } catch (_) {}
 
   return { reply: reply || 'I couldn\'t generate a reply. Please try again.' };
 }

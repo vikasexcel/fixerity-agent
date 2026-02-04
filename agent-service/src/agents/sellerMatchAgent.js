@@ -22,7 +22,6 @@ async function matchWithLLM(jobs, providerServiceDataArray, providerId, provider
     return [];
   }
 
-  // Create a map of service_category_id to provider service data for quick lookup
   const providerServiceDataMap = {};
   providerServiceDataArray.forEach((data) => {
     if (data && data.service_cat_id) {
@@ -30,14 +29,12 @@ async function matchWithLLM(jobs, providerServiceDataArray, providerId, provider
     }
   });
 
-  // Prepare data for LLM
   const llm = new ChatOpenAI({
     modelName: 'gpt-4o-mini',
     temperature: 0.3,
     apiKey: OPENAI_API_KEY,
   });
 
-  // Create a matching prompt for the LLM
   const systemPrompt = `You are an expert job matching system. Your task is to evaluate jobs against provider service data and determine match quality.
 
 For each job, consider:
@@ -56,14 +53,11 @@ Return a JSON array with match results. Each result should have:
 
 Be thorough but concise in your evaluation.`;
 
-  // Process jobs in batches to avoid token limits
   const batchSize = 10;
   const allMatches = [];
 
   for (let i = 0; i < jobs.length; i += batchSize) {
     const batch = jobs.slice(i, i + batchSize);
-    
-    // Prepare job data with service category mapping for LLM
     const jobsWithServiceData = batch.map((job) => {
       const serviceData = providerServiceDataMap[job.service_category_id] || providerServiceDataArray[0];
       return {
@@ -109,11 +103,8 @@ Make sure the JSON is valid and complete.`;
 
       let matchResults = [];
       const content = response.content || '';
-      
-      // Try to extract JSON from the response - look for array pattern
       let jsonMatch = content.match(/\[[\s\S]*\]/);
       if (!jsonMatch) {
-        // Try to find JSON object with matches array
         const objMatch = content.match(/\{[\s\S]*\}/);
         if (objMatch) {
           try {
@@ -121,9 +112,7 @@ Make sure the JSON is valid and complete.`;
             if (parsed.matches && Array.isArray(parsed.matches)) {
               matchResults = parsed.matches;
             }
-          } catch (e) {
-            // Continue to try array pattern
-          }
+          } catch (e) {}
         }
       }
       
@@ -133,26 +122,16 @@ Make sure the JSON is valid and complete.`;
           if (!Array.isArray(matchResults)) {
             matchResults = [];
           }
-        } catch (e) {
-          console.warn('[SellerMatchAgent] Failed to parse LLM response as JSON:', e.message);
-          console.warn('[SellerMatchAgent] Response content:', content.substring(0, 500));
-        }
+        } catch (e) {}
       }
 
-      // Process each job in the batch
       batch.forEach((job, idx) => {
         const jobId = typeof job.id === 'string' ? job.id.replace('job_', '') : job.id;
-        
-        // Find matching result by jobId
         let matchResult = matchResults.find((r) => String(r.jobId) === String(jobId));
-        
         if (!matchResult && matchResults[idx]) {
-          // Fallback: use index-based matching
           matchResult = matchResults[idx];
         }
-        
         if (!matchResult) {
-          // Fallback: create a basic match result with score based on service category match
           const serviceData = providerServiceDataMap[job.service_category_id] || providerServiceDataArray[0];
           matchResult = {
             jobId: jobId,
@@ -164,7 +143,6 @@ Make sure the JSON is valid and complete.`;
           };
         }
 
-        // Get provider service data for this job's category
         const serviceData = providerServiceDataMap[job.service_category_id] || providerServiceDataArray[0];
         const providerRating = parseFloat(serviceData?.average_rating) || 0;
         const jobsCompleted = parseInt(serviceData?.total_completed_order, 10) || 0;
@@ -209,7 +187,6 @@ Make sure the JSON is valid and complete.`;
       });
     } catch (err) {
       console.error(`[SellerMatchAgent] Error in LLM matching for batch ${i}-${i + batch.length}:`, err.message);
-      // Create fallback matches for this batch
       batch.forEach((job, idx) => {
         const jobId = typeof job.id === 'string' ? job.id.replace('job_', '') : job.id;
         const serviceData = providerServiceDataMap[job.service_category_id] || providerServiceDataArray[0];
@@ -255,7 +232,6 @@ Make sure the JSON is valid and complete.`;
     }
   }
 
-  // Sort by match score and return top 5
   return allMatches
     .sort((a, b) => b.matchScore - a.matchScore)
     .slice(0, 5);
@@ -270,7 +246,6 @@ Make sure the JSON is valid and complete.`;
  */
 export async function getProviderServiceData(providerId, accessToken, serviceCategoryId) {
   if (!serviceCategoryId || Number(serviceCategoryId) <= 0) {
-    console.warn('[SellerMatchAgent] Invalid service_category_id:', serviceCategoryId);
     return null;
   }
 
@@ -281,17 +256,12 @@ export async function getProviderServiceData(providerId, accessToken, serviceCat
       access_token: accessToken,
       service_category_id: Number(serviceCategoryId),
     };
-
-    console.log(`[SellerMatchAgent] Calling provider-service-data API for service_category_id: ${serviceCategoryId}`);
     const data = await post(path, payload, { providerId, accessToken });
 
     if (data.status === 1 && data.data) {
-      console.log(`[SellerMatchAgent] Successfully fetched provider service data for service_category_id: ${serviceCategoryId}`);
       return data.data;
-    } else {
-      console.warn(`[SellerMatchAgent] Provider service data API returned status ${data.status} for service_category_id ${serviceCategoryId}:`, data.message);
-      return null;
     }
+    return null;
   } catch (err) {
     console.error(`[SellerMatchAgent] Error getting provider service data for service_category_id ${serviceCategoryId}:`, err.message);
     return null;
@@ -311,32 +281,17 @@ export async function getProviderServiceList(providerId, accessToken) {
       provider_id: providerId,
       access_token: accessToken,
     };
-
-    console.log('[SellerMatchAgent] Calling provider-service-list API with:', { path, providerId });
     const data = await post(path, payload, { providerId, accessToken });
 
-    console.log('[SellerMatchAgent] Provider-service-list API response:', {
-      status: data.status,
-      serviceCount: data.provider_service_list?.length || 0,
-      message: data.message,
-    });
-
     if (data.status !== 1 || !data.provider_service_list || !Array.isArray(data.provider_service_list)) {
-      console.warn('[SellerMatchAgent] No provider services found or invalid response');
       return [];
     }
 
-    // Extract service_category_id values from provider_service_list
     const serviceCategoryIds = data.provider_service_list
       .map((service) => service.service_category_id)
       .filter((id) => id != null && Number(id) > 0)
       .map((id) => Number(id));
-
-    // Remove duplicates
-    const uniqueCategoryIds = [...new Set(serviceCategoryIds)];
-
-    console.log('[SellerMatchAgent] Extracted service category IDs:', uniqueCategoryIds);
-    return uniqueCategoryIds;
+    return [...new Set(serviceCategoryIds)];
   } catch (err) {
     console.error('[SellerMatchAgent] Error getting provider service list:', err.message);
     return [];
@@ -355,38 +310,25 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
   const {
     service_category_id,
     sub_category_id,
-    agentConfig,
   } = options;
 
-  // Step 1: Get provider service list to find actual service categories
-  console.log('[SellerMatchAgent] Step 1: Getting provider service list...');
   let serviceCategoryIds = await getProviderServiceList(providerId, accessToken);
 
   if (!serviceCategoryIds || serviceCategoryIds.length === 0) {
-    console.warn('[SellerMatchAgent] No service categories found for provider. Returning empty matches.');
     return { matches: [] };
   }
 
-  // If a specific service_category_id is provided, filter to only that category
   if (service_category_id && Number(service_category_id) > 0) {
     const requestedCategoryId = Number(service_category_id);
     if (serviceCategoryIds.includes(requestedCategoryId)) {
       serviceCategoryIds = [requestedCategoryId];
-      console.log('[SellerMatchAgent] Filtered to specific service category:', requestedCategoryId);
     } else {
-      console.warn(`[SellerMatchAgent] Requested service_category_id ${requestedCategoryId} not found in provider's services. Available:`, serviceCategoryIds);
       return { matches: [] };
     }
   }
 
-  console.log('[SellerMatchAgent] Found service categories:', serviceCategoryIds);
-
-  // Step 2: Fetch jobs and provider service data in parallel for each service category
-  console.log('[SellerMatchAgent] Step 2: Fetching jobs and provider service data in parallel for', serviceCategoryIds.length, 'service categories...');
-  
   const categoryDataPromises = serviceCategoryIds.map(async (categoryId) => {
     try {
-      // Fetch jobs for this category
       const path = 'customer/on-demand/job/list';
       const jobPayload = {
         provider_id: providerId,
@@ -394,15 +336,8 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
         service_category_id: categoryId,
         ...(sub_category_id && { sub_category_id: Number(sub_category_id) }),
       };
-
-      console.log(`[SellerMatchAgent] Fetching jobs for service_category_id: ${categoryId}`);
       const jobData = await post(path, jobPayload, { providerId, accessToken });
-
       const jobs = (jobData.status === 1 && Array.isArray(jobData.jobs)) ? jobData.jobs : [];
-      console.log(`[SellerMatchAgent] Found ${jobs.length} jobs for service_category_id: ${categoryId}`);
-
-      // Fetch provider service data for this category
-      console.log(`[SellerMatchAgent] Fetching provider service data for service_category_id: ${categoryId}`);
       const providerServiceData = await getProviderServiceData(providerId, accessToken, categoryId);
 
       return {
@@ -420,10 +355,7 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
     }
   });
 
-  // Wait for all requests to complete
   const categoryResults = await Promise.all(categoryDataPromises);
-  
-  // Step 3: Combine all jobs and provider service data
   const allJobs = [];
   const providerServiceDataArray = [];
   let providerName = 'Provider';
@@ -437,27 +369,12 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
     }
   });
 
-  console.log('[SellerMatchAgent] Step 3: Combined', allJobs.length, 'jobs from all service categories');
-  console.log('[SellerMatchAgent] Found provider service data for', providerServiceDataArray.length, 'service categories');
-
-  if (allJobs.length === 0) {
-    console.log('[SellerMatchAgent] No jobs found for any service category');
+  if (allJobs.length === 0 || providerServiceDataArray.length === 0) {
     return { matches: [] };
   }
 
-  if (providerServiceDataArray.length === 0) {
-    console.warn('[SellerMatchAgent] No provider service data found. Cannot perform matching.');
-    return { matches: [] };
-  }
-
-  // Provider name is not critical for matching functionality
-  // We'll use 'Provider' as default since provider-service-data API doesn't return provider name
   providerName = 'Provider';
-
-  // Step 4: Use LLM to match jobs with provider service data
-  console.log('[SellerMatchAgent] Step 4: Using LLM to match', allJobs.length, 'jobs with provider service data...');
   const matches = await matchWithLLM(allJobs, providerServiceDataArray, providerId, providerName);
-  console.log('[SellerMatchAgent] Generated', matches.length, 'matches');
 
   const matchesSummary = `Matched ${matches.length} jobs for seller ${providerId}`;
   await mem0.addForProvider(providerId, [

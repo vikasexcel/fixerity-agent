@@ -29,14 +29,13 @@ function evaluateJobMatch(job, providerProfile) {
   const jobPriorities = job.priorities || [];
   const maxBudget = job.budget?.max ?? 999999;
 
-  // Extract provider data
   const providerRating = parseFloat(providerProfile.average_rating) || 0;
   const jobsCompleted = parseInt(providerProfile.total_completed_order, 10) || 0;
   const hourlyRate = providerProfile.package_list?.[0]?.package_price
     ? parseFloat(providerProfile.package_list[0].package_price)
     : 0;
   const hasReferences = (parseInt(providerProfile.num_of_rating, 10) || 0) > 0;
-  const licensed = providerProfile.licensed !== false; // Assume licensed unless explicitly false
+  const licensed = providerProfile.licensed !== false;
 
   for (const priority of jobPriorities) {
     let matched = false;
@@ -44,7 +43,7 @@ function evaluateJobMatch(job, providerProfile) {
 
     switch (priority.type) {
       case 'price': {
-        const providerMonthlyRate = (hourlyRate || 0) * 160; // ~160 hours/month
+        const providerMonthlyRate = (hourlyRate || 0) * 160;
         matched = providerMonthlyRate <= maxBudget;
         reason = matched
           ? `Price within budget ($${maxBudget})`
@@ -53,7 +52,7 @@ function evaluateJobMatch(job, providerProfile) {
       }
       case 'startDate':
       case 'endDate':
-        matched = true; // Assume available for dates (can be enhanced with availability check)
+        matched = true;
         reason = `Available for dates`;
         break;
       case 'rating': {

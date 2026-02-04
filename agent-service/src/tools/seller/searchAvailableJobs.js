@@ -35,9 +35,6 @@ export function createSearchAvailableJobsTool(laravelClient, providerId, accessT
   return tool(
     async (input) => {
       try {
-        // Note: Current Laravel endpoint requires user_id, but we're searching as provider
-        // This may require backend changes. For now, we'll attempt the call.
-        // Backend should ideally accept provider_id and return open jobs matching category/location
         const payload = {
           status: input.status || 'open',
           ...(input.service_category_id && { service_category_id: input.service_category_id }),
@@ -45,8 +42,6 @@ export function createSearchAvailableJobsTool(laravelClient, providerId, accessT
           ...(input.lat != null && { lat: input.lat }),
           ...(input.long != null && { long: input.long }),
         };
-        
-        // Laravel endpoint requires user_id, so we pass providerId as userId
         const data = await laravelClient(path, payload, { userId: providerId, providerId, accessToken });
         return JSON.stringify(data);
       } catch (err) {

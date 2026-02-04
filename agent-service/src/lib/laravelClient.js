@@ -16,7 +16,6 @@ import { LARAVEL_API_BASE_URL } from '../config/index.js';
  */
 export async function post(path, body, auth = {}) {
   const url = `${LARAVEL_API_BASE_URL}/${path.replace(/^\//, '')}`;
-  // When authenticating as provider, never send user_id so Laravel validates provider_id only
   const useProviderAuth = auth.providerId != null;
   const payload = {
     ...body,
@@ -38,7 +37,6 @@ export async function post(path, body, auth = {}) {
     throw new Error(message);
   }
 
-  // status 0 = validation/general error; status 5 = user/provider not found or auth failed
   if ((data?.status === 0 || data?.status === 5) && data?.message) {
     throw new Error(data.message);
   }

@@ -28,18 +28,11 @@ export function createGetJobDetailsTool(laravelClient, providerId, accessToken) 
   return tool(
     async (input) => {
       try {
-        // Note: Current endpoint may not support job_id filtering for providers
-        // Backend should ideally have /api/on-demand/job/details?job_id=X endpoint
-        // For now, attempt to get job details - may need backend changes
         const payload = {
           job_id: input.job_id,
-          status: 'all', // Search all statuses to find the job
+          status: 'all',
         };
-        
-        // Laravel endpoint requires user_id, so we pass providerId as userId
         const data = await laravelClient(path, payload, { userId: providerId, providerId, accessToken });
-        
-        // If jobs array exists, find the specific job
         if (data.jobs && Array.isArray(data.jobs)) {
           const job = data.jobs.find(j => {
             const jobIdStr = String(j.id || '').replace('job_', '');
