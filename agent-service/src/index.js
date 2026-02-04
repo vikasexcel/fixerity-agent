@@ -138,7 +138,7 @@ app.post('/agent/seller/chat', async (req, res) => {
  * Returns: { deals: Array }
  */
 app.post('/agent/seller/match', async (req, res) => {
-  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config } = req.body ?? {};
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config, message } = req.body ?? {};
 
   if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -152,10 +152,11 @@ app.post('/agent/seller/match', async (req, res) => {
   if (agent_config != null && typeof agent_config === 'object') {
     options.agentConfig = agent_config;
   }
+  if (typeof message === 'string' && message.trim()) options.userMessage = message.trim();
 
   try {
-    const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);
-    return res.json({ deals: matches });
+    const result = await runSellerMatchAgent(providerId, accessToken.trim(), options);
+    return res.json({ deals: result.matches, ...(result.reply && { reply: result.reply }) });
   } catch (err) {
     const message = err?.message ?? 'Match request failed';
     if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
@@ -232,7 +233,7 @@ app.post('/agent/seller/profile', async (req, res) => {
  */
 app.post('/agent/seller/scan', async (req, res) => {
   // Reuse the match endpoint logic
-  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config } = req.body ?? {};
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config, message } = req.body ?? {};
 
   if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -246,10 +247,11 @@ app.post('/agent/seller/scan', async (req, res) => {
   if (agent_config != null && typeof agent_config === 'object') {
     options.agentConfig = agent_config;
   }
+  if (typeof message === 'string' && message.trim()) options.userMessage = message.trim();
 
   try {
-    const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);
-    return res.json({ deals: matches });
+    const result = await runSellerMatchAgent(providerId, accessToken.trim(), options);
+    return res.json({ deals: result.matches, ...(result.reply && { reply: result.reply }) });
   } catch (err) {
     const message = err?.message ?? 'Scan request failed';
     if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {

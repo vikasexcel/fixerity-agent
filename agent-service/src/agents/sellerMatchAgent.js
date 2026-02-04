@@ -1,13 +1,14 @@
 /**
  * Seller Match Agent: LangGraph React agent for seller-to-job matching.
- * Uses Mem0 for context, searchAvailableJobs tool, and server-side evaluation
+ * Uses searchAvailableJobs tool and server-side evaluation
  * to return ranked job matches for a seller.
  */
 
 import { ChatOpenAI } from '@langchain/openai';
+import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
 import { post } from '../lib/laravelClient.js';
-import * as mem0 from '../memory/mem0Client.js';
 import { OPENAI_API_KEY } from '../config/index.js';
+import * as redisChat from '../memory/redisChatStore.js';
 
 /**
  * Match jobs with provider service data using LLM.
@@ -32,7 +33,7 @@ async function matchWithLLM(jobs, providerServiceDataArray, providerId, provider
   const llm = new ChatOpenAI({
     modelName: 'gpt-4o-mini',
     temperature: 0.3,
-    apiKey: OPENAI_API_KEY,
+    apiKey: process.env.OPENAI_API_KEY,
   });
 
   const systemPrompt = `You are an expert job matching system. Your task is to evaluate jobs against provider service data and determine match quality.
@@ -300,17 +301,88 @@ export async function getProviderServiceList(providerId, accessToken) {
 
 
 /**
+ * Answer a follow-up question about stored matches using LLM.
+ * @param {Array} matches - Stored match results
+ * @param {import('@langchain/core/messages').BaseMessage[]} historyMessages
+ * @param {string} userMessage - Follow-up question
+ * @returns {Promise<string>}
+ */
+async function answerFollowUp(matches, historyMessages, userMessage) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+  const systemPrompt = `You are a seller matching assistant. Answer the user's question about the matched jobs below. Use only the provided match data—do not search or fetch new data. Be concise.`;
+  const contextPrompt = `Current matched jobs for this provider:\n${JSON.stringify(matches, null, 2)}\n\nUser question: ${userMessage}`;
+  const historyAsMessages = historyMessages.map((m) => {
+    const content = typeof m.content === 'string' ? m.content : String(m.content ?? '');
+    return m.constructor.name === 'HumanMessage' ? new HumanMessage(content) : new AIMessage(content);
+  });
+  const messages = [
+    new SystemMessage(systemPrompt),
+    ...historyAsMessages,
+    new HumanMessage(contextPrompt),
+  ];
+  const response = await llm.invoke(messages);
+  return typeof response.content === 'string' ? response.content : String(response.content ?? '');
+}
+
+/**
  * Run the Seller Match Agent.
+ * Conversation is stored in Redis per provider so the user can ask follow-up questions.
  * @param {number|string} providerId
  * @param {string} accessToken
- * @param {Object} [options] - Optional: service_category_id, sub_category_id, agentConfig
- * @returns {Promise<{ matches: Array }>}
+ * @param {Object} [options] - Optional: service_category_id, sub_category_id, agentConfig, userMessage (follow-up)
+ * @returns {Promise<{ matches: Array, reply?: string }>}
  */
 export async function runSellerMatchAgent(providerId, accessToken, options = {}) {
   const {
     service_category_id,
     sub_category_id,
+    userMessage: optsUserMessage,
   } = options;
+
+  const sessionId = redisChat.sellerSessionId(providerId);
+  let historyMessages = [];
+  try {
+    historyMessages = await redisChat.getHistory(sessionId);
+  } catch (_) {
+    historyMessages = [];
+  }
+
+  const isFollowUp = typeof optsUserMessage === 'string' && optsUserMessage.trim().length > 0;
+  let storedMatches = [];
+  if (isFollowUp) {
+    try {
+      storedMatches = await redisChat.getMatchResult(sessionId);
+    } catch (_) {
+      storedMatches = [];
+    }
+    if (storedMatches.length === 0) {
+      const noMatchReply = "I don't have any stored job matches for you. Please run a new job search first, then you can ask follow-up questions about the results.";
+      try {
+        await redisChat.addTurn(
+          sessionId,
+          new HumanMessage(optsUserMessage.trim()),
+          new AIMessage(noMatchReply)
+        );
+      } catch (_) {}
+      return { matches: [], reply: noMatchReply };
+    }
+  }
+
+  if (isFollowUp && storedMatches.length > 0) {
+    const reply = await answerFollowUp(storedMatches, historyMessages, optsUserMessage.trim());
+    try {
+      await redisChat.addTurn(
+        sessionId,
+        new HumanMessage(optsUserMessage.trim()),
+        new AIMessage(reply || 'No reply.')
+      );
+    } catch (_) {}
+    return { matches: storedMatches, reply };
+  }
 
   let serviceCategoryIds = await getProviderServiceList(providerId, accessToken);
 
@@ -376,11 +448,25 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
   providerName = 'Provider';
   const matches = await matchWithLLM(allJobs, providerServiceDataArray, providerId, providerName);
 
-  const matchesSummary = `Matched ${matches.length} jobs for seller ${providerId}`;
-  await mem0.addForProvider(providerId, [
-    { role: 'user', content: `Matching jobs for provider ${providerId} with ${providerServiceDataArray.length} service categories` },
-    { role: 'assistant', content: matchesSummary },
-  ]);
+  const defaultUserMessage = `Find matching jobs for my provider services. Categories: ${serviceCategoryIds.join(', ')}.`;
+  const defaultReply = matches.length > 0
+    ? `Found ${matches.length} matching job(s). Top match: ${matches[0]?.job?.title ?? 'N/A'} (score: ${matches[0]?.matchScore ?? 0}).`
+    : 'No matching jobs found.';
+  try {
+    await redisChat.addTurn(
+      sessionId,
+      new HumanMessage(defaultUserMessage),
+      new AIMessage(defaultReply)
+    );
+  } catch (_) {}
 
-  return { matches };
+  if (matches.length > 0) {
+    try {
+      await redisChat.setMatchResult(sessionId, matches);
+    } catch (_) {}
+  }
+
+  const out = { matches };
+  if (defaultReply) out.reply = defaultReply;
+  return out;
 }
