@@ -63,11 +63,20 @@ function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLo
                   <Building2 size={14} className="text-accent" />
                 )}
               </span>
-              <span className="text-foreground">
-                <strong className="text-foreground">{step.role === 'buyer' ? 'You' : 'Provider'}</strong>
-                {' '}{step.action === 'accept' ? 'accepted' : 'offered'} ${step.price}, {step.completionDays} day{step.completionDays !== 1 ? 's' : ''}
-                {step.action === 'accept' && <span className="text-accent ml-1">· Deal</span>}
-              </span>
+              <div className="min-w-0 flex-1 text-foreground">
+                <span>
+                  <strong className="text-foreground">{step.role === 'buyer' ? 'You' : 'Provider'}</strong>
+                  {step.action === 'accept' && (
+                    <span className="text-accent ml-1">· Deal</span>
+                  )}
+                  {step.price != null && step.completionDays != null && (
+                    <span> · ${step.price}, {step.completionDays} day{step.completionDays !== 1 ? 's' : ''}</span>
+                  )}
+                </span>
+                {step.message && (
+                  <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">{step.message}</p>
+                )}
+              </div>
             </div>
           ))}
         </div>

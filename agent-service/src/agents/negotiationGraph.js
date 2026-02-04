@@ -14,15 +14,17 @@ const NegotiationState = Annotation.Root({
   round: Annotation(),
   maxRounds: Annotation(),
   deadline_ts: Annotation(),
-  lastOffer: Annotation(),
-  offerHistory: Annotation({
-    reducer: (a, b) => (Array.isArray(b) ? a.concat(b) : a.concat([b])),
+
+  // 🧠 LLM memory
+  conversation: Annotation({
+    reducer: (a, b) => a.concat(b),
     default: () => [],
   }),
-  status: Annotation(),
-  negotiatedPrice: Annotation(),
-  negotiatedCompletionDays: Annotation(),
+
+  status: Annotation(), // negotiating | accepted | timeout
+  finalDeal: Annotation(), // { price, days }
 });
+
 
 function getInitialState(input) {
   return {
@@ -30,13 +32,11 @@ function getInitialState(input) {
     providerId: input.providerId,
     providerServiceData: input.providerServiceData ?? {},
     round: 0,
-    maxRounds: input.maxRounds ?? 5,
-    deadline_ts: input.deadline_ts ?? Date.now() + 60_000,
-    lastOffer: null,
-    offerHistory: [],
-    status: 'negotiating',
-    negotiatedPrice: null,
-    negotiatedCompletionDays: null,
+    maxRounds: input.maxRounds ?? 8,
+    deadline_ts: input.deadline_ts ?? Date.now() + 120_000,
+    conversation: [],
+    status: "negotiating",
+    finalDeal: null,
   };
 }
 
@@ -66,151 +66,140 @@ function getCompletionDaysFromOffer(offer) {
   if (offer && typeof offer.completionDays === 'number') return offer.completionDays;
   return null;
 }
+// 🧠 Converts conversation memory into readable dialogue for the LLM
+function formatConversation(conversation = []) {
+  if (!conversation.length) return "No messages yet.";
+  return conversation
+    .map(m => `${m.role.toUpperCase()}: ${m.message}`)
+    .join("\n");
+}
 
 /** Buyer node: makes first offer or counters seller's offer. */
 async function buyerNode(state) {
-  const { job, providerServiceData, lastOffer, round, maxRounds, deadline_ts } = state;
-  if (state.status !== 'negotiating') return state;
+  if (state.status !== "negotiating") return state;
 
   const llm = new ChatOpenAI({
-    model: 'gpt-4o-mini',
-    temperature: 0.2,
+    model: "gpt-4o-mini",
+    temperature: 0.7,
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  const budget = job?.budget ?? { min: 0, max: 999999 };
-  const budgetMin = Number(budget.min) ?? 0;
-  const budgetMax = Number(budget.max) ?? 999999;
-  const midBudget = Math.round((budgetMin + budgetMax) / 2);
-  const providerMin = Number(providerServiceData?.min_price) ?? 0;
-  const providerMax = Number(providerServiceData?.max_price) ?? 999999;
-  const providerDays = Number(providerServiceData?.deadline_in_days) ?? 7;
+  const prompt = `
+You are the BUYER trying to hire a provider.
 
-  const isFirstTurn = !lastOffer || round === 0;
-  let prompt;
-  if (isFirstTurn) {
-    prompt = `You are the buyer (job poster) negotiating with a provider for this job:
-${JSON.stringify({ title: job?.title, budget: job?.budget, startDate: job?.startDate, endDate: job?.endDate }, null, 2)}
+Job:
+${JSON.stringify(state.job, null, 2)}
 
-Provider's range: min_price ${providerMin}, max_price ${providerMax}, deadline_in_days ${providerDays}.
-Make your first offer. Reply with ONLY a JSON object: { "action": "counter" or "accept", "price": number, "completionDays": number }.
-Price must be between ${budgetMin} and ${budgetMax}. If the provider's range is acceptable to you, you may "accept" with a price and completionDays within range.`;
-  } else if (lastOffer.role === 'seller') {
-    const sellerPrice = lastOffer.price;
-    const sellerDays = lastOffer.completionDays;
-    prompt = `You are the buyer. The seller countered with price ${sellerPrice} and completionDays ${sellerDays}.
-Your job budget: ${budgetMin}-${budgetMax}. Provider accepts ${providerMin}-${providerMax} and up to ${providerDays} days.
-Reply with ONLY a JSON object: { "action": "counter" or "accept", "price": number, "completionDays": number }. If you accept the seller's terms, use "action": "accept" and their price and completionDays.`;
-  } else {
-    return { ...state, round: state.round + 1, lastOffer: state.lastOffer, offerHistory: state.offerHistory };
-  }
+Provider profile:
+${JSON.stringify(state.providerServiceData, null, 2)}
 
-  const response = await llm.invoke([
-    new SystemMessage('You output only valid JSON with keys action, price, completionDays. No markdown.'),
-    new HumanMessage(prompt),
-  ]);
-  const content = response?.content;
-  const parsed = parseOfferResponse(content);
-  const price = parsed.price ?? (isFirstTurn ? midBudget : getPriceFromOffer(lastOffer));
-  const completionDays = parsed.completionDays ?? (isFirstTurn ? Math.min(7, providerDays) : getCompletionDaysFromOffer(lastOffer));
+Conversation so far:
+${formatConversation(state.conversation)}
 
-  const newOffer = {
-    role: 'buyer',
-    action: parsed.action,
-    price: Number(price),
-    completionDays: Number(completionDays),
+Your goal:
+- Get the best price
+- Get fast delivery
+- Still close the deal
+
+Reply ONLY in JSON:
+{
+  "message": "what you say to the provider",
+  "action": "continue" | "accept",
+  "offer": { "price": number, "days": number } | null
+}
+`;
+
+  const res = await llm.invoke([new SystemMessage("Only output valid JSON"), new HumanMessage(prompt)]);
+  const data = JSON.parse(res.content);
+
+  const message = {
+    role: "buyer",
+    message: data.message,
+    offer: data.offer,
   };
-  const status = parsed.action === 'accept' ? 'accepted' : state.status;
-  const negotiatedPrice = parsed.action === 'accept' ? Number(price) : state.negotiatedPrice;
-  const negotiatedCompletionDays = parsed.action === 'accept' ? Number(completionDays) : state.negotiatedCompletionDays;
 
   return {
+    conversation: [...state.conversation, message],
     round: state.round + 1,
-    lastOffer: newOffer,
-    offerHistory: [...(state.offerHistory || []), newOffer],
-    status,
-    ...(negotiatedPrice != null && { negotiatedPrice }),
-    ...(negotiatedCompletionDays != null && { negotiatedCompletionDays }),
+    status: data.action === "accept" ? "accepted" : "negotiating",
+    finalDeal: data.action === "accept" ? data.offer : state.finalDeal,
   };
 }
 
+
 /** Seller node: counters buyer's offer. */
 async function sellerNode(state) {
-  const { job, providerServiceData, lastOffer, round, maxRounds, deadline_ts } = state;
-  if (state.status !== 'negotiating') return state;
-  if (!lastOffer || lastOffer.role !== 'buyer') return state;
+  if (state.status !== "negotiating") return state;
 
   const llm = new ChatOpenAI({
-    model: 'gpt-4o-mini',
-    temperature: 0.2,
+    model: "gpt-4o-mini",
+    temperature: 0.7,
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  const budget = job?.budget ?? { min: 0, max: 999999 };
-  const providerMin = Number(providerServiceData?.min_price) ?? 0;
-  const providerMax = Number(providerServiceData?.max_price) ?? 999999;
-  const providerDays = Number(providerServiceData?.deadline_in_days) ?? 7;
-  const buyerPrice = lastOffer.price;
-  const buyerDays = lastOffer.completionDays;
+  const prompt = `
+You are the SERVICE PROVIDER.
 
-  const prompt = `You are the provider (seller). The buyer offered price ${buyerPrice} and completionDays ${buyerDays}.
-Your acceptable range: min_price ${providerMin}, max_price ${providerMax}, deadline_in_days ${providerDays}.
-Job budget: ${JSON.stringify(budget)}.
-Reply with ONLY a JSON object: { "action": "counter" or "accept", "price": number, "completionDays": number }. If you accept the buyer's terms, use "action": "accept" and their price and completionDays.`;
+Your business info:
+${JSON.stringify(state.providerServiceData, null, 2)}
 
-  const response = await llm.invoke([
-    new SystemMessage('You output only valid JSON with keys action, price, completionDays. No markdown.'),
-    new HumanMessage(prompt),
-  ]);
-  const parsed = parseOfferResponse(response?.content);
-  const price = parsed.price ?? buyerPrice;
-  const completionDays = parsed.completionDays ?? buyerDays;
+Job:
+${JSON.stringify(state.job, null, 2)}
 
-  const newOffer = {
-    role: 'seller',
-    action: parsed.action,
-    price: Number(price),
-    completionDays: Number(completionDays),
+Conversation so far:
+${formatConversation(state.conversation)}
+
+Your goal:
+- Maximize earnings
+- Avoid unrealistic deadlines
+- Still close the deal
+
+Reply ONLY in JSON:
+{
+  "message": "what you say to the buyer",
+  "action": "continue" | "accept",
+  "offer": { "price": number, "days": number } | null
+}
+`;
+
+  const res = await llm.invoke([new SystemMessage("Only output valid JSON"), new HumanMessage(prompt)]);
+  const data = JSON.parse(res.content);
+
+  const message = {
+    role: "seller",
+    message: data.message,
+    offer: data.offer,
   };
-  const status = parsed.action === 'accept' ? 'accepted' : state.status;
-  const negotiatedPrice = parsed.action === 'accept' ? Number(price) : state.negotiatedPrice;
-  const negotiatedCompletionDays = parsed.action === 'accept' ? Number(completionDays) : state.negotiatedCompletionDays;
 
   return {
+    conversation: [...state.conversation, message],
     round: state.round + 1,
-    lastOffer: newOffer,
-    offerHistory: [...(state.offerHistory || []), newOffer],
-    status,
-    ...(negotiatedPrice != null && { negotiatedPrice }),
-    ...(negotiatedCompletionDays != null && { negotiatedCompletionDays }),
+    status: data.action === "accept" ? "accepted" : "negotiating",
+    finalDeal: data.action === "accept" ? data.offer : state.finalDeal,
   };
 }
 
 /** Resolve timeout: set final negotiated values from last offer. */
 function resolveTimeoutNode(state) {
-  const last = state.lastOffer;
-  const price = getPriceFromOffer(last);
-  const days = getCompletionDaysFromOffer(last);
   return {
-    status: 'timeout',
-    negotiatedPrice: price ?? state.negotiatedPrice ?? 0,
-    negotiatedCompletionDays: days ?? state.negotiatedCompletionDays ?? 7,
+    status: "timeout",
+    finalDeal: state.conversation.at(-1)?.offer ?? null
   };
 }
 
+
 function routeAfterBuyer(state) {
-  if (state.status === 'accepted') return 'end';
-  const now = Date.now();
-  if (now >= state.deadline_ts || state.round >= state.maxRounds) return 'timeout';
-  return 'seller';
+  if (state.status === "accepted") return "end";
+  if (Date.now() > state.deadline_ts || state.round >= state.maxRounds) return "timeout";
+  return "seller";
 }
 
 function routeAfterSeller(state) {
-  if (state.status === 'accepted') return 'end';
-  const now = Date.now();
-  if (now >= state.deadline_ts || state.round >= state.maxRounds) return 'timeout';
-  return 'buyer';
+  if (state.status === "accepted") return "end";
+  if (Date.now() > state.deadline_ts || state.round >= state.maxRounds) return "timeout";
+  return "buyer";
 }
+
 
 function ensureNegotiatedOnAccept(state) {
   if (state.status !== 'accepted') return state;
@@ -238,18 +227,18 @@ const compiledGraph = workflow.compile();
  * @returns {Promise<{ negotiatedPrice: number, negotiatedCompletionDays: number, status: string, providerId, job }>}
  */
 export async function runNegotiation(input) {
-  const initialState = getInitialState(input);
-  const result = await compiledGraph.invoke(initialState);
-  const accepted = result.status === 'accepted';
-  const resolved = result.status === 'timeout' ? resolveTimeoutNode(result) : ensureNegotiatedOnAccept(result);
+  const result = await compiledGraph.invoke(getInitialState(input));
+
   return {
     job: result.job,
     providerId: result.providerId,
     status: result.status,
-    negotiatedPrice: resolved.negotiatedPrice ?? result.negotiatedPrice ?? 0,
-    negotiatedCompletionDays: resolved.negotiatedCompletionDays ?? result.negotiatedCompletionDays ?? 7,
+    negotiatedPrice: result.finalDeal?.price ?? null,
+    negotiatedCompletionDays: result.finalDeal?.days ?? null,
+    transcript: result.conversation
   };
 }
+
 
 /**
  * Run negotiation and stream each offer step via onStep(step).
@@ -265,20 +254,22 @@ export async function runNegotiationStream(input, onStep) {
   }
   let lastResult = null;
   const stream = await compiledGraph.stream(initialState, { streamMode: 'values' });
-  let lastEmittedKey = null;
+  let emittedCount = 0;
   for await (const chunk of stream) {
     const state = Array.isArray(chunk) ? (chunk[1] ?? chunk[0]) : chunk;
-    if (state && state.lastOffer) {
-      const key = `${state.round}-${state.lastOffer.role}`;
-      if (key !== lastEmittedKey) {
-        lastEmittedKey = key;
-        const offer = state.lastOffer;
+    if (state && Array.isArray(state.conversation)) {
+      while (emittedCount < state.conversation.length) {
+        const msg = state.conversation[emittedCount];
+        emittedCount += 1;
+        const offer = msg.offer ?? {};
+        const isLast = emittedCount === state.conversation.length;
         onStep({
-          role: offer.role,
-          round: state.round ?? 0,
-          action: offer.action ?? 'counter',
-          price: offer.price,
-          completionDays: offer.completionDays,
+          role: msg.role,
+          round: state.round ?? emittedCount,
+          action: state.status === 'accepted' && isLast ? 'accept' : 'counter',
+          message: typeof msg.message === 'string' ? msg.message : '',
+          price: typeof offer.price === 'number' ? offer.price : undefined,
+          completionDays: typeof offer.days === 'number' ? offer.days : (typeof offer.completionDays === 'number' ? offer.completionDays : undefined),
         });
       }
     }

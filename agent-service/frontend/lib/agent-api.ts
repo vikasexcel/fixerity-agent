@@ -104,8 +104,10 @@ export interface NegotiationStep {
   role: 'buyer' | 'seller';
   round: number;
   action: 'counter' | 'accept';
-  price: number;
-  completionDays: number;
+  /** Dialogue message from buyer or seller (may be present when offer is null). */
+  message?: string;
+  price?: number;
+  completionDays?: number;
 }
 
 /** Event from negotiate-and-match-stream SSE. */
