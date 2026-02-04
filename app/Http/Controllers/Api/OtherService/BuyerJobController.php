@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\OtherService;
 
 use App\Classes\UserClassApi;
+use App\Classes\OnDemandClassApi;
 use App\Http\Controllers\Controller;
 use App\Models\BuyerJob;
 use Illuminate\Http\Request;
@@ -10,7 +11,10 @@ use Illuminate\Support\Facades\Validator;
 
 class BuyerJobController extends Controller
 {
-    public function __construct(private UserClassApi $userClassapi) {}
+    public function __construct(
+        private UserClassApi $userClassapi,
+        private OnDemandClassApi $onDemandClassApi
+    ) {}
 
     /**
      * POST customer/on-demand/job/create
@@ -73,14 +77,20 @@ class BuyerJobController extends Controller
 
     /**
      * POST customer/on-demand/job/list
-     * List buyer jobs for the authenticated user.
+     * List buyer jobs for the authenticated user, or all open jobs if service_category_id is provided (for sellers).
+     * Supports both user_id (for buyers) and provider_id (for sellers/providers) authentication.
      */
     public function list(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'user_id' => 'required|numeric',
+            'user_id' => 'nullable|numeric',
+            'provider_id' => 'nullable|numeric',
             'access_token' => 'required',
             'status' => 'nullable|in:open,matched,completed,all',
+            'service_category_id' => 'nullable|numeric',
+            'sub_category_id' => 'nullable|numeric',
+            'lat' => 'nullable|numeric',
+            'long' => 'nullable|numeric',
         ]);
 
         if ($validator->fails()) {
@@ -91,16 +101,58 @@ class BuyerJobController extends Controller
             ]);
         }
 
-        $user = $this->userClassapi->checkUserAllow($request->get('user_id'), $request->get('access_token'));
-        if ($user instanceof \Illuminate\Http\JsonResponse) {
-            return $user;
+        $providerId = $request->get('provider_id');
+        $accessToken = $request->get('access_token');
+
+        // Prefer provider auth when provider_id is present (seller/agent scan). Never use user_id when provider_id is sent.
+        $userId = $providerId ? null : $request->get('user_id');
+        $authenticatedAsProvider = (bool) $providerId;
+
+        if ($providerId) {
+            $provider = $this->onDemandClassApi->providerRegisterAllow($providerId, $accessToken);
+            if ($provider instanceof \Illuminate\Http\JsonResponse) {
+                return $provider;
+            }
+        } elseif ($userId) {
+            $user = $this->userClassapi->checkUserAllow($userId, $accessToken);
+            if ($user instanceof \Illuminate\Http\JsonResponse) {
+                return $user;
+            }
+        } else {
+            return response()->json([
+                'status' => 0,
+                'message' => 'Either user_id or provider_id is required',
+                'message_code' => 9,
+            ]);
         }
 
-        $query = BuyerJob::where('user_id', $request->get('user_id'));
-        $status = $request->get('status', 'all');
-        if ($status !== 'all') {
-            $query->where('status', $status);
+        $serviceCategoryId = $request->get('service_category_id');
+
+        // If service_category_id is provided, return all open jobs for that category (for sellers)
+        // Otherwise, return jobs for the authenticated user only (for buyers)
+        if ($serviceCategoryId) {
+            $query = BuyerJob::where('service_category_id', $serviceCategoryId)
+                ->where('status', 'open');
+
+            if ($request->has('sub_category_id')) {
+                $query->where('sub_category_id', $request->get('sub_category_id'));
+            }
+
+            if ($request->has('lat') && $request->has('long')) {
+                $query->whereNotNull('lat')->whereNotNull('long');
+            }
+        } else {
+            if ($authenticatedAsProvider) {
+                $query = BuyerJob::where('status', 'open');
+            } else {
+                $query = BuyerJob::where('user_id', $userId);
+                $status = $request->get('status', 'all');
+                if ($status !== 'all') {
+                    $query->where('status', $status);
+                }
+            }
         }
+        
         $jobs = $query->orderBy('created_at', 'desc')->get();
 
         return response()->json([

@@ -707,7 +707,7 @@ class ProviderController extends Controller
         \Log::info("postOnDemandHome");
         $validator = Validator::make($request->all(), [
             "provider_id" => "required|integer",
-            "access_token" => "required|numeric",
+            "access_token" => "required", // string or numeric (app/agent vs legacy)
             "app_version" => "required",
         ]);
         if ($validator->fails()) {

@@ -14,6 +14,7 @@ use App\Models\AppVersionSetting;
 use App\Models\GeneralSettings;
 use App\Models\OtherServiceCategory;
 use App\Models\OtherServiceProviderDetails;
+use App\Models\OtherServiceRatings;
 use App\Models\OtherServiceProviderPackages;
 use App\Models\Provider;
 use App\Models\ProviderDocuments;
@@ -527,6 +528,18 @@ class OnDemandClassApi
         //provider wallet balance
         $provider_wallet_balance = UserWalletTransaction::query()->select('remaining_balance')->where('user_id', $provider_id)->orderBy('id', 'desc')->first();
 
+        // average_rating and total_completed_order for dashboard (no hardcoded values on frontend)
+        $average_rating = 0;
+        $total_completed_order = count($completed_order_list);
+        $other_details = OtherServiceProviderDetails::query()->where('provider_id', $provider_id)->first();
+        if ($other_details != null) {
+            $total_completed_order = (int) $other_details->total_completed_order;
+        }
+        $avg_from_ratings = OtherServiceRatings::query()->where('provider_id', $provider_id)->where('status', 1)->avg('rating');
+        if ($avg_from_ratings !== null) {
+            $average_rating = round((float) $avg_from_ratings, 2);
+        }
+
         //check if the provider wallet with min amount
         //converting with default currency
 
@@ -540,6 +553,8 @@ class OnDemandClassApi
             "provider_profile_image" => $provider_profile_image,
             "provider_service_radius" => $provider_details != Null ? ($provider_details->service_radius != Null ? $provider_details->service_radius . " km" : '') : '',
             "provider_services_list" => $provider_services_list,
+            "average_rating" => $average_rating,
+            "total_completed_order" => $total_completed_order,
             "current_status" => $provider_current_status,
             "pending_orders" => $pending_order_list,
             "accepted_orders" => $accepted_order_list,

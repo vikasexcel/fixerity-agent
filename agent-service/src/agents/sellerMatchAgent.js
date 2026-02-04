@@ -146,69 +146,91 @@ function evaluateAndRank(jobs, providerProfile) {
  * @param {number} long
  * @returns {Promise<Object>} Provider profile
  */
-async function getProviderProfile(providerId, accessToken, serviceCategoryId, subCategoryId, lat, long) {
-  try {
-    // Get provider details
-    const providerDetailsPath = 'customer/on-demand/provider-details';
-    const providerDetails = await post(providerDetailsPath, {
-      provider_id: providerId,
-      service_category_id: serviceCategoryId || 1,
-      lat: lat || 0,
-      long: long || 0,
-    }, { userId: providerId, providerId, accessToken });
+export async function getProviderProfile(providerId, accessToken, serviceCategoryId, subCategoryId, lat, long) {
+  // We must try multiple service categories: the provider's actual category is in the DB (e.g. 11 for Dog Walking).
+  // If the caller passes a category (e.g. 1), try it first, then try 1-20 so we discover the real one.
+  const fallbackCategories = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+  const requested = serviceCategoryId && Number(serviceCategoryId) > 0 ? Number(serviceCategoryId) : null;
+  const serviceCategoriesToTry = requested
+    ? [requested, ...fallbackCategories.filter((id) => id !== requested)]
+    : fallbackCategories;
 
-    if (providerDetails.status !== 1 || !providerDetails.provider_details) {
-      throw new Error('Provider details not found');
-    }
+  for (const tryServiceCategoryId of serviceCategoriesToTry) {
+    try {
+      // Get provider details
+      const providerDetailsPath = 'customer/on-demand/provider-details';
+      const providerDetails = await post(providerDetailsPath, {
+        provider_id: providerId,
+        service_category_id: tryServiceCategoryId,
+        lat: lat || 0,
+        long: long || 0,
+      }, { providerId, accessToken });
 
-    const provider = providerDetails.provider_details;
-    
-    // Get provider packages
-    let packages = [];
-    if (provider.provider_service_id) {
-      try {
-        const packagePath = 'on-demand/package-list';
-        const packageData = await post(packagePath, {
-          provider_service_id: provider.provider_service_id,
-        }, { userId: providerId, providerId, accessToken });
+      if (providerDetails.status === 1) {
+        // API returns provider details directly (not nested)
+        const provider = providerDetails;
         
-        if (packageData.status === 1 && packageData.package_list) {
-          packages = packageData.package_list;
+        // Get provider packages - try using provider_service_id if available
+        let packages = [];
+        if (provider.provider_service_id) {
+          try {
+            const packagePath = 'on-demand/package-list';
+            const packageData = await post(packagePath, {
+              provider_service_id: provider.provider_service_id,
+            }, { providerId, accessToken });
+            
+            if (packageData.status === 1 && packageData.package_list) {
+              packages = Array.isArray(packageData.package_list) ? packageData.package_list : [];
+            }
+          } catch (err) {
+            console.warn('[SellerMatchAgent] Could not fetch packages (this is optional):', err.message);
+          }
         }
-      } catch (err) {
-        console.warn('[SellerMatchAgent] Failed to get packages:', err.message);
-      }
-    }
 
-    return {
-      provider_id: providerId,
-      provider_name: provider.provider_name || 'Provider',
-      average_rating: parseFloat(provider.average_rating) || 0,
-      total_completed_order: parseInt(provider.total_completed_order, 10) || 0,
-      num_of_rating: parseInt(provider.num_of_rating, 10) || 0,
-      package_list: packages,
-      licensed: true, // Assume licensed unless explicitly false
-      service_category_id: serviceCategoryId,
-      sub_category_id: subCategoryId,
-      lat: lat || 0,
-      long: long || 0,
-    };
-  } catch (err) {
-    // Fallback: return minimal profile
-    return {
-      provider_id: providerId,
-      provider_name: 'Provider',
-      average_rating: 0,
-      total_completed_order: 0,
-      num_of_rating: 0,
-      package_list: [],
-      licensed: true,
-      service_category_id: serviceCategoryId || 1,
-      sub_category_id: subCategoryId || 1,
-      lat: lat || 0,
-      long: long || 0,
-    };
+        console.log(`[SellerMatchAgent] Successfully fetched provider profile for service_category_id: ${tryServiceCategoryId}`);
+        return {
+          provider_id: providerId,
+          provider_name: provider.provider_name || 'Provider',
+          average_rating: parseFloat(provider.average_rating) || 0,
+          total_completed_order: parseInt(provider.total_completed_order, 10) || 0,
+          num_of_rating: 0, // API doesn't return this
+          package_list: packages,
+          licensed: true, // Assume licensed unless explicitly false
+          service_category_id: tryServiceCategoryId, // Use the one that worked
+          sub_category_id: subCategoryId,
+          lat: lat || 0,
+          long: long || 0,
+        };
+      } else {
+        console.warn(`[SellerMatchAgent] Provider details API returned status ${providerDetails.status} for service_category_id ${tryServiceCategoryId}:`, providerDetails.message);
+      }
+    } catch (err) {
+      console.warn(`[SellerMatchAgent] Error getting provider profile for service_category_id ${tryServiceCategoryId}:`, err.message);
+      // Continue to next service category
+      continue;
+    }
   }
+  
+  // If all service categories failed, return minimal profile
+  console.error('[SellerMatchAgent] Could not fetch provider profile for any service category. Using fallback profile.');
+  console.error('[SellerMatchAgent] This usually means the provider needs to:');
+  console.error('[SellerMatchAgent] 1. Have a provider_service for a service category');
+  console.error('[SellerMatchAgent] 2. Have packages with status=1 for that service');
+  console.error('[SellerMatchAgent] 3. Have other_service_provider_details record');
+  
+  return {
+    provider_id: providerId,
+    provider_name: 'Provider',
+    average_rating: 0,
+    total_completed_order: 0,
+    num_of_rating: 0,
+    package_list: [],
+    licensed: true,
+    service_category_id: serviceCategoryId || 1,
+    sub_category_id: subCategoryId || 1,
+    lat: lat || 0,
+    long: long || 0,
+  };
 }
 
 /**
@@ -232,9 +254,15 @@ function createMatchJobsTool(providerId, accessToken) {
       };
 
       try {
-        // Note: Some Laravel endpoints require user_id. For providers, we use provider_id as user_id
-        // since providers are also users in the system
-        const data = await post(path, payload, { userId: providerId, providerId, accessToken });
+        // For providers, use provider_id (not user_id) for authentication
+        console.log('[SellerMatchAgent] Calling job list API with:', { path, payload, providerId });
+        const data = await post(path, payload, { providerId, accessToken });
+        
+        console.log('[SellerMatchAgent] Job list API response:', { 
+          status: data.status, 
+          jobsCount: data.jobs?.length || 0,
+          message: data.message 
+        });
         
         if (data.status !== 1 || !data.jobs || data.jobs.length === 0) {
           return JSON.stringify({
@@ -245,22 +273,29 @@ function createMatchJobsTool(providerId, accessToken) {
 
         // Filter jobs by category if provided
         let jobs = data.jobs;
+        console.log('[SellerMatchAgent] Jobs before filtering:', jobs.length);
+        
         if (service_category_id) {
           jobs = jobs.filter(j => 
             j.service_category_id == service_category_id || 
             j.service_category_id === Number(service_category_id)
           );
+          console.log('[SellerMatchAgent] Jobs after service_category filter:', jobs.length);
         }
         if (sub_category_id) {
           jobs = jobs.filter(j => 
             j.sub_category_id == sub_category_id || 
             j.sub_category_id === Number(sub_category_id)
           );
+          console.log('[SellerMatchAgent] Jobs after sub_category filter:', jobs.length);
         }
 
+        console.log('[SellerMatchAgent] Evaluating matches for', jobs.length, 'jobs');
         const matches = evaluateAndRank(jobs, providerProfile);
+        console.log('[SellerMatchAgent] Generated', matches.length, 'matches');
         return JSON.stringify({ matches });
       } catch (err) {
+        console.error('[SellerMatchAgent] Error in matchSellerToJobs tool:', err.message);
         const isNoData = err.message === 'Data Not Found' || /not found|no job/i.test(err.message);
         return JSON.stringify({
           matches: [],
@@ -329,7 +364,7 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
     long,
   } = options;
 
-  // Get provider profile first
+  // Get provider profile first - this will try multiple service categories if needed
   const providerProfile = await getProviderProfile(
     providerId,
     accessToken,
@@ -338,6 +373,18 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
     lat || 0,
     long || 0
   );
+
+  // Use the service_category_id that worked for the provider profile
+  const effectiveServiceCategoryId = providerProfile.service_category_id || service_category_id || 1;
+
+  console.log('[SellerMatchAgent] Provider profile fetched:', {
+    provider_id: providerProfile.provider_id,
+    provider_name: providerProfile.provider_name,
+    average_rating: providerProfile.average_rating,
+    total_completed_order: providerProfile.total_completed_order,
+    package_list_length: providerProfile.package_list?.length || 0,
+    service_category_id: effectiveServiceCategoryId,
+  });
 
   const profileSummary = `Seller: ${providerProfile.provider_name}. Rating: ${providerProfile.average_rating}★. Jobs completed: ${providerProfile.total_completed_order}.`;
   const memoryContext = await mem0.searchForProvider(providerId, profileSummary, { limit: 5 });
@@ -371,14 +418,16 @@ After calling the tool and receiving the results, STOP. Do not call the tool aga
     licensed: providerProfile.licensed,
   };
 
-  const userMessage = `Match this seller profile to available jobs. Provider: ${JSON.stringify(providerProfileForTool)}. Use service_category_id=${service_category_id || 1}, sub_category_id=${sub_category_id || 1}, lat=${lat || 0}, long=${long || 0}.`;
+  console.log('[SellerMatchAgent] Calling agent with provider profile:', JSON.stringify(providerProfileForTool, null, 2));
+  console.log('[SellerMatchAgent] Using service_category_id:', effectiveServiceCategoryId);
+  const userMessage = `Match this seller profile to available jobs. Provider: ${JSON.stringify(providerProfileForTool)}. Use service_category_id=${effectiveServiceCategoryId}, sub_category_id=${sub_category_id || 1}, lat=${lat || 0}, long=${long || 0}.`;
   const result = await agent.invoke({ messages: [new HumanMessage(userMessage)] });
 
   let matches = extractMatchesFromResult(result);
   if (matches.length === 0) {
-    // Fallback: call tool directly
+    // Fallback: call tool directly with the effective service_category_id
     const toolResult = await matchTool.invoke({
-      service_category_id: service_category_id || 1,
+      service_category_id: effectiveServiceCategoryId,
       sub_category_id: sub_category_id || 1,
       lat: lat || 0,
       long: long || 0,

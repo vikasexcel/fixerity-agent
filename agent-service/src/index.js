@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import { runBuyerAgent } from './agents/buyerAgent.js';
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
 import { runSellerAgent } from './agents/sellerAgent.js';
-import { runSellerMatchAgent } from './agents/sellerMatchAgent.js';
+import { runSellerMatchAgent, getProviderProfile } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
 
@@ -160,6 +160,41 @@ app.post('/agent/seller/match', async (req, res) => {
     }
     if (message.includes('status') && message.includes('0')) {
       return res.status(502).json({ error: 'Backend API error. Please try again.' });
+    }
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/seller/profile
+ * Returns the same provider profile the agent uses (from Laravel provider-details).
+ * Use this on the dashboard so total_completed_order and average_rating match what the agent sees.
+ * Body: { provider_id: number, access_token: string, service_category_id?, lat?, long? }
+ * Returns: { profile: { provider_id, provider_name, average_rating, total_completed_order, ... } }
+ */
+app.post('/agent/seller/profile', async (req, res) => {
+  const { provider_id: providerId, access_token: accessToken, service_category_id, lat, long } = req.body ?? {};
+
+  if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({
+      error: 'Missing or invalid body: provider_id and access_token are required.',
+    });
+  }
+
+  try {
+    const profile = await getProviderProfile(
+      providerId,
+      accessToken.trim(),
+      service_category_id ?? 1,
+      1,
+      lat ?? 0,
+      long ?? 0
+    );
+    return res.json({ profile });
+  } catch (err) {
+    const message = err?.message ?? 'Profile request failed';
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
     }
     return res.status(500).json({ error: message });
   }
