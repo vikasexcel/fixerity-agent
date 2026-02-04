@@ -6,14 +6,32 @@
 
 import { ChatOpenAI } from '@langchain/openai';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { post } from '../lib/laravelClient.js';
-import * as mem0 from '../memory/mem0Client.js';
 import { OPENAI_API_KEY } from '../config/index.js';
+import * as redisChat from '../memory/redisChatStore.js';
 
 const PROVIDER_BY_CATEGORY_PATH = 'on-demand/public/provider-service-by-category';
+const PROVIDER_BASIC_DETAILS_PATH = 'on-demand/provider-basic-details';
+
+/**
+ * Fetch provider basic details by provider_id.
+ * @param {number} providerId - Provider ID
+ * @returns {Promise<{ first_name: string, last_name: string, email: string, contact_number: string, gender: number } | null>}
+ */
+async function fetchProviderBasicDetails(providerId) {
+  const id = Number(providerId);
+  if (!id) return null;
+  try {
+    const data = await post(PROVIDER_BASIC_DETAILS_PATH, { provider_id: id });
+    if (data.status !== 1 || !data.data) return null;
+    return data.data;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Fetch providers for a service category (user-authenticated).
@@ -65,6 +83,27 @@ function createGetProvidersByCategoryTool(accessToken) {
       }),
     }
   );
+}
+
+/**
+ * Extract final assistant reply text from agent state messages (last AI message without tool_calls).
+ * @param {import('@langchain/core/messages').BaseMessage[]} messages
+ * @returns {string}
+ */
+function getFinalReply(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg instanceof AIMessage && !msg.tool_calls?.length) {
+      const content = msg.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        const text = content.map((c) => (typeof c === 'string' ? c : c?.text ?? '')).join('');
+        if (text) return text;
+      }
+    }
+  }
+  return '';
 }
 
 /**
@@ -132,6 +171,36 @@ function normalizeDeals(deals, job = null) {
 }
 
 /**
+ * Enrich deals with provider basic details from provider-basic-details API.
+ * @param {Array} deals - Deals with sellerId (provider_id)
+ * @returns {Promise<Array>} Deals with sellerAgent enriched with name, email, contact_number, gender, providerBasicDetails
+ */
+async function enrichDealsWithProviderDetails(deals) {
+  if (!Array.isArray(deals) || deals.length === 0) return deals;
+  const enriched = await Promise.all(
+    deals.map(async (d) => {
+      const providerId = d.sellerId ?? d.seller_id;
+      if (!providerId) return d;
+      const basic = await fetchProviderBasicDetails(providerId);
+      if (!basic) return d;
+      const name = [basic.first_name, basic.last_name].filter(Boolean).join(' ').trim() || undefined;
+      return {
+        ...d,
+        sellerAgent: {
+          ...(d.sellerAgent ?? {}),
+          ...(name && { name }),
+          ...(basic.email && { email: basic.email }),
+          ...(basic.contact_number && { contact_number: basic.contact_number }),
+          ...(basic.gender !== undefined && { gender: basic.gender }),
+          providerBasicDetails: basic,
+        },
+      };
+    })
+  );
+  return enriched;
+}
+
+/**
  * Ask LLM to return a deals array from job + providers (no tools). Used for fallback or direct matching.
  */
 async function llmMatchProvidersToJob(job, providers) {
@@ -182,19 +251,18 @@ Return at most 5 deals, ordered by best match first.`;
  * Run the Buyer Match Agent.
  * Fetches providers via provider-service-by-category (job.service_category_id + user access_token),
  * then sends job + providers to the LLM for dynamic matching (no hardcoded rules).
+ * Conversation is stored in Redis per user+job so the user can ask follow-up questions.
  * @param {number|string} userId
  * @param {string} accessToken
  * @param {Object} job - Job with id, title, description, budget, priorities, service_category_id (required for API)
- * @returns {Promise<{ deals: Array }>}
+ * @param {{ userMessage?: string }} [opts] - Optional. userMessage: follow-up question; if omitted, runs initial match.
+ * @returns {Promise<{ deals: Array, reply?: string }>}
  */
-export async function runBuyerMatchAgent(userId, accessToken, job) {
+export async function runBuyerMatchAgent(userId, accessToken, job, opts = {}) {
   const service_category_id = Number(job.service_category_id) || 0;
   if (!service_category_id) {
     return { deals: [], message: 'Job must have service_category_id to match providers.' };
   }
-
-  const jobSummary = `Job: ${job.title}. Budget: $${job.budget?.min ?? 0}-${job.budget?.max ?? 0}. Priorities: ${JSON.stringify(job.priorities || [])}`;
-  await mem0.search(userId, jobSummary, { limit: 5 });
 
   const jobForContext = {
     id: job.id,
@@ -207,12 +275,37 @@ export async function runBuyerMatchAgent(userId, accessToken, job) {
     service_category_id,
   };
 
+  const sessionId = redisChat.buyerSessionId(userId, job?.id ?? null);
+  let historyMessages = [];
+  try {
+    historyMessages = await redisChat.getHistory(sessionId);
+  } catch (_) {
+    historyMessages = [];
+  }
+
+  const isFollowUp = typeof opts.userMessage === 'string' && opts.userMessage.trim().length > 0;
+  let storedDeals = [];
+  if (isFollowUp) {
+    try {
+      storedDeals = await redisChat.getMatchResult(sessionId);
+    } catch (_) {
+      storedDeals = [];
+    }
+  }
+
+  const defaultMatchMessage = `Match this job to providers. Job: ${JSON.stringify(jobForContext)}. Use service_category_id=${service_category_id} when calling the tool.`;
+  const userMessageContent = isFollowUp ? opts.userMessage.trim() : defaultMatchMessage;
+
   const getProvidersTool = createGetProvidersByCategoryTool(accessToken);
-  const systemPrompt = `You are a buyer matching assistant. Your task is to match a job to service providers.
+  let baseInstructions = `You are a buyer matching assistant. Your task is to match a job to service providers.
 
 1. Call the getProvidersByCategory tool ONCE with the job's service_category_id to fetch the provider list.
 2. Using ONLY the job data and the providers returned by the tool, dynamically match and rank the best providers. Use your own judgment; there are no hardcoded rules.
-3. Reply with a single JSON object containing a "deals" array. Each deal must include: jobId, sellerId (use provider_id from the provider), sellerAgent (summary object with id, userId, name, rating, etc.), matchScore (0-100), matchReasons (array of short strings), status ("proposed"). Return at most 5 deals, best match first. Do not use markdown or code fences—output only the JSON object.`;
+3. Reply with a single JSON object containing a "deals" array. Each deal must include: jobId, sellerId (use provider_id from the provider), sellerAgent (summary object with id, userId, name, rating, etc.), matchScore (0-100), matchReasons (array of short strings), status ("proposed"). Return at most 5 deals, best match first. Do not use markdown or code fences—output only the JSON object.
+For follow-up questions (e.g. "Tell me the provider name", "Why is X ranked first?", "Tell me more about the first provider"), answer using the CURRENT MATCHED PROVIDERS listed below. Do not ask for location or search again—use the stored match.`;
+  if (isFollowUp && storedDeals.length > 0) {
+    baseInstructions += `\n\nCurrent matched providers for this job (use this to answer follow-ups):\n${JSON.stringify(storedDeals, null, 2)}`;
+  }
 
   const llm = new ChatOpenAI({
     model: 'gpt-4o-mini',
@@ -223,12 +316,19 @@ export async function runBuyerMatchAgent(userId, accessToken, job) {
   const agent = createReactAgent({
     llm,
     tools: [getProvidersTool],
-    prompt: systemPrompt,
+    prompt: baseInstructions,
     recursionLimit: 10,
   });
 
-  const userMessage = `Match this job to providers. Job: ${JSON.stringify(jobForContext)}. Use service_category_id=${service_category_id} when calling the tool.`;
-  const result = await agent.invoke({ messages: [new HumanMessage(userMessage)] });
+  const inputMessages = [...historyMessages, new HumanMessage(userMessageContent)];
+  const result = await agent.invoke({ messages: inputMessages });
+
+  const finalReply = getFinalReply(result.messages ?? []);
+  try {
+    await redisChat.addTurn(sessionId, new HumanMessage(userMessageContent), new AIMessage(finalReply || 'No reply.'));
+  } catch (_) {
+    // Non-fatal: deals and reply still returned
+  }
 
   let deals = extractDealsFromResult(result, job);
   if (deals.length === 0) {
@@ -239,11 +339,18 @@ export async function runBuyerMatchAgent(userId, accessToken, job) {
     }
   }
 
-  const matchesSummary = `Matched ${deals.length} providers for job ${job.title}`;
-  await mem0.add(userId, [
-    { role: 'user', content: jobSummary },
-    { role: 'assistant', content: matchesSummary },
-  ]);
+  deals = await enrichDealsWithProviderDetails(deals);
 
-  return { deals };
+  if (deals.length > 0) {
+    try {
+      await redisChat.setMatchResult(sessionId, deals);
+    } catch (_) {
+      // Non-fatal
+    }
+  }
+
+  const out = { deals };
+  if (finalReply) out.reply = finalReply;
+  return out;
 }
+

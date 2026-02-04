@@ -22,11 +22,12 @@ app.get('/', (req, res) => {
 
 /**
  * POST /agent/buyer/match
- * Body: { user_id: number, access_token: string, job: { id, title, budget, priorities, service_category_id?, sub_category_id?, lat?, long? } }
- * Returns: { deals: Array }
+ * Body: { user_id: number, access_token: string, job: { id, title, budget, priorities, service_category_id?, ... }, message?: string }
+ * - message: optional follow-up question (conversation stored in Redis per user+job).
+ * Returns: { deals: Array, reply?: string } (reply present when message was sent or when agent returned text).
  */
 app.post('/agent/buyer/match', async (req, res) => {
-  const { user_id: userId, access_token: accessToken, job } = req.body ?? {};
+  const { user_id: userId, access_token: accessToken, job, message } = req.body ?? {};
 
   if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !job || typeof job !== 'object') {
     return res.status(400).json({
@@ -39,9 +40,11 @@ app.post('/agent/buyer/match', async (req, res) => {
     });
   }
 
+  const opts = typeof message === 'string' && message.trim() ? { userMessage: message.trim() } : {};
+
   try {
-    const { deals } = await runBuyerMatchAgent(userId, accessToken.trim(), job);
-    return res.json({ deals });
+    const result = await runBuyerMatchAgent(userId, accessToken.trim(), job, opts);
+    return res.json(result);
   } catch (err) {
     const message = err?.message ?? 'Match request failed';
     if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {

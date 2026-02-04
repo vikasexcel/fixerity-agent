@@ -9,16 +9,20 @@ import { MEM0_API_KEY } from '../config/index.js';
 
 let clientInstance = null;
 
+const LOG_PREFIX = '[Mem0]';
+
 /**
  * Get or create the Mem0 MemoryClient (Platform API).
  * @returns {MemoryClient | null} Client instance, or null if MEM0_API_KEY is missing.
  */
 function getClient() {
   if (!MEM0_API_KEY || MEM0_API_KEY.trim() === '') {
+    console.warn(`${LOG_PREFIX} Client skipped: MEM0_API_KEY is missing or empty`);
     return null;
   }
   if (!clientInstance) {
     clientInstance = new MemoryClient({ apiKey: MEM0_API_KEY });
+    console.log(`${LOG_PREFIX} Client initialized`);
   }
   return clientInstance;
 }
@@ -49,13 +53,16 @@ export async function add(userId, messages, metadata = {}) {
   if (!client) return;
   const { jobId, ...restMeta } = metadata;
   const user_id = buyerEntityId(userId, jobId);
+  const messageCount = Array.isArray(messages) ? messages.length : 0;
+  console.log(`${LOG_PREFIX} add(buyer) userId=${userId} user_id=${user_id} messages=${messageCount} metadata=${JSON.stringify(metadata)}`);
   try {
     await client.add(messages, {
       user_id,
       metadata: Object.keys(restMeta).length ? restMeta : undefined,
     });
+    console.log(`${LOG_PREFIX} add(buyer) success user_id=${user_id}`);
   } catch (err) {
-    console.error('[Mem0] add failed:', err.message);
+    console.error(`${LOG_PREFIX} add(buyer) failed user_id=${user_id}:`, err.message, err.stack);
   }
 }
 
@@ -71,19 +78,29 @@ export async function search(userId, query, options = {}) {
   if (!client) return '';
   const limit = options.limit ?? 10;
   const user_id = buyerEntityId(userId, options.jobId);
+  const queryPreview = typeof query === 'string' ? query.slice(0, 80) + (query.length > 80 ? '...' : '') : String(query).slice(0, 80);
+  console.log(`${LOG_PREFIX} search(buyer) userId=${userId} user_id=${user_id} limit=${limit} query="${queryPreview}"`);
   try {
+    // Platform API v2 requires filters with at least one of user_id, agent_id, app_id, run_id
     const results = await client.search(query, {
+      api_version: 'v2',
       filters: { user_id },
       top_k: limit,
     });
     const list = Array.isArray(results) ? results : (results?.results ?? []);
+    const rawCount = list.length;
     const memories = list
       .map((m) => (typeof m === 'string' ? m : m?.memory ?? m?.data?.memory))
       .filter(Boolean);
+    console.log(`${LOG_PREFIX} search(buyer) user_id=${user_id} rawResults=${rawCount} memories=${memories.length}`);
+    if (memories.length > 0) {
+      const preview = memories.map((t) => String(t).slice(0, 200)).join(' | ');
+      console.log(`${LOG_PREFIX} search(buyer) memoryPreview: ${preview}${preview.length >= 200 ? '...' : ''}`);
+    }
     if (memories.length === 0) return '';
     return memories.join('\n');
   } catch (err) {
-    console.error('[Mem0] search failed:', err.message);
+    console.error(`${LOG_PREFIX} search(buyer) failed user_id=${user_id}:`, err.message, err.stack);
     return '';
   }
 }
@@ -114,13 +131,16 @@ export async function addForProvider(providerId, messages, metadata = {}) {
   if (!client) return;
   const { orderId, ...restMeta } = metadata;
   const user_id = providerEntityId(providerId, orderId);
+  const messageCount = Array.isArray(messages) ? messages.length : 0;
+  console.log(`${LOG_PREFIX} add(provider) providerId=${providerId} user_id=${user_id} messages=${messageCount} metadata=${JSON.stringify(metadata)}`);
   try {
     await client.add(messages, {
       user_id,
       metadata: Object.keys(restMeta).length ? restMeta : undefined,
     });
+    console.log(`${LOG_PREFIX} add(provider) success user_id=${user_id}`);
   } catch (err) {
-    console.error('[Mem0] addForProvider failed:', err.message);
+    console.error(`${LOG_PREFIX} add(provider) failed user_id=${user_id}:`, err.message, err.stack);
   }
 }
 
@@ -136,19 +156,24 @@ export async function searchForProvider(providerId, query, options = {}) {
   if (!client) return '';
   const limit = options.limit ?? 10;
   const user_id = providerEntityId(providerId, options.orderId);
+  const queryPreview = typeof query === 'string' ? query.slice(0, 80) + (query.length > 80 ? '...' : '') : String(query).slice(0, 80);
+  console.log(`${LOG_PREFIX} search(provider) providerId=${providerId} user_id=${user_id} limit=${limit} query="${queryPreview}"`);
   try {
     const results = await client.search(query, {
+      api_version: 'v2',
       filters: { user_id },
       top_k: limit,
     });
     const list = Array.isArray(results) ? results : (results?.results ?? []);
+    const rawCount = list.length;
     const memories = list
       .map((m) => (typeof m === 'string' ? m : m?.memory ?? m?.data?.memory))
       .filter(Boolean);
+    console.log(`${LOG_PREFIX} search(provider) user_id=${user_id} rawResults=${rawCount} memories=${memories.length}`);
     if (memories.length === 0) return '';
     return memories.join('\n');
   } catch (err) {
-    console.error('[Mem0] searchForProvider failed:', err.message);
+    console.error(`${LOG_PREFIX} search(provider) failed user_id=${user_id}:`, err.message, err.stack);
     return '';
   }
 }
