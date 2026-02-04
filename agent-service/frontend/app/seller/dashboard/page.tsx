@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import type { Deal, Agent } from '@/lib/dummy-data';
 import { DealCard } from '@/components/seller/deal-card';
 import { DealDetailModal } from '@/components/seller/deal-detail-modal';
+import { EditProfileModal } from '@/components/seller/edit-profile-modal';
+import { ServiceManagement } from '@/components/seller/service-management';
 import { Button } from '@/components/ui/button';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 import { Star, Check, X, Loader2 } from 'lucide-react';
@@ -16,6 +18,8 @@ export default function SellerDashboard() {
   const router = useRouter();
   const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null);
   const [filter, setFilter] = useState<'all' | 'high' | 'medium'>('all');
+  const [activeTab, setActiveTab] = useState<'deals' | 'services'>('deals');
+  const [showEditProfile, setShowEditProfile] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingDeals, setLoadingDeals] = useState(false);
   const [providerData, setProviderData] = useState<ProviderHomeResponse | null>(null);
@@ -130,7 +134,10 @@ export default function SellerDashboard() {
               >
                 Run Agent Scan
               </Button>
-              <Button className="bg-primary hover:bg-primary/90 text-primary-foreground">
+              <Button
+                onClick={() => setShowEditProfile(true)}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground"
+              >
                 Edit Profile
               </Button>
               <button
@@ -149,6 +156,30 @@ export default function SellerDashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Tab Navigation */}
+        <div className="flex gap-3 mb-6 border-b border-border">
+          <button
+            onClick={() => setActiveTab('deals')}
+            className={`px-4 py-2 font-medium transition-colors ${
+              activeTab === 'deals'
+                ? 'text-primary border-b-2 border-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Deals
+          </button>
+          <button
+            onClick={() => setActiveTab('services')}
+            className={`px-4 py-2 font-medium transition-colors ${
+              activeTab === 'services'
+                ? 'text-primary border-b-2 border-primary'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Services
+          </button>
+        </div>
+
         {/* Profile Card */}
         {loading ? (
           <div className="bg-card border border-border rounded-lg p-6 mb-8">
@@ -212,73 +243,79 @@ export default function SellerDashboard() {
           </div>
         )}
 
-        {/* Quick Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Available Deals</p>
-            <p className="text-3xl font-bold text-foreground">{deals.length}</p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">High Match</p>
-            <p className="text-3xl font-bold text-primary">{deals.filter((d) => d.matchScore >= 85).length}</p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Avg Match Score</p>
-            <p className="text-3xl font-bold text-accent">
-              {deals.length > 0 ? Math.round(deals.reduce((acc, d) => acc + d.matchScore, 0) / deals.length) : 0}%
-            </p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Contacted</p>
-            <p className="text-3xl font-bold text-foreground">
-              {deals.filter((d) => d.status !== 'proposed').length}
-            </p>
-          </div>
-        </div>
-
-        {/* Filter Tabs */}
-        <div className="flex gap-3 mb-6 overflow-x-auto pb-2">
-          {(['all', 'high', 'medium'] as const).map((status) => (
-            <button
-              key={status}
-              onClick={() => setFilter(status)}
-              className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-colors ${
-                filter === status
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-secondary text-secondary-foreground hover:bg-accent'
-              }`}
-            >
-              {status === 'all' ? 'All Deals' : status === 'high' ? 'High Match (85%+)' : 'Medium Match (70%+)'}
-            </button>
-          ))}
-        </div>
-
-        {/* Deals List */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {loadingDeals ? (
-            <div className="lg:col-span-2 text-center py-12">
-              <Loader2 size={32} className="animate-spin text-muted-foreground mx-auto mb-4" />
-              <p className="text-muted-foreground text-lg">Scanning for matching jobs...</p>
+        {activeTab === 'deals' && (
+          <>
+            {/* Quick Stats */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <div className="bg-card rounded-lg border border-border p-5">
+                <p className="text-muted-foreground text-sm mb-2">Available Deals</p>
+                <p className="text-3xl font-bold text-foreground">{deals.length}</p>
+              </div>
+              <div className="bg-card rounded-lg border border-border p-5">
+                <p className="text-muted-foreground text-sm mb-2">High Match</p>
+                <p className="text-3xl font-bold text-primary">{deals.filter((d) => d.matchScore >= 85).length}</p>
+              </div>
+              <div className="bg-card rounded-lg border border-border p-5">
+                <p className="text-muted-foreground text-sm mb-2">Avg Match Score</p>
+                <p className="text-3xl font-bold text-accent">
+                  {deals.length > 0 ? Math.round(deals.reduce((acc, d) => acc + d.matchScore, 0) / deals.length) : 0}%
+                </p>
+              </div>
+              <div className="bg-card rounded-lg border border-border p-5">
+                <p className="text-muted-foreground text-sm mb-2">Contacted</p>
+                <p className="text-3xl font-bold text-foreground">
+                  {deals.filter((d) => d.status !== 'proposed').length}
+                </p>
+              </div>
             </div>
-          ) : filteredDeals.length > 0 ? (
-            filteredDeals.map((deal) => (
-              <DealCard key={deal.id} deal={deal} job={deal.job} onView={setSelectedDeal} />
-            ))
-          ) : (
-            <div className="lg:col-span-2 text-center py-12">
-              <p className="text-muted-foreground text-lg">No matching jobs found at this time</p>
-              <p className="text-muted-foreground text-sm mt-2">Run a scan to find matching jobs</p>
-              <Button
-                onClick={runScan}
-                disabled={loadingDeals}
-                className="mt-4 bg-primary hover:bg-primary/90 text-primary-foreground"
-              >
-                {loadingDeals ? <Loader2 size={16} className="animate-spin mr-2" /> : null}
-                Scan for jobs
-              </Button>
+
+            {/* Filter Tabs */}
+            <div className="flex gap-3 mb-6 overflow-x-auto pb-2">
+              {(['all', 'high', 'medium'] as const).map((status) => (
+                <button
+                  key={status}
+                  onClick={() => setFilter(status)}
+                  className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-colors ${
+                    filter === status
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-secondary-foreground hover:bg-accent'
+                  }`}
+                >
+                  {status === 'all' ? 'All Deals' : status === 'high' ? 'High Match (85%+)' : 'Medium Match (70%+)'}
+                </button>
+              ))}
             </div>
-          )}
-        </div>
+
+            {/* Deals List */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {loadingDeals ? (
+                <div className="lg:col-span-2 text-center py-12">
+                  <Loader2 size={32} className="animate-spin text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground text-lg">Scanning for matching jobs...</p>
+                </div>
+              ) : filteredDeals.length > 0 ? (
+                filteredDeals.map((deal) => (
+                  <DealCard key={deal.id} deal={deal} job={deal.job} onView={setSelectedDeal} />
+                ))
+              ) : (
+                <div className="lg:col-span-2 text-center py-12">
+                  <p className="text-muted-foreground text-lg">No matching jobs found at this time</p>
+                  <p className="text-muted-foreground text-sm mt-2">Run a scan to find matching jobs</p>
+                  <Button
+                    onClick={runScan}
+                    disabled={loadingDeals}
+                    className="mt-4 bg-primary hover:bg-primary/90 text-primary-foreground"
+                  >
+                    {loadingDeals ? <Loader2 size={16} className="animate-spin mr-2" /> : null}
+                    Scan for jobs
+                  </Button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {activeTab === 'services' && <ServiceManagement />}
       </main>
 
       {/* Deal Detail Modal */}
@@ -290,6 +327,31 @@ export default function SellerDashboard() {
           onAccept={() => {
             alert('Contact request sent to buyer!');
             setSelectedDeal(null);
+          }}
+        />
+      )}
+
+      {/* Edit Profile Modal */}
+      {showEditProfile && (
+        <EditProfileModal
+          onClose={() => setShowEditProfile(false)}
+          onSave={() => {
+            // Reload provider data after save
+            if (user && token) {
+              const fetchProviderData = async () => {
+                try {
+                  const [profile, homeData] = await Promise.all([
+                    getSellerProfile(Number(user.id), token).catch(() => null),
+                    getProviderHome(Number(user.id), token).catch(() => null),
+                  ]);
+                  if (profile) setAgentProfile({ provider_name: profile.provider_name, average_rating: profile.average_rating, total_completed_order: profile.total_completed_order });
+                  if (homeData) setProviderData(homeData);
+                } catch (err) {
+                  console.error('Failed to reload provider data:', err);
+                }
+              };
+              fetchProviderData();
+            }
           }}
         />
       )}

@@ -132,11 +132,11 @@ app.post('/agent/seller/chat', async (req, res) => {
 
 /**
  * POST /agent/seller/match
- * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, lat?, long? }
+ * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, agent_config? }
  * Returns: { deals: Array }
  */
 app.post('/agent/seller/match', async (req, res) => {
-  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, lat, long } = req.body ?? {};
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config } = req.body ?? {};
 
   if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -147,8 +147,9 @@ app.post('/agent/seller/match', async (req, res) => {
   const options = {};
   if (service_category_id != null) options.service_category_id = Number(service_category_id);
   if (sub_category_id != null) options.sub_category_id = Number(sub_category_id);
-  if (lat != null) options.lat = Number(lat);
-  if (long != null) options.long = Number(long);
+  if (agent_config != null && typeof agent_config === 'object') {
+    options.agentConfig = agent_config;
+  }
 
   try {
     const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);
@@ -203,12 +204,12 @@ app.post('/agent/seller/profile', async (req, res) => {
 /**
  * POST /agent/seller/scan
  * Alias for /agent/seller/match - scans new jobs for seller
- * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, lat?, long? }
+ * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, agent_config? }
  * Returns: { deals: Array }
  */
 app.post('/agent/seller/scan', async (req, res) => {
   // Reuse the match endpoint logic
-  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, lat, long } = req.body ?? {};
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, agent_config } = req.body ?? {};
 
   if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -219,8 +220,9 @@ app.post('/agent/seller/scan', async (req, res) => {
   const options = {};
   if (service_category_id != null) options.service_category_id = Number(service_category_id);
   if (sub_category_id != null) options.sub_category_id = Number(sub_category_id);
-  if (lat != null) options.lat = Number(lat);
-  if (long != null) options.long = Number(long);
+  if (agent_config != null && typeof agent_config === 'object') {
+    options.agentConfig = agent_config;
+  }
 
   try {
     const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);

@@ -147,7 +147,18 @@ export async function getSellerProfile(
 export async function matchSellerToJobs(
   providerId: number,
   accessToken: string,
-  options?: { service_category_id?: number; sub_category_id?: number; lat?: number; long?: number }
+  options?: {
+    service_category_id?: number;
+    sub_category_id?: number;
+    agentConfig?: {
+      provider_name: string;
+      average_rating: number;
+      total_completed_order: number;
+      num_of_rating: number;
+      licensed: boolean;
+      package_list: unknown[];
+    };
+  }
 ): Promise<Deal[]> {
   const base = getAgentServiceUrl();
   const url = `${base}/agent/seller/match`;
@@ -156,16 +167,21 @@ export async function matchSellerToJobs(
     access_token: string;
     service_category_id?: number;
     sub_category_id?: number;
-    lat?: number;
-    long?: number;
+    agent_config?: {
+      provider_name: string;
+      average_rating: number;
+      total_completed_order: number;
+      num_of_rating: number;
+      licensed: boolean;
+      package_list: unknown[];
+    };
   } = {
     provider_id: providerId,
     access_token: accessToken,
   };
   if (options?.service_category_id != null) body.service_category_id = options.service_category_id;
   if (options?.sub_category_id != null) body.sub_category_id = options.sub_category_id;
-  if (options?.lat != null) body.lat = options.lat;
-  if (options?.long != null) body.long = options.long;
+  if (options?.agentConfig) body.agent_config = options.agentConfig;
 
   const res = await fetch(url, {
     method: 'POST',

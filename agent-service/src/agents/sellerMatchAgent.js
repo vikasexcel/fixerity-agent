@@ -239,7 +239,7 @@ export async function getProviderProfile(providerId, accessToken, serviceCategor
 function createMatchJobsTool(providerId, accessToken) {
   return tool(
     async (input) => {
-      const { service_category_id, sub_category_id, lat, long, provider_profile_json } = input;
+      const { service_category_id, sub_category_id, provider_profile_json } = input;
       const providerProfile = typeof provider_profile_json === 'string' 
         ? JSON.parse(provider_profile_json) 
         : provider_profile_json;
@@ -249,8 +249,6 @@ function createMatchJobsTool(providerId, accessToken) {
         status: 'open', // Only search open jobs
         ...(service_category_id && { service_category_id: Number(service_category_id) }),
         ...(sub_category_id && { sub_category_id: Number(sub_category_id) }),
-        ...(lat != null && { lat: Number(lat) }),
-        ...(long != null && { long: Number(long) }),
       };
 
       try {
@@ -267,7 +265,7 @@ function createMatchJobsTool(providerId, accessToken) {
         if (data.status !== 1 || !data.jobs || data.jobs.length === 0) {
           return JSON.stringify({
             matches: [],
-            message: data?.message || 'No open jobs found for this category and location.',
+            message: data?.message || 'No open jobs found for this category.',
           });
         }
 
@@ -300,19 +298,17 @@ function createMatchJobsTool(providerId, accessToken) {
         return JSON.stringify({
           matches: [],
           error: err.message,
-          ...(isNoData && { message: 'No open jobs found for this category and location.' }),
+          ...(isNoData && { message: 'No open jobs found for this category.' }),
         });
       }
     },
     {
       name: 'matchSellerToJobs',
       description:
-        'Search for open jobs by service category and location, then evaluate and rank them against the seller profile. Returns top 5 matches. Use this when you have a seller profile and search params (service_category_id, sub_category_id, lat, long).',
+        'Search for open jobs by service category and subcategory, then evaluate and rank them against the seller profile. Returns top 5 matches. Use this when you have a seller profile and search params (service_category_id, sub_category_id).',
       schema: z.object({
         service_category_id: z.number().optional().describe('Service category ID'),
         sub_category_id: z.number().optional().describe('Sub-category ID'),
-        lat: z.number().optional().describe('Latitude'),
-        long: z.number().optional().describe('Longitude'),
         provider_profile_json: z.string().describe('JSON string of the provider profile with rating, packages, etc.'),
       }),
     }
@@ -353,26 +349,44 @@ function extractMatchesFromResult(result) {
  * Run the Seller Match Agent.
  * @param {number|string} providerId
  * @param {string} accessToken
- * @param {Object} [options] - Optional: service_category_id, sub_category_id, lat, long
+ * @param {Object} [options] - Optional: service_category_id, sub_category_id, agentConfig
  * @returns {Promise<{ matches: Array }>}
  */
 export async function runSellerMatchAgent(providerId, accessToken, options = {}) {
   const {
     service_category_id,
     sub_category_id,
-    lat,
-    long,
+    agentConfig,
   } = options;
 
-  // Get provider profile first - this will try multiple service categories if needed
-  const providerProfile = await getProviderProfile(
-    providerId,
-    accessToken,
-    service_category_id || 1,
-    sub_category_id || 1,
-    lat || 0,
-    long || 0
-  );
+  // Use agentConfig if provided, otherwise fetch provider profile from API
+  let providerProfile;
+  if (agentConfig) {
+    // Use configured agent details directly
+    providerProfile = {
+      provider_id: providerId,
+      provider_name: agentConfig.provider_name || 'Provider',
+      average_rating: agentConfig.average_rating || 0,
+      total_completed_order: agentConfig.total_completed_order || 0,
+      num_of_rating: agentConfig.num_of_rating || 0,
+      package_list: agentConfig.package_list || [],
+      licensed: agentConfig.licensed !== false,
+      service_category_id: service_category_id || 1,
+      sub_category_id: sub_category_id || 1,
+      lat: 0,
+      long: 0,
+    };
+  } else {
+    // Get provider profile from API - this will try multiple service categories if needed
+    providerProfile = await getProviderProfile(
+      providerId,
+      accessToken,
+      service_category_id || 1,
+      sub_category_id || 1,
+      0,
+      0
+    );
+  }
 
   // Use the service_category_id that worked for the provider profile
   const effectiveServiceCategoryId = providerProfile.service_category_id || service_category_id || 1;
@@ -390,7 +404,7 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
   const memoryContext = await mem0.searchForProvider(providerId, profileSummary, { limit: 5 });
   
   const systemPrompt = `You are a seller matching assistant. Your task is to match a seller profile to available jobs.
-Use the matchSellerToJobs tool ONCE with the provider profile (as JSON string), service_category_id, sub_category_id, lat, and long.
+Use the matchSellerToJobs tool ONCE with the provider profile (as JSON string), service_category_id, and sub_category_id.
 The provider profile will have: provider_id, provider_name, average_rating, total_completed_order, package_list, etc.
 After calling the tool and receiving the results, STOP. Do not call the tool again. The tool result contains the final matches.`;
 
@@ -420,7 +434,7 @@ After calling the tool and receiving the results, STOP. Do not call the tool aga
 
   console.log('[SellerMatchAgent] Calling agent with provider profile:', JSON.stringify(providerProfileForTool, null, 2));
   console.log('[SellerMatchAgent] Using service_category_id:', effectiveServiceCategoryId);
-  const userMessage = `Match this seller profile to available jobs. Provider: ${JSON.stringify(providerProfileForTool)}. Use service_category_id=${effectiveServiceCategoryId}, sub_category_id=${sub_category_id || 1}, lat=${lat || 0}, long=${long || 0}.`;
+  const userMessage = `Match this seller profile to available jobs. Provider: ${JSON.stringify(providerProfileForTool)}. Use service_category_id=${effectiveServiceCategoryId}, sub_category_id=${sub_category_id || 1}.`;
   const result = await agent.invoke({ messages: [new HumanMessage(userMessage)] });
 
   let matches = extractMatchesFromResult(result);
@@ -429,8 +443,6 @@ After calling the tool and receiving the results, STOP. Do not call the tool aga
     const toolResult = await matchTool.invoke({
       service_category_id: effectiveServiceCategoryId,
       sub_category_id: sub_category_id || 1,
-      lat: lat || 0,
-      long: long || 0,
       provider_profile_json: JSON.stringify(providerProfileForTool),
     });
     const parsed = JSON.parse(toolResult);
