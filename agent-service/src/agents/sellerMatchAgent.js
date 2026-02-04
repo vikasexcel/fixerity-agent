@@ -155,7 +155,7 @@ async function getProviderProfile(providerId, accessToken, serviceCategoryId, su
       service_category_id: serviceCategoryId || 1,
       lat: lat || 0,
       long: long || 0,
-    }, { providerId, accessToken });
+    }, { userId: providerId, providerId, accessToken });
 
     if (providerDetails.status !== 1 || !providerDetails.provider_details) {
       throw new Error('Provider details not found');
@@ -170,7 +170,7 @@ async function getProviderProfile(providerId, accessToken, serviceCategoryId, su
         const packagePath = 'on-demand/package-list';
         const packageData = await post(packagePath, {
           provider_service_id: provider.provider_service_id,
-        }, { providerId, accessToken });
+        }, { userId: providerId, providerId, accessToken });
         
         if (packageData.status === 1 && packageData.package_list) {
           packages = packageData.package_list;
@@ -232,9 +232,9 @@ function createMatchJobsTool(providerId, accessToken) {
       };
 
       try {
-        // Note: Current endpoint may require user_id. Backend should ideally support provider_id
-        // For now, attempt the call - may need backend changes
-        const data = await post(path, payload, { providerId, accessToken });
+        // Note: Some Laravel endpoints require user_id. For providers, we use provider_id as user_id
+        // since providers are also users in the system
+        const data = await post(path, payload, { userId: providerId, providerId, accessToken });
         
         if (data.status !== 1 || !data.jobs || data.jobs.length === 0) {
           return JSON.stringify({
@@ -343,9 +343,9 @@ export async function runSellerMatchAgent(providerId, accessToken, options = {})
   const memoryContext = await mem0.searchForProvider(providerId, profileSummary, { limit: 5 });
   
   const systemPrompt = `You are a seller matching assistant. Your task is to match a seller profile to available jobs.
-Use the matchSellerToJobs tool with the provider profile (as JSON string), service_category_id, sub_category_id, lat, and long.
+Use the matchSellerToJobs tool ONCE with the provider profile (as JSON string), service_category_id, sub_category_id, lat, and long.
 The provider profile will have: provider_id, provider_name, average_rating, total_completed_order, package_list, etc.
-Always call the tool - do not reply without calling it.`;
+After calling the tool and receiving the results, STOP. Do not call the tool again. The tool result contains the final matches.`;
 
   const matchTool = createMatchJobsTool(providerId, accessToken);
   const llm = new ChatOpenAI({
@@ -354,7 +354,12 @@ Always call the tool - do not reply without calling it.`;
     openAIApiKey: OPENAI_API_KEY,
   }).bindTools([matchTool]);
 
-  const agent = createReactAgent({ llm, tools: [matchTool], prompt: systemPrompt });
+  const agent = createReactAgent({ 
+    llm, 
+    tools: [matchTool], 
+    prompt: systemPrompt,
+    recursionLimit: 10, // Limit to prevent infinite loops
+  });
 
   const providerProfileForTool = {
     provider_id: providerProfile.provider_id,

@@ -2,6 +2,8 @@ import express from 'express';
 import dotenv from 'dotenv';
 import { runBuyerAgent } from './agents/buyerAgent.js';
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
+import { runSellerAgent } from './agents/sellerAgent.js';
+import { runSellerMatchAgent } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
 
@@ -80,6 +82,116 @@ app.post('/agent/buyer/chat', async (req, res) => {
     return res.json({ reply });
   } catch (err) {
     const message = err?.message ?? 'Agent request failed';
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
+    }
+    if (message.includes('status') && message.includes('0')) {
+      return res.status(502).json({ error: 'Backend API error. Please try again.' });
+    }
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/seller/chat
+ * Body: { provider_id: number, access_token: string, message: string, conversation_history?: Array<{role,content}>, order_id?: string, order_title?: string }
+ * Returns: { reply: string }
+ */
+app.post('/agent/seller/chat', async (req, res) => {
+  const { provider_id: providerId, access_token: accessToken, message, conversation_history, order_id: orderId, order_title: orderTitle } = req.body ?? {};
+
+  if (providerId == null || typeof message !== 'string' || !message.trim() || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({
+      error: 'Missing or invalid body: provider_id, message, and access_token are required.',
+    });
+  }
+
+  const opts = {};
+  if (Array.isArray(conversation_history) && conversation_history.length > 0) {
+    opts.conversationHistory = conversation_history.filter(
+      (m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    );
+  }
+  if (orderId && typeof orderId === 'string' && orderId.trim()) opts.orderId = orderId.trim();
+  if (orderTitle && typeof orderTitle === 'string' && orderTitle.trim()) opts.orderTitle = orderTitle.trim();
+
+  try {
+    const { reply } = await runSellerAgent(providerId, message.trim(), accessToken.trim(), opts);
+    return res.json({ reply });
+  } catch (err) {
+    const message = err?.message ?? 'Agent request failed';
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
+    }
+    if (message.includes('status') && message.includes('0')) {
+      return res.status(502).json({ error: 'Backend API error. Please try again.' });
+    }
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/seller/match
+ * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, lat?, long? }
+ * Returns: { deals: Array }
+ */
+app.post('/agent/seller/match', async (req, res) => {
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, lat, long } = req.body ?? {};
+
+  if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({
+      error: 'Missing or invalid body: provider_id and access_token are required.',
+    });
+  }
+
+  const options = {};
+  if (service_category_id != null) options.service_category_id = Number(service_category_id);
+  if (sub_category_id != null) options.sub_category_id = Number(sub_category_id);
+  if (lat != null) options.lat = Number(lat);
+  if (long != null) options.long = Number(long);
+
+  try {
+    const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);
+    return res.json({ deals: matches });
+  } catch (err) {
+    const message = err?.message ?? 'Match request failed';
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
+    }
+    if (message.includes('status') && message.includes('0')) {
+      return res.status(502).json({ error: 'Backend API error. Please try again.' });
+    }
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/seller/scan
+ * Alias for /agent/seller/match - scans new jobs for seller
+ * Body: { provider_id: number, access_token: string, service_category_id?, sub_category_id?, lat?, long? }
+ * Returns: { deals: Array }
+ */
+app.post('/agent/seller/scan', async (req, res) => {
+  // Reuse the match endpoint logic
+  const { provider_id: providerId, access_token: accessToken, service_category_id, sub_category_id, lat, long } = req.body ?? {};
+
+  if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({
+      error: 'Missing or invalid body: provider_id and access_token are required.',
+    });
+  }
+
+  const options = {};
+  if (service_category_id != null) options.service_category_id = Number(service_category_id);
+  if (sub_category_id != null) options.sub_category_id = Number(sub_category_id);
+  if (lat != null) options.lat = Number(lat);
+  if (long != null) options.long = Number(long);
+
+  try {
+    const { matches } = await runSellerMatchAgent(providerId, accessToken.trim(), options);
+    return res.json({ deals: matches });
+  } catch (err) {
+    const message = err?.message ?? 'Scan request failed';
     if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
       return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
     }

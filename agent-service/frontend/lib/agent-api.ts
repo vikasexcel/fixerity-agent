@@ -1,5 +1,5 @@
 /**
- * Agent service API client for buyer match.
+ * Agent service API client for buyer and seller agents.
  */
 
 import type { Job, Deal } from './dummy-data';
@@ -73,6 +73,86 @@ export async function sendBuyerChatMessage(
   };
   if (options?.jobId) body.job_id = options.jobId;
   if (options?.jobTitle) body.job_title = options.jobTitle;
+  if (options?.conversationHistory && options.conversationHistory.length > 0) {
+    body.conversation_history = options.conversationHistory;
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { reply?: string; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Chat request failed');
+  }
+  return data.reply ?? '';
+}
+
+/**
+ * Match seller to available jobs.
+ * Calls backend API which fetches real jobs from Laravel and evaluates matches.
+ */
+export async function matchSellerToJobs(
+  providerId: number,
+  accessToken: string,
+  options?: { service_category_id?: number; sub_category_id?: number; lat?: number; long?: number }
+): Promise<Deal[]> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/seller/match`;
+  const body: {
+    provider_id: number;
+    access_token: string;
+    service_category_id?: number;
+    sub_category_id?: number;
+    lat?: number;
+    long?: number;
+  } = {
+    provider_id: providerId,
+    access_token: accessToken,
+  };
+  if (options?.service_category_id != null) body.service_category_id = options.service_category_id;
+  if (options?.sub_category_id != null) body.sub_category_id = options.sub_category_id;
+  if (options?.lat != null) body.lat = options.lat;
+  if (options?.long != null) body.long = options.long;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { deals?: Deal[]; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Match request failed');
+  }
+  return data.deals ?? [];
+}
+
+/**
+ * Send a chat message to the seller agent.
+ * Backend agent uses real Laravel API to fetch provider data, packages, orders, etc.
+ */
+export async function sendSellerChatMessage(
+  providerId: number,
+  accessToken: string,
+  message: string,
+  options?: { orderId?: string; orderTitle?: string; conversationHistory?: ConversationTurn[] }
+): Promise<string> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/seller/chat`;
+  const body: {
+    provider_id: number;
+    access_token: string;
+    message: string;
+    order_id?: string;
+    order_title?: string;
+    conversation_history?: ConversationTurn[];
+  } = {
+    provider_id: providerId,
+    access_token: accessToken,
+    message,
+  };
+  if (options?.orderId) body.order_id = options.orderId;
+  if (options?.orderTitle) body.order_title = options.orderTitle;
   if (options?.conversationHistory && options.conversationHistory.length > 0) {
     body.conversation_history = options.conversationHistory;
   }

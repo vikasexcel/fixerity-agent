@@ -76,7 +76,12 @@ export async function runBuyerAgent(userId, message, accessToken, opts = {}) {
     openAIApiKey: OPENAI_API_KEY,
   }).bindTools(tools);
 
-  const agent = createReactAgent({ llm, tools, prompt: systemPrompt });
+  const agent = createReactAgent({ 
+    llm, 
+    tools, 
+    prompt: systemPrompt,
+    recursionLimit: 25, // Prevent infinite loops
+  });
 
   const historyMessages = conversationHistory.map((m) =>
     m.role === 'user' ? new HumanMessage(m.content) : new AIMessage(m.content)

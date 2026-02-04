@@ -216,9 +216,9 @@ export async function runBuyerMatchAgent(userId, accessToken, job) {
   const jobSummary = `Job: ${job.title}. Budget: $${job.budget?.min ?? 0}-${job.budget?.max ?? 0}. Priorities: ${JSON.stringify(job.priorities || [])}`;
   const memoryContext = await mem0.search(userId, jobSummary, { limit: 5 });
   const systemPrompt = `You are a buyer matching assistant. Your task is to match a job to service providers.
-Use the matchJobToProviders tool with the job (as JSON string), service_category_id, sub_category_id, lat, and long.
+Use the matchJobToProviders tool ONCE with the job (as JSON string), service_category_id, sub_category_id, lat, and long.
 The job will have: id, title, budget (min, max), priorities (array of {type, level, value, description}).
-Always call the tool - do not reply without calling it.`;
+After calling the tool and receiving the results, STOP. Do not call the tool again. The tool result contains the final matches.`;
 
   const matchTool = createMatchJobTool(userId, accessToken);
   const llm = new ChatOpenAI({
@@ -227,7 +227,12 @@ Always call the tool - do not reply without calling it.`;
     openAIApiKey: OPENAI_API_KEY,
   }).bindTools([matchTool]);
 
-  const agent = createReactAgent({ llm, tools: [matchTool], prompt: systemPrompt });
+  const agent = createReactAgent({ 
+    llm, 
+    tools: [matchTool], 
+    prompt: systemPrompt,
+    recursionLimit: 10, // Limit to prevent infinite loops
+  });
 
   const jobForTool = {
     id: job.id,

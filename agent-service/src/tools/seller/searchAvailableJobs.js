@@ -46,7 +46,8 @@ export function createSearchAvailableJobsTool(laravelClient, providerId, accessT
           ...(input.long != null && { long: input.long }),
         };
         
-        const data = await laravelClient(path, payload, { providerId, accessToken });
+        // Laravel endpoint requires user_id, so we pass providerId as userId
+        const data = await laravelClient(path, payload, { userId: providerId, providerId, accessToken });
         return JSON.stringify(data);
       } catch (err) {
         return `Failed to search available jobs: ${err.message}`;

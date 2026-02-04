@@ -36,7 +36,8 @@ export function createGetJobDetailsTool(laravelClient, providerId, accessToken) 
           status: 'all', // Search all statuses to find the job
         };
         
-        const data = await laravelClient(path, payload, { providerId, accessToken });
+        // Laravel endpoint requires user_id, so we pass providerId as userId
+        const data = await laravelClient(path, payload, { userId: providerId, providerId, accessToken });
         
         // If jobs array exists, find the specific job
         if (data.jobs && Array.isArray(data.jobs)) {

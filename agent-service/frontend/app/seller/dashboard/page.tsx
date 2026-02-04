@@ -2,10 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Job, Deal, Agent } from '@/lib/dummy-data';
+import type { Deal, Agent } from '@/lib/dummy-data';
 import { DealCard } from '@/components/seller/deal-card';
 import { DealDetailModal } from '@/components/seller/deal-detail-modal';
-import { SellerAgentRunner } from '@/components/seller/seller-agent-runner';
 import { Button } from '@/components/ui/button';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 import { Star, Check, X } from 'lucide-react';
@@ -15,7 +14,6 @@ export default function SellerDashboard() {
   const router = useRouter();
   const [selectedDeal, setSelectedDeal] = useState<Deal | null>(null);
   const [filter, setFilter] = useState<'all' | 'high' | 'medium'>('all');
-  const [showAgentRunner, setShowAgentRunner] = useState(false);
   const user = getAuthSession().user;
 
   useEffect(() => {
@@ -25,7 +23,6 @@ export default function SellerDashboard() {
   }, [user, router]);
 
   const [deals, setDeals] = useState<Deal[]>([]);
-  const [jobs, setJobs] = useState<Job[]>([]);
 
   const currentAgent: Agent | null = user
     ? {
@@ -63,7 +60,7 @@ export default function SellerDashboard() {
             </div>
             <div className="flex items-center gap-3">
               <Button 
-                onClick={() => setShowAgentRunner(true)}
+                onClick={() => router.push('/seller/chat')}
                 className="bg-accent hover:bg-accent/90 text-accent-foreground"
               >
                 Run Agent Scan
@@ -196,15 +193,6 @@ export default function SellerDashboard() {
             alert('Contact request sent to buyer!');
             setSelectedDeal(null);
           }}
-        />
-      )}
-
-      {/* Seller Agent Runner */}
-      {showAgentRunner && currentAgent && (
-        <SellerAgentRunner
-          agent={currentAgent}
-          availableJobs={jobs}
-          onClose={() => setShowAgentRunner(false)}
         />
       )}
     </div>
