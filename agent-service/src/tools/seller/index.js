@@ -13,11 +13,14 @@ import { createGetOrderHistoryTool } from './getOrderHistory.js';
 import { createGetOpenTimeListTool } from './getOpenTimeList.js';
 import { createUpdateWorkStatusTool } from './updateWorkStatus.js';
 import { createGetOrderFeedbackTool } from './getOrderFeedback.js';
+import { createSearchAvailableJobsTool } from './searchAvailableJobs.js';
+import { createGetJobDetailsTool } from './getJobDetails.js';
+import { createEvaluateJobMatchTool } from './evaluateJobMatch.js';
 
 /**
  * Create all Seller Agent tools with auth context.
  * @param {{ providerId?: number; accessToken?: string }} auth - Provider provider_id and access_token for Laravel API.
- * @returns {import('@langchain/core/tools').StructuredToolInterface[]} Array of 8 tools for the Seller Agent.
+ * @returns {import('@langchain/core/tools').StructuredToolInterface[]} Array of 11 tools for the Seller Agent.
  */
 export function createSellerTools(auth = {}) {
   const { providerId, accessToken } = auth;
@@ -32,5 +35,8 @@ export function createSellerTools(auth = {}) {
     createGetOpenTimeListTool(client, providerId, accessToken),
     createUpdateWorkStatusTool(client, providerId, accessToken),
     createGetOrderFeedbackTool(client, providerId, accessToken),
+    createSearchAvailableJobsTool(client, providerId, accessToken),
+    createGetJobDetailsTool(client, providerId, accessToken),
+    createEvaluateJobMatchTool(client, providerId, accessToken),
   ];
 }
