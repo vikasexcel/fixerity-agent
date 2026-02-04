@@ -221,8 +221,100 @@ class ProviderController extends Controller
             ->where('id', $service_category_id)
             ->first();
 
-        // Prepare response data
-        $data = [
+        $data = $this->buildProviderServicePayload($provider_service, $service_category);
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1') ?? "Success",
+            "message_code" => 1,
+            "data" => $data
+        ]);
+    }
+
+    /**
+     * Public API for users (customers): get provider services by user access_token and service_category_id.
+     * Authenticates the user (customer) via access_token, then returns all provider_services
+     * for the given service category (approved providers offering that service).
+     */
+    public function postPublicProviderServiceByCategory(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "access_token" => "required",
+            "service_category_id" => "required|integer"
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        // Normalize token (trim + string) so numeric JSON or whitespace still matches DB
+        $access_token = trim((string) $request->get('access_token'));
+        $user = User::where('access_token', $access_token)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if (!$user) {
+            return response()->json([
+                "status" => 5,
+                "message" => __('user_messages.5'),
+                "message_code" => 5,
+            ]);
+        }
+
+        if ($user->status == 0) {
+            return response()->json([
+                "status" => 3,
+                "message" => __('user_messages.3'),
+                "message_code" => 3,
+            ]);
+        }
+
+        if (!app()->environment('local') && $user->verified_at === null) {
+            return response()->json([
+                "status" => 2,
+                "message" => __('user_messages.2'),
+                "message_code" => 2,
+            ]);
+        }
+
+        $service_category_id = (int) $request->get('service_category_id');
+        $service_category = ServiceCategory::query()
+            ->where('id', $service_category_id)
+            ->first();
+
+        // All provider_services for this category (pending + approved; excluded blocked/rejected)
+        $provider_services = ProviderServices::query()
+            ->where('service_cat_id', $service_category_id)
+            ->whereIn('status', [0, 1])
+            ->get();
+
+        $data = [];
+        foreach ($provider_services as $provider_service) {
+            $data[] = $this->buildProviderServicePayload($provider_service, $service_category);
+        }
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1') ?? "Success",
+            "message_code" => 1,
+            "data" => $data
+        ]);
+    }
+
+    /**
+     * Build the provider service response payload (shared by provider-service-data and public endpoint).
+     *
+     * @param \App\Models\ProviderServices $provider_service
+     * @param \App\Models\ServiceCategory|null $service_category
+     * @return array
+     */
+    private function buildProviderServicePayload($provider_service, $service_category)
+    {
+        return [
             'id' => $provider_service->id,
             'provider_id' => $provider_service->provider_id,
             'service_cat_id' => $provider_service->service_cat_id,
@@ -242,13 +334,6 @@ class ProviderController extends Controller
             'created_at' => $provider_service->created_at,
             'updated_at' => $provider_service->updated_at
         ];
-
-        return response()->json([
-            "status" => 1,
-            "message" => __('provider_messages.1') ?? "Success",
-            "message_code" => 1,
-            "data" => $data
-        ]);
     }
 
     /**
