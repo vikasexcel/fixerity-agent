@@ -21,7 +21,7 @@ const PROVIDER_BASIC_DETAILS_PATH = 'on-demand/provider-basic-details';
  * @param {number} providerId - Provider ID
  * @returns {Promise<{ first_name: string, last_name: string, email: string, contact_number: string, gender: number } | null>}
  */
-async function fetchProviderBasicDetails(providerId) {
+export async function fetchProviderBasicDetails(providerId) {
   const id = Number(providerId);
   if (!id) return null;
   try {
@@ -39,7 +39,7 @@ async function fetchProviderBasicDetails(providerId) {
  * @param {number} service_category_id - From job
  * @returns {Promise<{ providers: Array, error?: string }>}
  */
-async function fetchProvidersByCategory(accessToken, service_category_id) {
+export async function fetchProvidersByCategory(accessToken, service_category_id) {
   const payload = {
     access_token: accessToken,
     service_category_id: Number(service_category_id) || 0,

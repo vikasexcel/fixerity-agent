@@ -3,23 +3,77 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Zap, Star, Send, Loader2 } from 'lucide-react';
+import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { matchJobToProviders, sendBuyerChatMessage } from '@/lib/agent-api';
+import { matchJobToProvidersWithNegotiationStream, sendBuyerChatMessage, type NegotiationStep } from '@/lib/agent-api';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs, updateJobStatus } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 type MatchPhase = 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
 
+export type NegotiationProviderLog = {
+  providerId: string;
+  providerName: string;
+  steps: NegotiationStep[];
+  outcome?: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number };
+};
+
 type ChatMessage =
-  | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string }
+  | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string; negotiationProviders?: NegotiationProviderLog[]; providersCount?: number }
   | { type: 'user'; content: string }
   | { type: 'assistant'; content: string };
 
 function normalizeJobId(id: string): string {
   return String(id).trim();
+}
+
+function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLog }) {
+  const [open, setOpen] = useState(true);
+  const { providerName, steps, outcome } = provider;
+  return (
+    <div className="bg-secondary/30 rounded-lg border border-border/50 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 p-3 text-left hover:bg-secondary/50 transition"
+      >
+        {open ? <ChevronDown size={16} className="text-muted-foreground shrink-0" /> : <ChevronRight size={16} className="text-muted-foreground shrink-0" />}
+        <Building2 size={16} className="text-primary shrink-0" />
+        <span className="font-medium text-foreground truncate">{providerName}</span>
+        {outcome && (
+          <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            {outcome.status === 'accepted' && <Check size={14} className="text-accent" />}
+            ${outcome.negotiatedPrice} · {outcome.negotiatedCompletionDays}d
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-0 space-y-1.5">
+          {steps.length === 0 && (
+            <p className="text-xs text-muted-foreground py-1">Waiting for offers…</p>
+          )}
+          {steps.map((step, i) => (
+            <div key={i} className="flex items-start gap-2 text-sm">
+              <span className="shrink-0 mt-0.5">
+                {step.role === 'buyer' ? (
+                  <User size={14} className="text-primary" />
+                ) : (
+                  <Building2 size={14} className="text-accent" />
+                )}
+              </span>
+              <span className="text-foreground">
+                <strong className="text-foreground">{step.role === 'buyer' ? 'You' : 'Provider'}</strong>
+                {' '}{step.action === 'accept' ? 'accepted' : 'offered'} ${step.price}, {step.completionDays} day{step.completionDays !== 1 ? 's' : ''}
+                {step.action === 'accept' && <span className="text-accent ml-1">· Deal</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function JobChatPage() {
@@ -94,7 +148,7 @@ export default function JobChatPage() {
     }
   }, [session.isLoading, user, router]);
 
-  // Run match when job is resolved
+  // Run negotiation + match with live streaming when job is resolved
   useEffect(() => {
     if (!job || !user || !token || messages.length > 0) return;
 
@@ -102,41 +156,93 @@ export default function JobChatPage() {
       setMessages([
         {
           type: 'match',
-          phase: 'scanning',
+          phase: 'evaluating',
           deals: undefined,
           error: undefined,
+          negotiationProviders: [],
         },
       ]);
 
+      const providersById = new Map<string, NegotiationProviderLog>();
+
+      function updateMatchMessage(updates: Partial<Extract<ChatMessage, { type: 'match' }>>) {
+        setMessages((prev) =>
+          prev.map((m, i) => (i === 0 && m.type === 'match' ? { ...m, ...updates } : m))
+        );
+      }
+
       try {
-        const deals = await matchJobToProviders(job, Number(user.id), token);
-        setMessages([
+        await matchJobToProvidersWithNegotiationStream(
+          job,
+          Number(user.id),
+          token,
           {
-            type: 'match',
-            phase: 'complete',
-            deals,
-            error: undefined,
+            onEvent: (event) => {
+              if (event.type === 'providers_fetched') {
+                updateMatchMessage({ providersCount: event.count });
+              } else if (event.type === 'provider_start') {
+                providersById.set(event.providerId, {
+                  providerId: event.providerId,
+                  providerName: event.providerName,
+                  steps: [],
+                });
+                updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+              } else if (event.type === 'negotiation_step') {
+                const log = providersById.get(event.providerId);
+                if (log) {
+                  const updated = { ...log, steps: [...log.steps, event.step] };
+                  providersById.set(event.providerId, updated);
+                  updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+                }
+              } else if (event.type === 'provider_done') {
+                const log = providersById.get(event.providerId);
+                if (log) {
+                  const updated = { ...log, outcome: event.outcome };
+                  providersById.set(event.providerId, updated);
+                  updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+                }
+              } else if (event.type === 'done') {
+                if (event.error) {
+                  updateMatchMessage({ phase: 'error', error: event.error, deals: event.deals ?? [] });
+                } else {
+                  updateMatchMessage({
+                    phase: 'complete',
+                    deals: event.deals ?? [],
+                    negotiationProviders: Array.from(providersById.values()),
+                  });
+                }
+              }
+            },
           },
-        ]);
+          {}
+        );
+
+        setMessages((prev) =>
+          prev.map((m, i) => {
+            if (i === 0 && m.type === 'match' && m.phase !== 'complete' && m.phase !== 'error') {
+              return { ...m, phase: 'complete' as const, deals: m.deals ?? [], negotiationProviders: Array.from(providersById.values()) };
+            }
+            return m;
+          })
+        );
 
         const numJobId = job.id.startsWith('job_') ? parseInt(job.id.replace('job_', ''), 10) : parseInt(job.id, 10);
         if (!isNaN(numJobId)) {
           updateJobStatus(Number(user.id), token, numJobId, 'matched').catch(() => {});
         }
       } catch (err) {
-        setMessages([
-          {
-            type: 'match',
-            phase: 'error',
-            deals: undefined,
-            error: err instanceof Error ? err.message : 'Matching failed. Please try again.',
-          },
-        ]);
+        setMessages((prev) =>
+          prev.map((m, i) =>
+            i === 0 && m.type === 'match'
+              ? { ...m, phase: 'error' as const, error: err instanceof Error ? err.message : 'Matching failed. Please try again.' }
+              : m
+          )
+        );
       }
     };
 
     runMatch();
-  }, [job?.id]);
+  }, [job?.id, user?.id, token]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -238,6 +344,7 @@ export default function JobChatPage() {
         {messages.map((msg, idx) => {
           if (msg.type === 'match') {
             const isRunning = msg.phase !== 'complete' && msg.phase !== 'error';
+            const providers = msg.negotiationProviders ?? [];
             return (
               <div
                 key={idx}
@@ -264,10 +371,12 @@ export default function JobChatPage() {
                   </div>
                   <div>
                     {isRunning && (
-                      <p className="font-medium text-foreground">Matching your job to providers...</p>
+                      <p className="font-medium text-foreground">
+                        Negotiating with providers{msg.providersCount != null ? ` (${msg.providersCount} found)` : ''}…
+                      </p>
                     )}
                     {msg.phase === 'complete' && (
-                      <p className="font-medium text-foreground">Match complete</p>
+                      <p className="font-medium text-foreground">Negotiation complete</p>
                     )}
                     {msg.phase === 'error' && (
                       <p className="font-medium text-destructive">Matching failed</p>
@@ -276,6 +385,16 @@ export default function JobChatPage() {
                 </div>
                 {(msg.phase === 'error' && msg.error) && (
                   <p className="text-sm text-muted-foreground">You can still ask follow-up questions about this job.</p>
+                )}
+                {providers.length > 0 && (
+                  <div className="mt-2 space-y-3">
+                    <p className="text-sm font-semibold text-foreground">Live negotiation by provider</p>
+                    <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
+                      {providers.map((prov) => (
+                        <NegotiationProviderCard key={prov.providerId} provider={prov} />
+                      ))}
+                    </div>
+                  </div>
                 )}
                 {msg.phase === 'complete' && (
                   <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
@@ -302,13 +421,20 @@ export default function JobChatPage() {
                           <div className="text-right">
                             <p className="font-semibold text-lg text-accent">{match.matchScore}%</p>
                             <p className="text-xs text-muted-foreground">match</p>
+                            {(match.negotiatedPrice != null || match.negotiatedCompletionDays != null) && (
+                              <p className="text-xs text-foreground mt-1">
+                                {match.negotiatedPrice != null && `$${match.negotiatedPrice}`}
+                                {match.negotiatedPrice != null && match.negotiatedCompletionDays != null && ' · '}
+                                {match.negotiatedCompletionDays != null && `${match.negotiatedCompletionDays}d`}
+                              </p>
+                            )}
                           </div>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
-                {msg.phase === 'complete' && msg.deals?.length === 0 && (
+                {msg.phase === 'complete' && msg.deals?.length === 0 && !providers.length && (
                   <p className="text-sm text-muted-foreground">No providers found for this job.</p>
                 )}
               </div>

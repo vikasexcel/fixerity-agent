@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
+import { runNegotiationAndMatch, runNegotiationAndMatchStream } from './agents/negotiationOrchestrator.js';
 import { runSellerMatchAgent, getProviderServiceData } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
@@ -52,6 +53,88 @@ app.post('/agent/buyer/match', async (req, res) => {
       return res.status(502).json({ error: 'Backend API error. Please try again.' });
     }
     return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/buyer/negotiate-and-match
+ * Body: { user_id, access_token, job: { id, title, budget, priorities, service_category_id?, ... }, negotiation_max_rounds?, negotiation_time_seconds? }
+ * Returns: { deals: Array, reply?: string } with each deal including negotiatedPrice, negotiatedCompletionDays, negotiationStatus
+ */
+app.post('/agent/buyer/negotiate-and-match', async (req, res) => {
+  const { user_id: userId, access_token: accessToken, job, negotiation_max_rounds: maxRounds, negotiation_time_seconds: negotiationTimeSeconds } = req.body ?? {};
+
+  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !job || typeof job !== 'object') {
+    return res.status(400).json({
+      error: 'Missing or invalid body: user_id, access_token, and job are required.',
+    });
+  }
+  if (!Array.isArray(job.priorities)) {
+    return res.status(400).json({
+      error: 'Job must include a priorities array.',
+    });
+  }
+
+  const opts = {};
+  if (maxRounds != null && Number(maxRounds) > 0) opts.maxRounds = Number(maxRounds);
+  if (negotiationTimeSeconds != null && Number(negotiationTimeSeconds) > 0) opts.negotiationTimeSeconds = Number(negotiationTimeSeconds);
+
+  try {
+    const result = await runNegotiationAndMatch(job, accessToken.trim(), opts);
+    return res.json(result);
+  } catch (err) {
+    const message = err?.message ?? 'Negotiate and match failed';
+    if (message.includes('401') || message.toLowerCase().includes('unauthorized')) {
+      return res.status(401).json({ error: 'Unauthorized. Check your access token.' });
+    }
+    if (message.includes('status') && message.includes('0')) {
+      return res.status(502).json({ error: 'Backend API error. Please try again.' });
+    }
+    return res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /agent/buyer/negotiate-and-match-stream
+ * Same body as negotiate-and-match. Response: Server-Sent Events (text/event-stream).
+ * Events: providers_fetched, provider_start, negotiation_step, provider_done, done.
+ */
+app.post('/agent/buyer/negotiate-and-match-stream', async (req, res) => {
+  const { user_id: userId, access_token: accessToken, job, negotiation_max_rounds: maxRounds, negotiation_time_seconds: negotiationTimeSeconds } = req.body ?? {};
+
+  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !job || typeof job !== 'object') {
+    return res.status(400).json({
+      error: 'Missing or invalid body: user_id, access_token, and job are required.',
+    });
+  }
+  if (!Array.isArray(job.priorities)) {
+    return res.status(400).json({
+      error: 'Job must include a priorities array.',
+    });
+  }
+
+  const opts = {};
+  if (maxRounds != null && Number(maxRounds) > 0) opts.maxRounds = Number(maxRounds);
+  if (negotiationTimeSeconds != null && Number(negotiationTimeSeconds) > 0) opts.negotiationTimeSeconds = Number(negotiationTimeSeconds);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+
+  const send = (event) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
+  };
+
+  try {
+    await runNegotiationAndMatchStream(job, accessToken.trim(), opts, send);
+  } catch (err) {
+    const message = err?.message ?? 'Negotiate and match stream failed';
+    send({ type: 'done', deals: [], error: message });
+  } finally {
+    res.end();
   }
 });
 

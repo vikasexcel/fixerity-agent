@@ -49,6 +49,159 @@ export async function matchJobToProviders(
   return data.deals ?? [];
 }
 
+/**
+ * Match job to providers with buyer-seller negotiation (price and completion time).
+ * Calls POST /agent/buyer/negotiate-and-match. Returns deals with negotiatedPrice and negotiatedCompletionDays.
+ */
+export async function matchJobToProvidersWithNegotiation(
+  job: Job,
+  userId: number,
+  accessToken: string,
+  options?: { negotiationMaxRounds?: number; negotiationTimeSeconds?: number }
+): Promise<Deal[]> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/buyer/negotiate-and-match`;
+  const body: {
+    user_id: number;
+    access_token: string;
+    job: Record<string, unknown>;
+    negotiation_max_rounds?: number;
+    negotiation_time_seconds?: number;
+  } = {
+    user_id: userId,
+    access_token: accessToken,
+    job: {
+      id: job.id,
+      title: job.title,
+      description: job.description,
+      budget: job.budget,
+      startDate: job.startDate,
+      endDate: job.endDate,
+      priorities: job.priorities,
+      service_category_id: job.service_category_id,
+      sub_category_id: job.sub_category_id,
+      lat: job.lat,
+      long: job.long,
+    },
+  };
+  if (options?.negotiationMaxRounds != null) body.negotiation_max_rounds = options.negotiationMaxRounds;
+  if (options?.negotiationTimeSeconds != null) body.negotiation_time_seconds = options.negotiationTimeSeconds;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { deals?: Deal[]; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Negotiate and match failed');
+  }
+  return data.deals ?? [];
+}
+
+/** One step in a negotiation (one offer from buyer or seller). */
+export interface NegotiationStep {
+  role: 'buyer' | 'seller';
+  round: number;
+  action: 'counter' | 'accept';
+  price: number;
+  completionDays: number;
+}
+
+/** Event from negotiate-and-match-stream SSE. */
+export type NegotiationStreamEvent =
+  | { type: 'providers_fetched'; count: number }
+  | { type: 'provider_start'; providerId: string; providerName: string }
+  | { type: 'negotiation_step'; providerId: string; providerName: string; step: NegotiationStep }
+  | { type: 'provider_done'; providerId: string; providerName: string; outcome: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number } }
+  | { type: 'done'; deals?: Deal[]; error?: string };
+
+/**
+ * Match job to providers with negotiation, streaming each step via onEvent (for live UI).
+ * Uses POST /agent/buyer/negotiate-and-match-stream (SSE).
+ */
+export async function matchJobToProvidersWithNegotiationStream(
+  job: Job,
+  userId: number,
+  accessToken: string,
+  callbacks: {
+    onEvent: (event: NegotiationStreamEvent) => void;
+    signal?: AbortSignal;
+  },
+  options?: { negotiationMaxRounds?: number; negotiationTimeSeconds?: number }
+): Promise<Deal[]> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/buyer/negotiate-and-match-stream`;
+  const body: Record<string, unknown> = {
+    user_id: userId,
+    access_token: accessToken,
+    job: {
+      id: job.id,
+      title: job.title,
+      description: job.description,
+      budget: job.budget,
+      startDate: job.startDate,
+      endDate: job.endDate,
+      priorities: job.priorities,
+      service_category_id: job.service_category_id,
+      sub_category_id: job.sub_category_id,
+      lat: job.lat,
+      long: job.long,
+    },
+  };
+  if (options?.negotiationMaxRounds != null) body.negotiation_max_rounds = options.negotiationMaxRounds;
+  if (options?.negotiationTimeSeconds != null) body.negotiation_time_seconds = options.negotiationTimeSeconds;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: callbacks.signal,
+  });
+
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data?.error ?? res.statusText ?? 'Negotiate and match stream failed');
+  }
+
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let lastDeals: Deal[] = [];
+
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6)) as NegotiationStreamEvent;
+            if (event.type === 'done' && event.deals) lastDeals = event.deals;
+            callbacks.onEvent(event);
+          } catch {
+            // skip malformed
+          }
+        }
+      }
+    }
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6)) as NegotiationStreamEvent;
+        if (event.type === 'done' && event.deals) lastDeals = event.deals;
+        callbacks.onEvent(event);
+      } catch {
+        // skip
+      }
+    }
+  }
+
+  return lastDeals;
+}
+
 export type ConversationTurn = { role: 'user' | 'assistant'; content: string };
 
 export async function sendBuyerChatMessage(

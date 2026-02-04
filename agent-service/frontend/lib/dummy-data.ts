@@ -60,6 +60,12 @@ export interface Deal {
   status: 'proposed' | 'rejected' | 'accepted';
   createdAt: string;
   job?: Job; // Optional: included when returned from match API
+  /** Agreed price from negotiation (negotiate-and-match endpoint). */
+  negotiatedPrice?: number;
+  /** Agreed completion time in days (negotiate-and-match endpoint). */
+  negotiatedCompletionDays?: number;
+  /** Whether negotiation ended in accept or timeout. */
+  negotiationStatus?: 'accepted' | 'timeout';
 }
 
 // Dummy Users

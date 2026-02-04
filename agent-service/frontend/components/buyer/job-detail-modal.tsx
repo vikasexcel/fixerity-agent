@@ -185,6 +185,21 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
                     </div>
                   </div>
 
+                  {(deal.negotiatedPrice != null || deal.negotiatedCompletionDays != null) && (
+                    <div className="mb-3 flex gap-4 text-sm">
+                      {deal.negotiatedPrice != null && (
+                        <span className="text-foreground font-medium">
+                          Agreed price: ${deal.negotiatedPrice.toLocaleString()}
+                        </span>
+                      )}
+                      {deal.negotiatedCompletionDays != null && (
+                        <span className="text-foreground font-medium">
+                          Completion: {deal.negotiatedCompletionDays} day{deal.negotiatedCompletionDays !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   <div className="mb-3">
                     <p className="text-xs font-semibold text-muted-foreground mb-2">WHY MATCHED</p>
                     <div className="space-y-1">
