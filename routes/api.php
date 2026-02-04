@@ -163,6 +163,7 @@ Route::group(['middleware' => 'setLocaleLang'], function () {
             Route::post('/get-service-list', [ProviderController::class,'postOnDemandServiceList'])->name('post:on_demand:service_list');
             Route::post('/provider-service-list', [ProviderController::class,'postOnDemandProviderServiceList'])->name('post:on_demand:provider_service_list');
             Route::post('/provider-service-data', [ProviderController::class,'postOnDemandProviderServiceData'])->name('post:on_demand:provider_service_data');
+            Route::post('/provider-basic-details', [ProviderController::class,'postOnDemandProviderBasicDetails'])->name('post:on_demand:provider_basic_details');
             Route::post('/public/provider-service-by-category', [ProviderController::class,'postPublicProviderServiceByCategory'])->name('post:on_demand:public_provider_service_by_category');
             Route::post('/update-agent-config', [ProviderController::class,'postOnDemandUpdateAgentConfig'])->name('post:on_demand:update_agent_config');
             Route::post('/add-services', [ProviderController::class,'postOnDemandAddServices'])->name('post:on_demand:add_services');

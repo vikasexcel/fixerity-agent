@@ -232,6 +232,53 @@ class ProviderController extends Controller
     }
 
     /**
+     * Get provider basic details by provider_id only (no auth required).
+     * Returns: first_name, last_name, email, contact_number, gender from providers table.
+     */
+    public function postOnDemandProviderBasicDetails(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "provider_id" => "required|integer",
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        $provider_id = (int) $request->get('provider_id');
+        $provider = Provider::query()
+            ->select('first_name', 'last_name', 'email', 'contact_number', 'gender')
+            ->where('id', $provider_id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if ($provider === null) {
+            return response()->json([
+                "status" => 0,
+                "message" => __('provider_messages.5') ?? "Provider not found",
+                "message_code" => 5,
+            ]);
+        }
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1') ?? "Success",
+            "message_code" => 1,
+            "data" => [
+                "first_name" => $provider->first_name,
+                "last_name" => $provider->last_name,
+                "email" => $provider->email,
+                "contact_number" => $provider->contact_number,
+                "gender" => $provider->gender,
+            ],
+        ]);
+    }
+
+    /**
      * Public API for users (customers): get provider services by user access_token and service_category_id.
      * Authenticates the user (customer) via access_token, then returns all provider_services
      * for the given service category (approved providers offering that service).
