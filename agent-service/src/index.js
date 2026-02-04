@@ -1,8 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import { runBuyerAgent } from './agents/buyerAgent.js';
+
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
-import { runSellerAgent } from './agents/sellerAgent.js';
 import { runSellerMatchAgent, getProviderServiceData } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
