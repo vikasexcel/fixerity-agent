@@ -1,0 +1,91 @@
+/**
+ * Seller Agent: LangGraph React agent with Mem0 provider-scoped memory.
+ * runSellerAgent(providerId, message, accessToken, opts?) → { reply }
+ * Supports conversation_history and order context for order-scoped chats.
+ */
+
+import { ChatOpenAI } from '@langchain/openai';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
+import { createSellerTools } from '../tools/seller/index.js';
+import * as mem0 from '../memory/mem0Client.js';
+import { OPENAI_API_KEY } from '../config/index.js';
+
+const BASE_SYSTEM_PROMPT = `You are a helpful seller assistant for the Fixerity Fox Handyman marketplace. You help service providers (sellers) manage their business: view and update packages/pricing, manage orders (view details, update status, track work progress), manage availability (open time slots), and view customer feedback. Use the provided tools to call the Laravel API; you have the provider's auth context. Be concise and helpful. If you don't have enough information to call a tool (e.g. order_id for order details), ask the user.`;
+
+/**
+ * Build system prompt with optional Mem0 context and order context.
+ * @param {string} [memoryContext] - Formatted string of relevant memories.
+ * @param {{ orderId?: string; orderTitle?: string }} [orderContext] - Order context for scoped conversations.
+ * @returns {string}
+ */
+function buildSystemPrompt(memoryContext, orderContext = {}) {
+  let prompt = BASE_SYSTEM_PROMPT;
+  if (orderContext.orderId || orderContext.orderTitle) {
+    const orderDesc = orderContext.orderTitle
+      ? `Current conversation is about order: "${orderContext.orderTitle}" (ID: ${orderContext.orderId || 'unknown'}).`
+      : `Current conversation is about order ID: ${orderContext.orderId}.`;
+    prompt += `\n\n${orderDesc} Keep answers focused on this order when relevant.`;
+  }
+  if (memoryContext && memoryContext.trim() !== '') {
+    prompt += `
+
+Relevant context from past conversations:
+${memoryContext}`;
+  }
+  return prompt;
+}
+
+/**
+ * Extract final assistant reply text from agent state messages.
+ * @param {import('@langchain/core/messages').BaseMessage[]} messages
+ * @returns {string}
+ */
+function getFinalReply(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg instanceof AIMessage && !msg.tool_calls?.length) {
+      const content = msg.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        const text = content.map((c) => (typeof c === 'string' ? c : c?.text ?? '')).join('');
+        if (text) return text;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Run the Seller Agent: retrieve Mem0 context, run LangGraph React agent, store turn in Mem0, return reply.
+ * @param {number|string} providerId - Provider id.
+ * @param {string} message - User message.
+ * @param {string} accessToken - Provider access_token for Laravel API.
+ * @param {{ conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>; orderId?: string; orderTitle?: string }} [opts] - Optional conversation history and order context.
+ * @returns {Promise<{ reply: string }>}
+ */
+export async function runSellerAgent(providerId, message, accessToken, opts = {}) {
+  const { conversationHistory = [], orderId, orderTitle } = opts;
+  const memoryContext = await mem0.searchForProvider(providerId, message, { limit: 10, orderId });
+  const systemPrompt = buildSystemPrompt(memoryContext, { orderId, orderTitle });
+
+  const tools = createSellerTools({ providerId, accessToken });
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  }).bindTools(tools);
+
+  const agent = createReactAgent({ llm, tools, prompt: systemPrompt });
+
+  const historyMessages = conversationHistory.map((m) =>
+    m.role === 'user' ? new HumanMessage(m.content) : new AIMessage(m.content)
+  );
+  const inputMessages = [...historyMessages, new HumanMessage(message)];
+  const result = await agent.invoke({ messages: inputMessages });
+
+  const reply = getFinalReply(result.messages ?? []);
+  await mem0.addForProvider(providerId, [{ role: 'user', content: message }, { role: 'assistant', content: reply }], { orderId });
+
+  return { reply: reply || 'I couldn\'t generate a reply. Please try again.' };
+}
