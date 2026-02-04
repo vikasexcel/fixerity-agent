@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { updateProviderProfile, getProviderHome, type ProviderHomeResponse } from '@/lib/provider-api';
 import { getAgentConfig, saveAgentConfig, type AgentConfig } from '@/lib/agent-config';
+import { getProviderServices } from '@/lib/provider-api';
 
 interface EditProfileModalProps {
   onClose: () => void;
@@ -42,7 +43,6 @@ export function EditProfileModal({ onClose, onSave }: EditProfileModalProps) {
 
   // Agent config data
   const [agentConfig, setAgentConfig] = useState<AgentConfig>({
-    provider_name: '',
     average_rating: 0,
     total_completed_order: 0,
     num_of_rating: 0,
@@ -55,9 +55,9 @@ export function EditProfileModal({ onClose, onSave }: EditProfileModalProps) {
 
     const loadData = async () => {
       try {
-        const [homeData, config] = await Promise.all([
+        const [homeData, services] = await Promise.all([
           getProviderHome(providerId, token).catch(() => null),
-          getAgentConfig(providerId),
+          getProviderServices(providerId, token).catch(() => []),
         ]);
 
         if (homeData) {
@@ -78,12 +78,39 @@ export function EditProfileModal({ onClose, onSave }: EditProfileModalProps) {
           });
         }
 
-        if (config) {
-          setAgentConfig(config);
+        // Load agent config for first service category if available
+        if (services.length > 0) {
+          const firstServiceCategoryId = services[0].service_cat_id;
+          try {
+            const config = await getAgentConfig(providerId, token, firstServiceCategoryId);
+            if (config) {
+              setAgentConfig(config);
+            } else if (homeData) {
+              // Initialize with API data
+              setAgentConfig({
+                average_rating: homeData.average_rating || 0,
+                total_completed_order: homeData.total_completed_order || 0,
+                num_of_rating: 0,
+                licensed: true,
+                package_list: [],
+              });
+            }
+          } catch (err) {
+            console.error('Failed to load agent config:', err);
+            // Initialize with default values
+            if (homeData) {
+              setAgentConfig({
+                average_rating: homeData.average_rating || 0,
+                total_completed_order: homeData.total_completed_order || 0,
+                num_of_rating: 0,
+                licensed: true,
+                package_list: [],
+              });
+            }
+          }
         } else if (homeData) {
-          // Initialize with API data
+          // No services, initialize with API data
           setAgentConfig({
-            provider_name: homeData.provider_name || '',
             average_rating: homeData.average_rating || 0,
             total_completed_order: homeData.total_completed_order || 0,
             num_of_rating: 0,
@@ -134,13 +161,20 @@ export function EditProfileModal({ onClose, onSave }: EditProfileModalProps) {
 
   const handleAgentConfigSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!providerId) return;
+    if (!providerId || !token) return;
 
     setLoading(true);
     setError(null);
 
     try {
-      saveAgentConfig(providerId, agentConfig);
+      // Get first service category ID
+      const services = await getProviderServices(providerId, token);
+      if (services.length === 0) {
+        throw new Error('No service categories found. Please add a service first.');
+      }
+      const firstServiceCategoryId = services[0].service_cat_id;
+      
+      await saveAgentConfig(providerId, token, firstServiceCategoryId, agentConfig);
       onSave?.();
       onClose();
     } catch (err) {
@@ -333,15 +367,6 @@ export function EditProfileModal({ onClose, onSave }: EditProfileModalProps) {
                 <p className="text-sm text-muted-foreground">
                   Configure the provider details used by the seller agent for job matching. These values will be used instead of fetching from the API.
                 </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-2">Provider Name *</label>
-                <Input
-                  value={agentConfig.provider_name}
-                  onChange={(e) => setAgentConfig({ ...agentConfig, provider_name: e.target.value })}
-                  required
-                />
               </div>
 
               <div>

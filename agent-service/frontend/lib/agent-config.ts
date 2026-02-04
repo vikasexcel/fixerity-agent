@@ -1,10 +1,13 @@
 /**
  * Agent Configuration Storage Utilities
  * Manages seller agent configuration (provider details used for job matching)
+ * Now uses database storage via API instead of localStorage
  */
 
+import { getProviderServiceData, updateAgentConfig as updateAgentConfigApi, type ProviderServiceData } from './provider-api';
+import { getAccessToken } from './auth-context';
+
 export interface AgentConfig {
-  provider_name: string;
   average_rating: number;
   total_completed_order: number;
   num_of_rating: number;
@@ -19,38 +22,68 @@ export interface AgentConfig {
 }
 
 /**
- * Get agent configuration for a provider from localStorage
+ * Get agent configuration for a provider from database via API
  */
-export function getAgentConfig(providerId: number): AgentConfig | null {
-  if (typeof window === 'undefined') return null;
+export async function getAgentConfig(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number
+): Promise<AgentConfig | null> {
   try {
-    const key = `agent_config_${providerId}`;
-    const stored = window.localStorage.getItem(key);
-    if (!stored) return null;
-    return JSON.parse(stored) as AgentConfig;
-  } catch {
+    const serviceData = await getProviderServiceData(providerId, accessToken, serviceCategoryId);
+    
+    // Convert database format to AgentConfig format
+    return {
+      average_rating: serviceData.average_rating ?? 0,
+      total_completed_order: serviceData.total_completed_order ?? 0,
+      num_of_rating: serviceData.num_of_rating ?? 0,
+      licensed: serviceData.licensed ?? false,
+      package_list: serviceData.package_list ?? [],
+    };
+  } catch (err) {
+    console.error('Failed to get agent config from database:', err);
     return null;
   }
 }
 
 /**
- * Save agent configuration for a provider to localStorage
+ * Save agent configuration for a provider to database via API
  */
-export function saveAgentConfig(providerId: number, config: AgentConfig): void {
-  if (typeof window === 'undefined') return;
+export async function saveAgentConfig(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number,
+  config: AgentConfig
+): Promise<void> {
   try {
-    const key = `agent_config_${providerId}`;
-    window.localStorage.setItem(key, JSON.stringify(config));
+    await updateAgentConfigApi({
+      provider_id: providerId,
+      access_token: accessToken,
+      service_category_id: serviceCategoryId,
+      average_rating: config.average_rating,
+      total_completed_order: config.total_completed_order,
+      num_of_rating: config.num_of_rating,
+      licensed: config.licensed,
+      package_list: config.package_list,
+    });
   } catch (err) {
-    console.error('Failed to save agent config:', err);
+    console.error('Failed to save agent config to database:', err);
+    throw err;
   }
 }
 
 /**
  * Get agent configuration in format expected by seller agent
  * Matches the structure used in sellerMatchAgent.js lines 412-418
+ * Note: provider_name should be fetched from provider data, not agent config
+ * This is now async and requires API call
  */
-export function getAgentConfigForAgent(providerId: number): {
+export async function getAgentConfigForAgent(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number,
+  providerName?: string
+): Promise<{
   provider_id: number;
   provider_name: string;
   average_rating: number;
@@ -58,13 +91,13 @@ export function getAgentConfigForAgent(providerId: number): {
   num_of_rating: number;
   package_list: unknown[];
   licensed: boolean;
-} | null {
-  const config = getAgentConfig(providerId);
+} | null> {
+  const config = await getAgentConfig(providerId, accessToken, serviceCategoryId);
   if (!config) return null;
 
   return {
     provider_id: providerId,
-    provider_name: config.provider_name,
+    provider_name: providerName || 'Provider',
     average_rating: config.average_rating,
     total_completed_order: config.total_completed_order,
     num_of_rating: config.num_of_rating,
@@ -74,14 +107,27 @@ export function getAgentConfigForAgent(providerId: number): {
 }
 
 /**
- * Delete agent configuration for a provider
+ * Delete agent configuration for a provider (reset to defaults)
+ * Sets all agent config fields to null/0
  */
-export function deleteAgentConfig(providerId: number): void {
-  if (typeof window === 'undefined') return;
+export async function deleteAgentConfig(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number
+): Promise<void> {
   try {
-    const key = `agent_config_${providerId}`;
-    window.localStorage.removeItem(key);
+    await updateAgentConfigApi({
+      provider_id: providerId,
+      access_token: accessToken,
+      service_category_id: serviceCategoryId,
+      average_rating: null,
+      total_completed_order: 0,
+      num_of_rating: 0,
+      licensed: false,
+      package_list: [],
+    });
   } catch (err) {
     console.error('Failed to delete agent config:', err);
+    throw err;
   }
 }

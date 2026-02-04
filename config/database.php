@@ -47,7 +47,9 @@ return [
             'url' => env('DB_URL'),
             'host' => env('DB_HOST', '127.0.0.1'),
             'port' => env('DB_PORT', '3306'),
-            'database' => env('DB_DATABASE', 'laravel'),
+            'database' => filter_var(strtolower(trim(env('TESTINGDB', ''))), FILTER_VALIDATE_BOOLEAN)
+                ? (env('DB_DATABASE_V2') ?: 'db_fixerity_v2')
+                : (env('DB_DATABASE') ?: 'db_fixerity'),
             'username' => env('DB_USERNAME', 'root'),
             'password' => env('DB_PASSWORD', ''),
             'unix_socket' => env('DB_SOCKET', ''),

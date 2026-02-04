@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import { runBuyerAgent } from './agents/buyerAgent.js';
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
 import { runSellerAgent } from './agents/sellerAgent.js';
-import { runSellerMatchAgent, getProviderProfile } from './agents/sellerMatchAgent.js';
+import { runSellerMatchAgent, getProviderServiceData } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
 
@@ -168,13 +168,13 @@ app.post('/agent/seller/match', async (req, res) => {
 
 /**
  * POST /agent/seller/profile
- * Returns the same provider profile the agent uses (from Laravel provider-details).
+ * Returns the provider service data the agent uses (from Laravel provider-service-data).
  * Use this on the dashboard so total_completed_order and average_rating match what the agent sees.
- * Body: { provider_id: number, access_token: string, service_category_id?, lat?, long? }
- * Returns: { profile: { provider_id, provider_name, average_rating, total_completed_order, ... } }
+ * Body: { provider_id: number, access_token: string, service_category_id }
+ * Returns: { profile: { provider_id, service_cat_id, average_rating, total_completed_order, ... } }
  */
 app.post('/agent/seller/profile', async (req, res) => {
-  const { provider_id: providerId, access_token: accessToken, service_category_id, lat, long } = req.body ?? {};
+  const { provider_id: providerId, access_token: accessToken, service_category_id } = req.body ?? {};
 
   if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
     return res.status(400).json({
@@ -182,15 +182,36 @@ app.post('/agent/seller/profile', async (req, res) => {
     });
   }
 
+  const serviceCategoryId = service_category_id ?? 1;
+
   try {
-    const profile = await getProviderProfile(
+    const profileData = await getProviderServiceData(
       providerId,
       accessToken.trim(),
-      service_category_id ?? 1,
-      1,
-      lat ?? 0,
-      long ?? 0
+      serviceCategoryId
     );
+    
+    if (!profileData) {
+      return res.status(404).json({
+        error: 'Provider service data not found for the specified service category.',
+      });
+    }
+
+    // Transform to match expected profile format
+    const profile = {
+      provider_id: providerId,
+      provider_name: 'Provider', // provider-service-data doesn't include provider_name
+      average_rating: parseFloat(profileData.average_rating) || 0,
+      total_completed_order: parseInt(profileData.total_completed_order, 10) || 0,
+      num_of_rating: parseInt(profileData.num_of_rating, 10) || 0,
+      licensed: profileData.licensed !== false,
+      service_category_id: profileData.service_cat_id,
+      min_price: profileData.min_price,
+      max_price: profileData.max_price,
+      deadline_in_days: profileData.deadline_in_days,
+      package_list: profileData.package_list || [],
+    };
+
     return res.json({ profile });
   } catch (err) {
     const message = err?.message ?? 'Profile request failed';

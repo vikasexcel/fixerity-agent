@@ -151,7 +151,6 @@ export async function matchSellerToJobs(
     service_category_id?: number;
     sub_category_id?: number;
     agentConfig?: {
-      provider_name: string;
       average_rating: number;
       total_completed_order: number;
       num_of_rating: number;
@@ -168,7 +167,6 @@ export async function matchSellerToJobs(
     service_category_id?: number;
     sub_category_id?: number;
     agent_config?: {
-      provider_name: string;
       average_rating: number;
       total_completed_order: number;
       num_of_rating: number;

@@ -284,7 +284,8 @@ class OnDemandClassApi
                     "message_code" => 4
                 ]);
             }
-            if ($provider_details->verified_at == Null) {
+            // Bypass OTP verification when APP_ENV=local for testing (matches UserClassApi::checkUserAllow)
+            if (!app()->environment('local') && $provider_details->verified_at == Null) {
                 return response()->json([
                     'status' => 2,
                     //                    'message' => "Provider Not Verified!",
@@ -319,20 +320,82 @@ class OnDemandClassApi
             'service_category.' . $lang_prefix . 'name as provider_service_name',
             'provider_services.status as provider_service_status',
             'provider_services.current_status as provider_service_current_status',
-            'service_category.id as service_category_id'
+            'service_category.id as service_category_id',
+            'service_category.name as service_cat_name',
+            'provider_services.min_price',
+            'provider_services.max_price',
+            'provider_services.deadline_in_days'
         )
             ->join('service_category', 'service_category.id', '=', 'provider_services.service_cat_id')
             ->where('provider_services.provider_id', $provider_id)
             ->whereIN('provider_services.service_cat_id', $this->on_demand_service_id_array)
             ->get();
+        
+        // Get provider currency for package price conversion
+        $provider_details = Provider::query()->where('id', $provider_id)->whereNull('providers.deleted_at')->first();
+        $provider_currency = WorldCurrency::query()->where('symbol', $provider_details->currency ?? '')->first();
+        if ($provider_currency == Null) {
+            $provider_currency = WorldCurrency::query()->where('default_currency', 1)->first();
+        }
+        $currency = $provider_currency ? $provider_currency->ratio : 1;
+        
         $get_provider_service_list_data = [];
         foreach ($get_provider_service_list as $key => $single_provider_service) {
 
             $get_provider_service_list_data[$key]['provider_service_id'] = $single_provider_service->provider_service_id;
             $get_provider_service_list_data[$key]['provider_service_name'] = $single_provider_service->provider_service_name;
+            $get_provider_service_list_data[$key]['service_cat_name'] = $single_provider_service->provider_service_name;
             $get_provider_service_list_data[$key]['provider_service_status'] = $single_provider_service->provider_service_status;
             $get_provider_service_list_data[$key]['provider_service_current_status'] = $single_provider_service->provider_service_current_status;
             $get_provider_service_list_data[$key]['service_category_id'] = $single_provider_service->service_category_id;
+            $get_provider_service_list_data[$key]['service_cat_id'] = $single_provider_service->service_category_id;
+            $get_provider_service_list_data[$key]['status'] = $single_provider_service->provider_service_status;
+            $get_provider_service_list_data[$key]['current_status'] = $single_provider_service->provider_service_current_status;
+            $get_provider_service_list_data[$key]['min_price'] = $single_provider_service->min_price;
+            $get_provider_service_list_data[$key]['max_price'] = $single_provider_service->max_price;
+            $get_provider_service_list_data[$key]['deadline_in_days'] = $single_provider_service->deadline_in_days;
+
+            // Fetch subcategories for this service category
+            $sub_categories = OtherServiceCategory::query()->select(
+                'id as category_id',
+                DB::raw("(CASE WHEN " . $lang_prefix . "name != '' THEN  " . $lang_prefix . "name ELSE name END) as category_name")
+            )->where('service_cat_id', $single_provider_service->service_category_id)->where('status', 1)->get();
+            
+            $subcategories_list = [];
+            $packages_list = [];
+            
+            foreach ($sub_categories as $sub_category) {
+                $subcategories_list[] = [
+                    'category_id' => $sub_category->category_id,
+                    'category_name' => $sub_category->category_name
+                ];
+                
+                // Fetch packages for this subcategory
+                $packages = OtherServiceProviderPackages::query()->select(
+                    'id as package_id',
+                    'name as package_name',
+                    DB::raw("(CASE WHEN description IS NOT NULL THEN description ELSE '' END) AS package_description"),
+                    'max_book_quantity as max_book_quantity',
+                    DB::raw('ROUND(price * ' . $currency . ',2) As package_price'),
+                    'status as package_status'
+                )->where('provider_service_id', $single_provider_service->provider_service_id)
+                  ->where('sub_cat_id', $sub_category->category_id)
+                  ->where('status', 1)
+                  ->get();
+                
+                foreach ($packages as $package) {
+                    $packages_list[] = [
+                        'package_id' => $package->package_id,
+                        'package_name' => $package->package_name,
+                        'package_description' => $package->package_description,
+                        'package_price' => $package->package_price,
+                        'max_book_quantity' => $package->max_book_quantity
+                    ];
+                }
+            }
+            
+            $get_provider_service_list_data[$key]['subcategories'] = $subcategories_list;
+            $get_provider_service_list_data[$key]['packages'] = $packages_list;
 
             $provider_gallery_image_data = $this->providerPortfolioList($provider_id, $single_provider_service->service_category_id);
             $provider_gal_image = $provider_gallery_image_data->getData();

@@ -41,6 +41,22 @@ export function ServiceDetails({ service, onClose }: ServiceDetailsProps) {
               <p className="text-sm text-muted-foreground">
                 Provider Service ID: {service.provider_service_id}
               </p>
+              {(service.min_price !== null && service.min_price !== undefined) || 
+               (service.max_price !== null && service.max_price !== undefined) ? (
+                <p className="text-sm text-foreground mt-2">
+                  <span className="font-medium">Price Range: </span>
+                  {service.min_price !== null && service.min_price !== undefined ? `$${service.min_price}` : ''}
+                  {service.min_price !== null && service.min_price !== undefined && 
+                   service.max_price !== null && service.max_price !== undefined ? ' - ' : ''}
+                  {service.max_price !== null && service.max_price !== undefined ? `$${service.max_price}` : ''}
+                </p>
+              ) : null}
+              {service.deadline_in_days !== null && service.deadline_in_days !== undefined ? (
+                <p className="text-sm text-foreground mt-2">
+                  <span className="font-medium">Deadline: </span>
+                  {service.deadline_in_days} day{service.deadline_in_days !== 1 ? 's' : ''}
+                </p>
+              ) : null}
             </div>
 
             <div>

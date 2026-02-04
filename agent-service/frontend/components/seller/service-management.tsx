@@ -93,6 +93,42 @@ export function ServiceManagement() {
                 <p className="text-sm text-muted-foreground mb-2">
                   Category ID: {service.service_cat_id}
                 </p>
+                {(service.min_price !== null && service.min_price !== undefined) || 
+                 (service.max_price !== null && service.max_price !== undefined) ? (
+                  <div className="text-sm text-foreground mb-2">
+                    <p>
+                      Price: {service.min_price !== null && service.min_price !== undefined ? `$${service.min_price}` : ''}
+                      {service.min_price !== null && service.min_price !== undefined && 
+                       service.max_price !== null && service.max_price !== undefined ? ' - ' : ''}
+                      {service.max_price !== null && service.max_price !== undefined ? `$${service.max_price}` : ''}
+                    </p>
+                  </div>
+                ) : null}
+                {service.deadline_in_days !== null && service.deadline_in_days !== undefined ? (
+                  <p className="text-sm text-foreground mb-2">
+                    Deadline: {service.deadline_in_days} day{service.deadline_in_days !== 1 ? 's' : ''}
+                  </p>
+                ) : null}
+                {service.subcategories && service.subcategories.length > 0 && (
+                  <div className="text-sm text-muted-foreground mb-2">
+                    <p className="font-medium text-foreground mb-1">Subcategories:</p>
+                    <div className="flex flex-wrap gap-1">
+                      {service.subcategories.slice(0, 3).map((sub) => (
+                        <span
+                          key={sub.category_id}
+                          className="text-xs bg-secondary text-secondary-foreground px-2 py-0.5 rounded"
+                        >
+                          {sub.category_name}
+                        </span>
+                      ))}
+                      {service.subcategories.length > 3 && (
+                        <span className="text-xs text-muted-foreground">
+                          +{service.subcategories.length - 3} more
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center gap-2 mt-4">
                   <span
                     className={`text-xs px-2 py-1 rounded ${

@@ -161,6 +161,9 @@ export interface ProviderServiceInfo {
   service_cat_name: string;
   status: number;
   current_status: number;
+  min_price?: number | null;
+  max_price?: number | null;
+  deadline_in_days?: number | null;
   subcategories?: Array<{ category_id: number; category_name: string }>;
   packages?: Array<{
     package_id: number;
@@ -196,6 +199,9 @@ export interface CreateProviderServicePayload {
   provider_id: number;
   access_token: string;
   service_category_id: number;
+  min_price?: number;
+  max_price?: number;
+  deadline_in_days?: number;
 }
 
 /**
@@ -211,5 +217,85 @@ export async function createProviderService(
       ...payload,
       step: 2,
     }
+  );
+}
+
+export interface ProviderServiceData {
+  id: number;
+  provider_id: number;
+  service_cat_id: number;
+  service_cat_name: string | null;
+  current_status: number;
+  is_sponsor: number;
+  status: number;
+  rejected_reason: string | null;
+  min_price: number | null;
+  max_price: number | null;
+  deadline_in_days: number | null;
+  average_rating: number | null;
+  total_completed_order: number;
+  num_of_rating: number;
+  licensed: boolean;
+  package_list: Array<{
+    package_id?: number;
+    package_name?: string;
+    package_description?: string;
+    package_price?: number;
+    max_book_quantity?: number;
+  }>;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Get provider service data including agent config.
+ * Laravel: POST /api/on-demand/provider-service-data
+ */
+export async function getProviderServiceData(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number
+): Promise<ProviderServiceData> {
+  const data = await apiPost<{ status: number; message: string; message_code: number; data: ProviderServiceData }>(
+    'on-demand/provider-service-data',
+    {
+      provider_id: providerId,
+      access_token: accessToken,
+      service_category_id: serviceCategoryId,
+    }
+  );
+  if (data.status !== 1 || !data.data) {
+    throw new Error(data.message || 'Provider service data not found');
+  }
+  return data.data;
+}
+
+export interface UpdateAgentConfigPayload {
+  provider_id: number;
+  access_token: string;
+  service_category_id: number;
+  average_rating?: number;
+  total_completed_order?: number;
+  num_of_rating?: number;
+  licensed?: boolean;
+  package_list?: Array<{
+    package_id?: number;
+    package_name?: string;
+    package_description?: string;
+    package_price?: number;
+    max_book_quantity?: number;
+  }>;
+}
+
+/**
+ * Update agent config for a provider service.
+ * Laravel: POST /api/on-demand/update-agent-config
+ */
+export async function updateAgentConfig(
+  payload: UpdateAgentConfigPayload
+): Promise<{ status: number; message: string; message_code: number }> {
+  return apiPost<{ status: number; message: string; message_code: number }>(
+    'on-demand/update-agent-config',
+    payload
   );
 }

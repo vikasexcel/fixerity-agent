@@ -173,12 +173,166 @@ class ProviderController extends Controller
         return $this->onDemandClassApi->providerServiceList($provider_details->id);
     }
 
+    /**
+     * Get provider service data by provider_id, service_category_id, and accessToken
+     * Returns all data from provider_services table including agent config
+     */
+    public function postOnDemandProviderServiceData(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "provider_id" => "required|integer",
+            "access_token" => "required|numeric",
+            "service_category_id" => "required|integer"
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        $provider_details = $this->onDemandClassApi->providerRegisterAllow($request->get('provider_id'), $request->get('access_token'));
+        if ($decoded['status'] = json_decode($provider_details) == false) {
+            return $provider_details;
+        }
+
+        $provider_id = $provider_details->id;
+        $service_category_id = $request->get('service_category_id');
+
+        // Get provider service data
+        $provider_service = ProviderServices::query()
+            ->where('provider_id', $provider_id)
+            ->where('service_cat_id', $service_category_id)
+            ->first();
+
+        if (!$provider_service) {
+            return response()->json([
+                "status" => 0,
+                "message" => __('provider_messages.1') ?? "Provider service not found",
+                "message_code" => 404,
+                "data" => null
+            ]);
+        }
+
+        // Get service category details
+        $service_category = ServiceCategory::query()
+            ->where('id', $service_category_id)
+            ->first();
+
+        // Prepare response data
+        $data = [
+            'id' => $provider_service->id,
+            'provider_id' => $provider_service->provider_id,
+            'service_cat_id' => $provider_service->service_cat_id,
+            'service_cat_name' => $service_category ? $service_category->name : null,
+            'current_status' => $provider_service->current_status,
+            'is_sponsor' => $provider_service->is_sponsor,
+            'status' => $provider_service->status,
+            'rejected_reason' => $provider_service->rejected_reason,
+            'min_price' => $provider_service->min_price,
+            'max_price' => $provider_service->max_price,
+            'deadline_in_days' => $provider_service->deadline_in_days,
+            'average_rating' => $provider_service->agent_average_rating,
+            'total_completed_order' => $provider_service->agent_total_completed_order,
+            'num_of_rating' => $provider_service->agent_num_of_rating,
+            'licensed' => $provider_service->agent_licensed == 1,
+            'package_list' => $provider_service->agent_package_list ? json_decode($provider_service->agent_package_list, true) : [],
+            'created_at' => $provider_service->created_at,
+            'updated_at' => $provider_service->updated_at
+        ];
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1') ?? "Success",
+            "message_code" => 1,
+            "data" => $data
+        ]);
+    }
+
+    /**
+     * Update agent config for a provider service
+     * Updates agent config fields in provider_services table
+     */
+    public function postOnDemandUpdateAgentConfig(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "provider_id" => "required|integer",
+            "access_token" => "required|numeric",
+            "service_category_id" => "required|integer",
+            "average_rating" => "nullable|numeric|min:0|max:5",
+            "total_completed_order" => "nullable|integer|min:0",
+            "num_of_rating" => "nullable|integer|min:0",
+            "licensed" => "nullable|boolean",
+            "package_list" => "nullable|array"
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        $provider_details = $this->onDemandClassApi->providerRegisterAllow($request->get('provider_id'), $request->get('access_token'));
+        if ($decoded['status'] = json_decode($provider_details) == false) {
+            return $provider_details;
+        }
+
+        $provider_id = $provider_details->id;
+        $service_category_id = $request->get('service_category_id');
+
+        // Get provider service data
+        $provider_service = ProviderServices::query()
+            ->where('provider_id', $provider_id)
+            ->where('service_cat_id', $service_category_id)
+            ->first();
+
+        if (!$provider_service) {
+            return response()->json([
+                "status" => 0,
+                "message" => __('provider_messages.1') ?? "Provider service not found",
+                "message_code" => 404,
+            ]);
+        }
+
+        // Update agent config fields
+        if ($request->has('average_rating')) {
+            $provider_service->agent_average_rating = $request->get('average_rating');
+        }
+        if ($request->has('total_completed_order')) {
+            $provider_service->agent_total_completed_order = $request->get('total_completed_order');
+        }
+        if ($request->has('num_of_rating')) {
+            $provider_service->agent_num_of_rating = $request->get('num_of_rating');
+        }
+        if ($request->has('licensed')) {
+            $provider_service->agent_licensed = $request->get('licensed') ? 1 : 0;
+        }
+        if ($request->has('package_list')) {
+            $provider_service->agent_package_list = json_encode($request->get('package_list'));
+        }
+
+        $provider_service->save();
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1') ?? "Agent config updated successfully",
+            "message_code" => 1,
+        ]);
+    }
+
     public function postOnDemandAddServices(Request $request)
     {
         $validator = Validator::make($request->all(), [
             "provider_id" => "required|integer",
             "access_token" => "required|numeric",
-            "service_cat_id" => "required"
+            "service_cat_id" => "required",
+            "min_price" => "nullable|numeric|min:0",
+            "max_price" => "nullable|numeric|min:0|gte:min_price",
+            "deadline_in_days" => "nullable|integer|min:1"
         ]);
 
         if ($validator->fails()) {
@@ -210,6 +364,9 @@ class ProviderController extends Controller
                     $add_provider_service->current_status = 1;
                     // $add_provider_service->status = 1;
                     $add_provider_service->status = 0;
+                    $add_provider_service->min_price = $request->get('min_price') ? $request->get('min_price') : null;
+                    $add_provider_service->max_price = $request->get('max_price') ? $request->get('max_price') : null;
+                    $add_provider_service->deadline_in_days = $request->get('deadline_in_days') ? $request->get('deadline_in_days') : null;
                     $add_provider_service->save();
 
                     if ($provider_details->status == 3) {
@@ -385,6 +542,55 @@ class ProviderController extends Controller
                 "message_code" => 9,
             ]);
         }
+    }
+
+    /**
+     * Get subcategories by service_category_id for providers (e.g. when creating a new service).
+     * Does not require provider_service_id.
+     */
+    public function postOnDemandGetSubcategoryList(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "provider_id" => "required|integer",
+            "access_token" => "required|numeric",
+            "service_category_id" => "required|integer"
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        $provider_details = $this->onDemandClassApi->providerRegisterAllow($request->get('provider_id'), $request->get('access_token'));
+        if ($decoded['status'] = json_decode($provider_details) == false) {
+            return $provider_details;
+        }
+
+        $service_category_id = $request->get('service_category_id');
+        if (!in_array((int) $service_category_id, $this->on_demand_service_id_array)) {
+            return response()->json([
+                "status" => 0,
+                "message" => __('provider_messages.9'),
+                "message_code" => 9,
+            ]);
+        }
+
+        $lang_prefix = $this->adminClass->get_langugae_fields($provider_details->language);
+
+        $sub_categories = OtherServiceCategory::select(
+            'id as category_id',
+            DB::raw("(CASE WHEN " . $lang_prefix . "name != '' THEN  " . $lang_prefix . "name ELSE name END) as category_name")
+        )->where('service_cat_id', $service_category_id)->where('status', 1)->get();
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('provider_messages.1'),
+            "message_code" => 1,
+            "category_list" => $sub_categories
+        ]);
     }
 
     public function postOnDemandGetCategoryList(Request $request)
@@ -2041,6 +2247,9 @@ class ProviderController extends Controller
             "long" => "required_if:step,==,1|numeric",
             "service_radius" => "required_if:step,==,1|numeric",
             "service_category_id" => "required_if:step,==,2|numeric",
+            "min_price" => "nullable|numeric|min:0",
+            "max_price" => "nullable|numeric|min:0|gte:min_price",
+            "deadline_in_days" => "nullable|integer|min:1",
             "service_sub_category_id" => "required_if:step,==,3|numeric",
             "package_name" => "required_if:step,==,3",
             "package_description" => "required_if:step,==,3",
@@ -2182,6 +2391,9 @@ class ProviderController extends Controller
             $get_provider_service->current_status = 1;
             // $get_provider_service->status = 1;
             $get_provider_service->status = 0;
+            $get_provider_service->min_price = $request->get('min_price') ? $request->get('min_price') : null;
+            $get_provider_service->max_price = $request->get('max_price') ? $request->get('max_price') : null;
+            $get_provider_service->deadline_in_days = $request->get('deadline_in_days') ? $request->get('deadline_in_days') : null;
             $get_provider_service->save();
             Provider::query()->where('id', $provider_id)->update(array('completed_step' => 2));
         } elseif ($step == 3) {

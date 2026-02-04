@@ -38,8 +38,8 @@ export function ServiceAgentRunner({ serviceCategoryId, subCategoryId, onClose }
     setDeals([]);
 
     try {
-      // Load agent configuration if exists
-      const agentConfig = getAgentConfigForAgent(providerId);
+      // Load agent configuration if exists from database
+      const agentConfig = await getAgentConfigForAgent(providerId, token, serviceCategoryId);
 
       // Call seller agent API
       const matchedDeals = await matchSellerToJobs(providerId, token, {

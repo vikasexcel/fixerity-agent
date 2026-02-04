@@ -5,7 +5,7 @@ import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { createProviderService } from '@/lib/provider-api';
-import { fetchServiceCategories, fetchSubCategories, type ServiceCategory } from '@/lib/services-api';
+import { fetchProviderServiceCategories, fetchProviderSubCategories, type ServiceCategory } from '@/lib/services-api';
 
 interface CreateServiceModalProps {
   onClose: () => void;
@@ -22,6 +22,9 @@ export function CreateServiceModal({ onClose, onServiceCreate }: CreateServiceMo
   const [subCategories, setSubCategories] = useState<Array<{ id: number; name: string }>>([]);
   const [selectedServiceCategoryId, setSelectedServiceCategoryId] = useState<string>('');
   const [selectedSubCategoryId, setSelectedSubCategoryId] = useState<string>('');
+  const [minPrice, setMinPrice] = useState<string>('');
+  const [maxPrice, setMaxPrice] = useState<string>('');
+  const [deadlineInDays, setDeadlineInDays] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,11 +33,10 @@ export function CreateServiceModal({ onClose, onServiceCreate }: CreateServiceMo
 
     const loadServices = async () => {
       try {
-        // For seller/provider, we might need a different endpoint, but using buyer endpoint for now
-        const svc = await fetchServiceCategories(providerId, token);
+        const svc = await fetchProviderServiceCategories(providerId, token);
         setServices(svc);
       } catch (err) {
-        console.error('Failed to load services:', err);
+        console.error('Failed to load service categories:', err);
         setServices([]);
       }
     };
@@ -50,7 +52,11 @@ export function CreateServiceModal({ onClose, onServiceCreate }: CreateServiceMo
 
     const loadSubCategories = async () => {
       try {
-        const subs = await fetchSubCategories(providerId, token, Number(selectedServiceCategoryId));
+        const subs = await fetchProviderSubCategories(
+          providerId,
+          token,
+          Number(selectedServiceCategoryId)
+        );
         setSubCategories(subs);
       } catch (err) {
         console.error('Failed to load subcategories:', err);
@@ -77,6 +83,9 @@ export function CreateServiceModal({ onClose, onServiceCreate }: CreateServiceMo
         provider_id: providerId,
         access_token: token,
         service_category_id: Number(selectedServiceCategoryId),
+        min_price: minPrice ? Number(minPrice) : undefined,
+        max_price: maxPrice ? Number(maxPrice) : undefined,
+        deadline_in_days: deadlineInDays ? Number(deadlineInDays) : undefined,
       });
       onServiceCreate?.();
       onClose();
@@ -150,6 +159,50 @@ export function CreateServiceModal({ onClose, onServiceCreate }: CreateServiceMo
               </select>
             </div>
           )}
+
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-2">
+              Min Price
+            </label>
+            <input
+              type="number"
+              value={minPrice}
+              onChange={(e) => setMinPrice(e.target.value)}
+              placeholder="Enter minimum price"
+              min="0"
+              step="0.01"
+              className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-2">
+              Max Price
+            </label>
+            <input
+              type="number"
+              value={maxPrice}
+              onChange={(e) => setMaxPrice(e.target.value)}
+              placeholder="Enter maximum price"
+              min="0"
+              step="0.01"
+              className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-foreground mb-2">
+              Deadline (in days)
+            </label>
+            <input
+              type="number"
+              value={deadlineInDays}
+              onChange={(e) => setDeadlineInDays(e.target.value)}
+              placeholder="Enter deadline in days"
+              min="1"
+              className="w-full px-4 py-2 rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
 
           <div className="flex gap-3 pt-4">
             <Button type="button" onClick={onClose} variant="outline" className="flex-1">
