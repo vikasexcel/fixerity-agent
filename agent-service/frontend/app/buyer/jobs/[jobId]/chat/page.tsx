@@ -497,14 +497,39 @@ export default function JobChatPage() {
         <div ref={messagesEndRef} />
       </main>
 
-      {/* Input */}
+      {/* Suggested follow-up prompts */}
       <div className="sticky bottom-0 bg-background border-t border-border py-4">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 space-y-3">
+          <p className="text-xs text-muted-foreground">Suggested questions:</p>
+          <div className="flex flex-wrap gap-2">
+            {[
+              'What deal do we have?',
+              'Tell me about the top provider',
+              'What is the payment schedule?',
+              'Who is licensed and has references?',
+              'What is the timeline for completion?',
+            ].map((label) => (
+              <Button
+                key={label}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-xs bg-card border-border"
+                disabled={sending}
+                onClick={() => {
+                  setInputValue(label);
+                  inputRef.current?.focus();
+                }}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
           <form onSubmit={handleSend} className="flex gap-2">
             <Input
               ref={inputRef}
               type="text"
-              placeholder="Ask a follow-up question about this job..."
+              placeholder="Ask a follow-up question about this job, providers, or payments..."
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               disabled={sending}

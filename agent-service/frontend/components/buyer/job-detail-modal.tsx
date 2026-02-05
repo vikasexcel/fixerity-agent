@@ -239,11 +239,9 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
                     <Button className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground text-sm">
                       View Profile
                     </Button>
-                    {deal.status === 'proposed' && (
-                      <Button variant="outline" className="flex-1 text-sm bg-transparent">
-                        Schedule Call
-                      </Button>
-                    )}
+                    <Button variant="outline" className="flex-1 text-sm bg-transparent">
+                      Schedule Call
+                    </Button>
                   </div>
                 </div>
               ))}

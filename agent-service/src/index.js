@@ -2,6 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 
 import { runBuyerMatchAgent } from './agents/buyerMatchAgent.js';
+import { runBuyerAgent } from './agents/buyerChatAgent.js';
 import { runNegotiationAndMatch, runNegotiationAndMatchStream } from './agents/negotiationOrchestrator.js';
 import { runSellerMatchAgent, getProviderServiceData } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
