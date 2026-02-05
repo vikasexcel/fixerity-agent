@@ -108,6 +108,10 @@ export interface NegotiationStep {
   message?: string;
   price?: number;
   completionDays?: number;
+  /** Payment terms (e.g. "50% upfront, 50% upon completion"). */
+  paymentSchedule?: string;
+  licensed?: boolean;
+  referencesAvailable?: boolean;
 }
 
 /** Event from negotiate-and-match-stream SSE. */

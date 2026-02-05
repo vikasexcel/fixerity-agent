@@ -54,7 +54,8 @@ export interface Deal {
   id: string;
   jobId: string;
   sellerId: string;
-  sellerAgent: Agent;
+  /** Present when using dummy/full data; API negotiate-and-match may return sellerName + quote instead. */
+  sellerAgent?: Agent;
   matchScore: number;
   matchReasons: string[];
   status: 'proposed' | 'rejected' | 'accepted';
@@ -66,6 +67,10 @@ export interface Deal {
   negotiatedCompletionDays?: number;
   /** Whether negotiation ended in accept or timeout. */
   negotiationStatus?: 'accepted' | 'timeout';
+  /** Name from API when sellerAgent is not populated. */
+  sellerName?: string;
+  /** Quote from API (e.g. { price }). */
+  quote?: { price?: number; completionDays?: number };
 }
 
 // Dummy Users

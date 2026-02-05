@@ -76,6 +76,19 @@ function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLo
                 {step.message && (
                   <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">{step.message}</p>
                 )}
+                {(step.paymentSchedule != null || step.licensed != null || step.referencesAvailable != null) && (
+                  <ul className="text-muted-foreground mt-1.5 text-xs leading-relaxed space-y-0.5 list-none pl-0">
+                    {step.paymentSchedule != null && (
+                      <li><span className="text-foreground/80">Payment:</span> {step.paymentSchedule}</li>
+                    )}
+                    {step.licensed != null && (
+                      <li><span className="text-foreground/80">Licensed:</span> {step.licensed ? 'Yes' : 'No'}</li>
+                    )}
+                    {step.referencesAvailable != null && (
+                      <li><span className="text-foreground/80">References:</span> {step.referencesAvailable ? 'Yes' : 'No'}</li>
+                    )}
+                  </ul>
+                )}
               </div>
             </div>
           ))}
@@ -420,11 +433,15 @@ export default function JobChatPage() {
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-semibold text-primary">{i + 1}.</span>
                             <div>
-                              <p className="text-sm font-medium text-foreground">{match.sellerAgent.name}</p>
-                              <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                <Star size={12} className="fill-muted-foreground text-muted-foreground" />
-                                {match.sellerAgent.rating} • {match.sellerAgent.jobsCompleted} jobs
-                              </p>
+                              <p className="text-sm font-medium text-foreground">{match.sellerAgent?.name ?? match.sellerName ?? 'Provider'}</p>
+                              {match.sellerAgent != null ? (
+                                <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                  <Star size={12} className="fill-muted-foreground text-muted-foreground" />
+                                  {match.sellerAgent.rating} • {match.sellerAgent.jobsCompleted} jobs
+                                </p>
+                              ) : match.quote?.price != null ? (
+                                <p className="text-xs text-muted-foreground">Quote: ${match.quote.price}</p>
+                              ) : null}
                             </div>
                           </div>
                           <div className="text-right">
