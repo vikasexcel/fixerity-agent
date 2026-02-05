@@ -66,11 +66,17 @@ function getCompletionDaysFromOffer(offer) {
   if (offer && typeof offer.completionDays === 'number') return offer.completionDays;
   return null;
 }
-// 🧠 Converts conversation memory into readable dialogue for the LLM
+// 🧠 Converts conversation memory into readable dialogue for the LLM (includes offer when present)
 function formatConversation(conversation = []) {
   if (!conversation.length) return "No messages yet.";
   return conversation
-    .map(m => `${m.role.toUpperCase()}: ${m.message}`)
+    .map((m) => {
+      const offer = m.offer;
+      const price = offer && typeof offer.price === "number" ? offer.price : null;
+      const days = offer && (typeof offer.days === "number" ? offer.days : typeof offer.completionDays === "number" ? offer.completionDays : null);
+      const offerStr = price != null && days != null ? ` [offer: $${price}, ${days} days]` : "";
+      return `${m.role.toUpperCase()}${offerStr}: ${m.message}`;
+    })
     .join("\n");
 }
 
@@ -85,7 +91,7 @@ async function buyerNode(state) {
   });
 
   const prompt = `
-You are the BUYER trying to hire a provider.
+You are the BUYER negotiating with a single provider. This is a natural back-and-forth conversation.
 
 Job:
 ${JSON.stringify(state.job, null, 2)}
@@ -93,19 +99,20 @@ ${JSON.stringify(state.job, null, 2)}
 Provider profile:
 ${JSON.stringify(state.providerServiceData, null, 2)}
 
-Conversation so far:
+Conversation so far (read it and respond to the LATEST message from the provider; do not repeat yourself):
 ${formatConversation(state.conversation)}
 
-Your goal:
-- Get the best price
-- Get fast delivery
-- Still close the deal
+Rules:
+- If the provider just sent a message, respond directly to what they said (e.g. acknowledge their price or timeline, then make your counter or accept).
+- If this is your first message, introduce your budget and timeline in one short message and give your opening offer.
+- Never copy-paste or repeat a previous message. Each reply must move the conversation forward.
+- Prefer short, natural sentences. You may accept, or counter with a new price and/or days.
 
-Reply ONLY in JSON:
+Reply ONLY with valid JSON, no other text:
 {
-  "message": "what you say to the provider",
-  "action": "continue" | "accept",
-  "offer": { "price": number, "days": number } | null
+  "message": "your next message to the provider (one short paragraph, respond to their last message)",
+  "action": "continue" or "accept",
+  "offer": { "price": number, "days": number } or null (required when countering; use your proposed price and completion days)
 }
 `;
 
@@ -118,8 +125,9 @@ Reply ONLY in JSON:
     offer: data.offer,
   };
 
+  // Return only the new message; reducer will append to state.conversation (avoids duplication)
   return {
-    conversation: [...state.conversation, message],
+    conversation: [message],
     round: state.round + 1,
     status: data.action === "accept" ? "accepted" : "negotiating",
     finalDeal: data.action === "accept" ? data.offer : state.finalDeal,
@@ -138,27 +146,28 @@ async function sellerNode(state) {
   });
 
   const prompt = `
-You are the SERVICE PROVIDER.
+You are the SERVICE PROVIDER in a negotiation with a buyer. This is a natural back-and-forth conversation.
 
-Your business info:
+Your business info (min/max price, typical timeline):
 ${JSON.stringify(state.providerServiceData, null, 2)}
 
 Job:
 ${JSON.stringify(state.job, null, 2)}
 
-Conversation so far:
+Conversation so far (read it and respond to the LATEST message from the buyer; do not repeat yourself):
 ${formatConversation(state.conversation)}
 
-Your goal:
-- Maximize earnings
-- Avoid unrealistic deadlines
-- Still close the deal
+Rules:
+- If the buyer just sent a message, respond directly to what they said (e.g. acknowledge their offer, then accept or counter with your terms).
+- If this is your first message, state your minimum price and realistic timeline in one short message and give your opening offer.
+- Never copy-paste or repeat a previous message. Each reply must move the conversation forward.
+- Prefer short, natural sentences. You may accept their offer, or counter with your price and/or days.
 
-Reply ONLY in JSON:
+Reply ONLY with valid JSON, no other text:
 {
-  "message": "what you say to the buyer",
-  "action": "continue" | "accept",
-  "offer": { "price": number, "days": number } | null
+  "message": "your next message to the buyer (one short paragraph, respond to their last message)",
+  "action": "continue" or "accept",
+  "offer": { "price": number, "days": number } or null (required when countering; use your proposed price and completion days)
 }
 `;
 
@@ -171,8 +180,9 @@ Reply ONLY in JSON:
     offer: data.offer,
   };
 
+  // Return only the new message; reducer will append to state.conversation (avoids duplication)
   return {
-    conversation: [...state.conversation, message],
+    conversation: [message],
     round: state.round + 1,
     status: data.action === "accept" ? "accepted" : "negotiating",
     finalDeal: data.action === "accept" ? data.offer : state.finalDeal,
