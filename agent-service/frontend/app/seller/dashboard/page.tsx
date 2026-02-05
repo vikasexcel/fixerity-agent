@@ -71,7 +71,7 @@ export default function SellerDashboard() {
                 </div>
               ) : (
                 <p className="text-muted-foreground text-sm mt-1">
-                  Welcome, {displayName} • {completedCount} projects completed
+                  Welcome, {displayName}
                 </p>
               )}
             </div>
@@ -112,7 +112,7 @@ export default function SellerDashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Profile Card */}
+        {/* Profile Card — commented out
         {loading ? (
           <div className="bg-card border border-border rounded-lg p-6 mb-8">
             <div className="flex items-center justify-center py-8">
@@ -174,6 +174,7 @@ export default function SellerDashboard() {
             </div>
           </div>
         )}
+        */}
 
         <ServiceManagement />
       </main>

@@ -3,8 +3,6 @@
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { type ProviderServiceInfo } from '@/lib/provider-api';
-import { ServiceAgentRunner } from './service-agent-runner';
-import { useState } from 'react';
 
 interface ServiceDetailsProps {
   service: ProviderServiceInfo;
@@ -12,8 +10,6 @@ interface ServiceDetailsProps {
 }
 
 export function ServiceDetails({ service, onClose }: ServiceDetailsProps) {
-  const [showAgentRunner, setShowAgentRunner] = useState(false);
-
   return (
     <>
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -141,30 +137,13 @@ export function ServiceDetails({ service, onClose }: ServiceDetailsProps) {
           </div>
 
           {/* Footer */}
-          <div className="border-t border-border p-6 flex gap-3">
-            <Button onClick={onClose} variant="outline" className="flex-1">
+          <div className="border-t border-border p-6">
+            <Button onClick={onClose} variant="outline">
               Close
-            </Button>
-            <Button
-              onClick={() => setShowAgentRunner(true)}
-              className="flex-1 bg-accent hover:bg-accent/90 text-accent-foreground"
-            >
-              Start Agent
             </Button>
           </div>
         </div>
       </div>
-
-      {showAgentRunner && (
-        <ServiceAgentRunner
-          serviceCategoryId={service.service_cat_id}
-          subCategoryId={service.subcategories?.[0]?.category_id}
-          onClose={() => {
-            setShowAgentRunner(false);
-            onClose();
-          }}
-        />
-      )}
     </>
   );
 }

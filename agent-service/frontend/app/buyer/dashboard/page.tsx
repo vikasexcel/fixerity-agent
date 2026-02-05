@@ -76,34 +76,6 @@ export default function BuyerDashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Quick Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Active Jobs</p>
-            <p className="text-3xl font-bold text-foreground">
-              {jobs.filter((j) => j.status === 'open').length}
-            </p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Matched Deals</p>
-            <p className="text-3xl font-bold text-primary">
-              {deals.filter((d) => d.status === 'proposed').length}
-            </p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Avg Match Score</p>
-            <p className="text-3xl font-bold text-accent">
-              {deals.length > 0 ? Math.round(deals.reduce((acc, d) => acc + d.matchScore, 0) / deals.length) : 0}%
-            </p>
-          </div>
-          <div className="bg-card rounded-lg border border-border p-5">
-            <p className="text-muted-foreground text-sm mb-2">Completed Jobs</p>
-            <p className="text-3xl font-bold text-foreground">
-              {jobs.filter((j) => j.status === 'completed').length}
-            </p>
-          </div>
-        </div>
-
         {/* Filter Tabs */}
         <div className="flex gap-3 mb-6 overflow-x-auto pb-2">
           {(['open', 'matched', 'completed', 'all'] as const).map((status) => (
