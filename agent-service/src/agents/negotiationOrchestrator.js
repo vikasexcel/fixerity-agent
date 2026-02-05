@@ -58,10 +58,15 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
 
     if (!outcome?.quote) continue;
 
+    const lastSellerMessage = Array.isArray(outcome.transcript)
+      ? outcome.transcript.filter((m) => m.role === 'seller').pop()?.message
+      : null;
+
     results.push({
       providerId: String(providerId),
       provider,
       quote: outcome.quote,
+      negotiationMessage: lastSellerMessage ?? null,
     });
   }
 
@@ -94,6 +99,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
         sellerName: basic?.first_name ?? r.provider.name ?? 'Provider',
         quote: r.quote,
         matchScore,
+        negotiationMessage: r.negotiationMessage ?? null,
       };
     })
   );
@@ -217,7 +223,18 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
       });
     }
 
-    if (outcome?.quote) results.push({ providerId: String(providerId), provider, quote: outcome.quote });
+    const lastSellerMessage = Array.isArray(outcome?.transcript)
+      ? outcome.transcript.filter((m) => m.role === 'seller').pop()?.message
+      : null;
+
+    if (outcome?.quote) {
+      results.push({
+        providerId: String(providerId),
+        provider,
+        quote: outcome.quote,
+        negotiationMessage: lastSellerMessage ?? null,
+      });
+    }
   }
 
   /* same scoring as runMatchAndRecommend */
@@ -238,6 +255,7 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
         sellerName: basic?.first_name ?? r.provider.name ?? 'Provider',
         quote: r.quote,
         matchScore,
+        negotiationMessage: r.negotiationMessage ?? null,
       };
     })
   );
@@ -248,4 +266,5 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
       : 'No providers matched your must-have requirements.';
 
   if (typeof send === 'function') send({ type: 'done', deals: topDeals, reply });
+  return { deals: topDeals, reply };
 }

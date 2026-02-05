@@ -6,7 +6,9 @@ import { runNegotiationAndMatch, runNegotiationAndMatchStream } from './agents/n
 import { runSellerMatchAgent, getProviderServiceData } from './agents/sellerMatchAgent.js';
 import { PORT } from './config/index.js';
 import cors from 'cors';
-
+import { sequelize } from './db.js';
+import JobMatchQuote from './models/JobMatchQuote.js';
+import { saveDealsForJob, getDealsForJob } from './lib/jobMatchQuoteStore.js';
 dotenv.config();
 
 const app = express();
@@ -81,6 +83,9 @@ app.post('/agent/buyer/negotiate-and-match', async (req, res) => {
 
   try {
     const result = await runNegotiationAndMatch(job, accessToken.trim(), opts);
+    if (result?.deals?.length && userId != null && job?.id) {
+      saveDealsForJob(Number(userId), String(job.id), result.deals).catch((e) => console.error('[job-match] save', e.message));
+    }
     return res.json(result);
   } catch (err) {
     const message = err?.message ?? 'Negotiate and match failed';
@@ -129,12 +134,38 @@ app.post('/agent/buyer/negotiate-and-match-stream', async (req, res) => {
   };
 
   try {
-    await runNegotiationAndMatchStream(job, accessToken.trim(), opts, send);
+    const result = await runNegotiationAndMatchStream(job, accessToken.trim(), opts, send);
+    if (result?.deals?.length && userId != null && job?.id) {
+      saveDealsForJob(Number(userId), String(job.id), result.deals).catch((e) => console.error('[job-match] save', e.message));
+    }
   } catch (err) {
     const message = err?.message ?? 'Negotiate and match stream failed';
     send({ type: 'done', deals: [], error: message });
   } finally {
     res.end();
+  }
+});
+
+/**
+ * POST /agent/buyer/job-matches
+ * Body: { user_id, access_token, job_id }
+ * Returns: { deals: Array } — stored match quotes from DB (no agent call).
+ */
+app.post('/agent/buyer/job-matches', async (req, res) => {
+  const { user_id: userId, access_token: accessToken, job_id: jobId } = req.body ?? {};
+
+  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !jobId) {
+    return res.status(400).json({
+      error: 'Missing or invalid body: user_id, access_token, and job_id are required.',
+    });
+  }
+
+  try {
+    const deals = await getDealsForJob(Number(userId), String(jobId));
+    return res.json({ deals });
+  } catch (err) {
+    const message = err?.message ?? 'Failed to load job matches';
+    return res.status(500).json({ error: message });
   }
 });
 
@@ -383,6 +414,19 @@ app.post('/webhook/provider-registered', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+async function startServer() {
+  try {
+    await sequelize.authenticate();
+    console.log('Database connection established.');
+    await JobMatchQuote.sync();
+    console.log('Table job_match_quotes ready (created if not exist).');
+  } catch (err) {
+    console.error('Database error:', err.message);
+    process.exitCode = 1;
+  }
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
+
+startServer();

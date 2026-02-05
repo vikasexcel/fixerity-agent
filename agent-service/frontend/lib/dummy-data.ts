@@ -69,8 +69,17 @@ export interface Deal {
   negotiationStatus?: 'accepted' | 'timeout';
   /** Name from API when sellerAgent is not populated. */
   sellerName?: string;
-  /** Quote from API (e.g. { price }). */
-  quote?: { price?: number; completionDays?: number };
+  /** Quote from API (e.g. price, days, paymentSchedule, licensed, referencesAvailable). */
+  quote?: {
+    price?: number;
+    days?: number;
+    completionDays?: number;
+    paymentSchedule?: string;
+    licensed?: boolean;
+    referencesAvailable?: boolean;
+  };
+  /** Provider's AI response message (stored from negotiate-and-match). */
+  negotiationMessage?: string;
 }
 
 // Dummy Users

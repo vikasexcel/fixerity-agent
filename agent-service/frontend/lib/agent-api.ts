@@ -50,6 +50,32 @@ export async function matchJobToProviders(
 }
 
 /**
+ * Get stored match quotes for a job from DB (no agent call). Use this to show recommended providers
+ * with saved negotiation response (message, price, days, paymentSchedule, licensed, references).
+ */
+export async function getJobMatchResults(
+  jobId: string,
+  userId: number,
+  accessToken: string
+): Promise<Deal[]> {
+  const base = getAgentServiceUrl();
+  const res = await fetch(`${base}/agent/buyer/job-matches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId,
+      access_token: accessToken,
+      job_id: jobId,
+    }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { deals?: Deal[]; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Failed to load job matches');
+  }
+  return data.deals ?? [];
+}
+
+/**
  * Match job to providers with buyer-seller negotiation (price and completion time).
  * Calls POST /agent/buyer/negotiate-and-match. Returns deals with negotiatedPrice and negotiatedCompletionDays.
  */

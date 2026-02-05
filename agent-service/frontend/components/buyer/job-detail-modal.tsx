@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RoleAvatar } from '@/components/ui/role-avatar';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
-import { matchJobToProviders } from '@/lib/agent-api';
+import { getJobMatchResults } from '@/lib/agent-api';
 
 export type JobDetailModalMode = 'details-only' | 'with-recommendations';
 
@@ -36,7 +36,7 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
     }
     setMatchesLoading(true);
     setMatchesError(null);
-    matchJobToProviders(job, Number(user.id), token)
+    getJobMatchResults(job.id, Number(user.id), token)
       .then((deals) => {
         const withJobId = (deals ?? []).map((d) => ({ ...d, jobId: d.jobId || job.id }));
         setMatches(withJobId);
@@ -167,16 +167,18 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
                 <div key={deal.id} className="bg-secondary/30 rounded-lg p-4 border border-accent/30">
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex items-center gap-3">
-                      <RoleAvatar name={deal.sellerAgent.name} type="seller" size="md" />
+                      <RoleAvatar name={deal.sellerAgent?.name ?? deal.sellerName ?? 'Provider'} type="seller" size="md" />
                       <div>
-                        <p className="font-semibold text-foreground">{deal.sellerAgent.name}</p>
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-accent flex items-center gap-1">
-                            <Star size={14} className="fill-accent text-accent" />
-                            {deal.sellerAgent.rating}
-                          </span>
-                          <span className="text-muted-foreground">• {deal.sellerAgent.jobsCompleted} jobs</span>
-                        </div>
+                        <p className="font-semibold text-foreground">{deal.sellerAgent?.name ?? deal.sellerName ?? 'Provider'}</p>
+                        {deal.sellerAgent != null ? (
+                          <div className="flex items-center gap-2 text-sm">
+                            <span className="text-accent flex items-center gap-1">
+                              <Star size={14} className="fill-accent text-accent" />
+                              {deal.sellerAgent.rating}
+                            </span>
+                            <span className="text-muted-foreground">• {deal.sellerAgent.jobsCompleted} jobs</span>
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     <div className="text-right">
@@ -185,31 +187,53 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
                     </div>
                   </div>
 
-                  {(deal.negotiatedPrice != null || deal.negotiatedCompletionDays != null) && (
-                    <div className="mb-3 flex gap-4 text-sm">
-                      {deal.negotiatedPrice != null && (
+                  {(deal.negotiatedPrice != null || deal.negotiatedCompletionDays != null || deal.quote?.price != null) && (
+                    <div className="mb-3 flex gap-4 text-sm flex-wrap">
+                      {(deal.negotiatedPrice ?? deal.quote?.price) != null && (
                         <span className="text-foreground font-medium">
-                          Agreed price: ${deal.negotiatedPrice.toLocaleString()}
+                          Agreed price: ${Number(deal.negotiatedPrice ?? deal.quote?.price).toLocaleString()}
                         </span>
                       )}
-                      {deal.negotiatedCompletionDays != null && (
+                      {(deal.negotiatedCompletionDays ?? deal.quote?.days ?? deal.quote?.completionDays) != null && (
                         <span className="text-foreground font-medium">
-                          Completion: {deal.negotiatedCompletionDays} day{deal.negotiatedCompletionDays !== 1 ? 's' : ''}
+                          Completion: {Number(deal.negotiatedCompletionDays ?? deal.quote?.days ?? deal.quote?.completionDays)} day{Number(deal.negotiatedCompletionDays ?? deal.quote?.days ?? deal.quote?.completionDays) !== 1 ? 's' : ''}
                         </span>
                       )}
                     </div>
                   )}
 
-                  <div className="mb-3">
-                    <p className="text-xs font-semibold text-muted-foreground mb-2">WHY MATCHED</p>
-                    <div className="space-y-1">
-                      {deal.matchReasons.map((reason, idx) => (
-                        <p key={idx} className="text-sm text-foreground">
-                          {reason.replace(/^[✓✗⚠]\s*/, '')}
-                        </p>
-                      ))}
+                  {(deal.negotiationMessage != null || deal.quote?.paymentSchedule != null || deal.quote?.licensed != null || deal.quote?.referencesAvailable != null) && (
+                    <div className="mb-3 rounded-md bg-muted/50 p-3 text-sm">
+                      <p className="text-xs font-semibold text-muted-foreground mb-1">Provider&apos;s response</p>
+                      {deal.negotiationMessage && (
+                        <p className="text-foreground mb-2">{deal.negotiationMessage}</p>
+                      )}
+                      <ul className="space-y-0.5 text-muted-foreground list-none pl-0">
+                        {deal.quote?.paymentSchedule != null && (
+                          <li><span className="text-foreground/80">Payment:</span> {deal.quote.paymentSchedule}</li>
+                        )}
+                        {deal.quote?.licensed != null && (
+                          <li><span className="text-foreground/80">Licensed:</span> {deal.quote.licensed ? 'Yes' : 'No'}</li>
+                        )}
+                        {deal.quote?.referencesAvailable != null && (
+                          <li><span className="text-foreground/80">References:</span> {deal.quote.referencesAvailable ? 'Yes' : 'No'}</li>
+                        )}
+                      </ul>
                     </div>
-                  </div>
+                  )}
+
+                  {Array.isArray(deal.matchReasons) && deal.matchReasons.length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-xs font-semibold text-muted-foreground mb-2">WHY MATCHED</p>
+                      <div className="space-y-1">
+                        {deal.matchReasons.map((reason, idx) => (
+                          <p key={idx} className="text-sm text-foreground">
+                            {String(reason).replace(/^[✓✗⚠]\s*/, '')}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div className="flex gap-2">
                     <Button className="flex-1 bg-primary hover:bg-primary/90 text-primary-foreground text-sm">
