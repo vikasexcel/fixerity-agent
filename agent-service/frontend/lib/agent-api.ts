@@ -248,19 +248,17 @@ export async function sendBuyerChatMessage(
     user_id: number;
     access_token: string;
     message: string;
-    job_id?: string;
-    job_title?: string;
-    conversation_history?: ConversationTurn[];
+    context: { jobId: string; jobTitle?: string; conversationHistory: ConversationTurn[] };
   } = {
     user_id: userId,
     access_token: accessToken,
     message,
+    context: {
+      jobId: options?.jobId ?? '',
+      jobTitle: options?.jobTitle,
+      conversationHistory: options?.conversationHistory ?? [],
+    },
   };
-  if (options?.jobId) body.job_id = options.jobId;
-  if (options?.jobTitle) body.job_title = options.jobTitle;
-  if (options?.conversationHistory && options.conversationHistory.length > 0) {
-    body.conversation_history = options.conversationHistory;
-  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -271,6 +269,42 @@ export async function sendBuyerChatMessage(
     throw new Error(data?.error ?? res.statusText ?? 'Chat request failed');
   }
   return data.reply ?? '';
+}
+
+/**
+ * Clear Redis cache and Mem0 memories for a job (negotiation data + cached deals).
+ * Call after recommended providers when user wants to reset/clean up for that job.
+ */
+export async function cleanupJobCache(
+  userId: number,
+  accessToken: string,
+  jobId: string
+): Promise<{ ok: boolean; redis?: { negotiationKeys: number; dealsKey: boolean }; mem0?: { deleted: number }; error?: string | null }> {
+  const base = getAgentServiceUrl();
+  const res = await fetch(`${base}/agent/buyer/job-cleanup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId,
+      access_token: accessToken,
+      job_id: jobId,
+    }),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    redis?: { negotiationKeys: number; dealsKey: boolean };
+    mem0?: { deleted: number };
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Cleanup failed');
+  }
+  return {
+    ok: data.ok ?? true,
+    redis: data.redis,
+    mem0: data.mem0,
+    error: data.error ?? null,
+  };
 }
 
 /** Profile returned by the agent (same source as match flow – Laravel provider-details). */
@@ -418,3 +452,4 @@ export async function sendSellerChatMessage(
   }
   return data.reply ?? '';
 }
+

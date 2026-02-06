@@ -1,14 +1,19 @@
+// app/buyer/job/[jobId]/chat/page.tsx (Updated with better error handling)
+
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check, AlertCircle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { matchJobToProvidersWithNegotiationStream, sendBuyerChatMessage, type NegotiationStep } from '@/lib/agent-api';
+import { matchJobToProvidersWithNegotiationStream, sendBuyerChatMessage, cleanupJobCache, type NegotiationStep } from '@/lib/agent-api';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs, updateJobStatus } from '@/lib/jobs-api';
+import { getProviderDetails } from '@/lib/provider-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 type MatchPhase = 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
@@ -23,15 +28,34 @@ export type NegotiationProviderLog = {
 type ChatMessage =
   | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string; negotiationProviders?: NegotiationProviderLog[]; providersCount?: number }
   | { type: 'user'; content: string }
-  | { type: 'assistant'; content: string };
+  | { type: 'assistant'; content: string }
+  | { type: 'error'; content: string }; // ✅ Added error message type
 
 function normalizeJobId(id: string): string {
   return String(id).trim();
 }
 
-function NegotiationProviderCard({ provider, rank, score }: { provider: NegotiationProviderLog; rank?: number; score?: number }) {
+function NegotiationProviderCard({
+  provider,
+  rank,
+  score,
+  displayNameOverride,
+}: {
+  provider: NegotiationProviderLog;
+  rank?: number;
+  score?: number;
+  displayNameOverride?: string;
+}) {
   const [open, setOpen] = useState(true);
   const { providerName, steps, outcome } = provider;
+  const displayName =
+    (displayNameOverride && displayNameOverride.trim()) ||
+    (providerName && String(providerName).trim()) ||
+    (rank != null ? `Provider ${rank}` : 'Provider');
+  const quoteLine =
+    outcome != null
+      ? `${displayName} · Quote · $${outcome.negotiatedPrice}, ${outcome.negotiatedCompletionDays} day${outcome.negotiatedCompletionDays !== 1 ? 's' : ''}`
+      : null;
   return (
     <div className="bg-secondary/30 rounded-lg border border-border/50 overflow-hidden">
       <button
@@ -42,14 +66,14 @@ function NegotiationProviderCard({ provider, rank, score }: { provider: Negotiat
         {open ? <ChevronDown size={16} className="text-muted-foreground shrink-0" /> : <ChevronRight size={16} className="text-muted-foreground shrink-0" />}
         <Building2 size={16} className="text-primary shrink-0" />
         {rank != null && <span className="text-sm font-semibold text-primary shrink-0">{rank}.</span>}
-        <span className="font-medium text-foreground truncate">{providerName}</span>
+        <span className="font-medium text-foreground truncate">{displayName}</span>
         {score != null && (
           <span className="text-sm font-semibold text-accent shrink-0">{score}%</span>
         )}
         {outcome && (
           <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             {outcome.status === 'accepted' && <Check size={14} className="text-accent" />}
-            ${outcome.negotiatedPrice} · {outcome.negotiatedCompletionDays}d
+            {quoteLine}
           </span>
         )}
       </button>
@@ -115,6 +139,10 @@ export default function JobChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
+  const [negotiationStarted, setNegotiationStarted] = useState(false); // ✅ Track if negotiation ran
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+  const [resolvedProviderNames, setResolvedProviderNames] = useState<Record<string, string>>({});
 
   const { session } = useAuth();
   const user = session.user;
@@ -174,11 +202,69 @@ export default function JobChatPage() {
     }
   }, [session.isLoading, user, router]);
 
+  // Resolve provider names from API when we have a complete match but name is missing or generic
+  useEffect(() => {
+    if (!job || !token) return;
+    const completeMatch = messages.find(
+      (m): m is Extract<ChatMessage, { type: 'match' }> =>
+        m.type === 'match' && m.phase === 'complete' && (m.negotiationProviders?.length ?? 0) > 0
+    );
+    if (!completeMatch?.negotiationProviders) return;
+
+    const dealsById = new Map(
+      (completeMatch.deals ?? []).map((d) => {
+        const id = d.sellerId ?? (d as { provider_id?: string }).provider_id;
+        return [String(id ?? ''), d] as const;
+      })
+    );
+
+    const toResolve = completeMatch.negotiationProviders.filter((prov) => {
+      const deal = dealsById.get(String(prov.providerId));
+      const name = (deal?.sellerName ?? prov.providerName)?.trim();
+      if (name && !/^Provider\s*\d+$/i.test(name)) return false;
+      return true;
+    });
+
+    if (toResolve.length === 0) return;
+
+    const serviceCategoryId = job.service_category_id ?? 0;
+    const lat = typeof job.lat === 'number' ? job.lat : 0;
+    const long = typeof job.long === 'number' ? job.long : 0;
+
+    let cancelled = false;
+    (async () => {
+      for (const prov of toResolve) {
+        if (cancelled) break;
+        try {
+          const profile = await getProviderDetails(
+            Number(prov.providerId),
+            serviceCategoryId,
+            lat,
+            long,
+            token
+          );
+          if (cancelled) break;
+          const name = profile?.provider_name?.trim();
+          if (name) {
+            setResolvedProviderNames((prev) => ({ ...prev, [String(prov.providerId)]: name }));
+          }
+        } catch {
+          // ignore per-provider errors
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, job?.id, job?.service_category_id, job?.lat, job?.long, token]);
+
   // Run negotiation + match with live streaming when job is resolved
   useEffect(() => {
-    if (!job || !user || !token || messages.length > 0) return;
+    if (!job || !user || !token || negotiationStarted) return;
 
     const runMatch = async () => {
+      setNegotiationStarted(true); // ✅ Mark as started
+
       setMessages([
         {
           type: 'match',
@@ -268,7 +354,7 @@ export default function JobChatPage() {
     };
 
     runMatch();
-  }, [job?.id, user?.id, token]);
+  }, [job?.id, user?.id, token, negotiationStarted]); // ✅ Added negotiationStarted to deps
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -287,6 +373,7 @@ export default function JobChatPage() {
     setMessages((prev) => [...prev, { type: 'user', content: text }]);
     setSending(true);
 
+    // ✅ Build conversation history (exclude match messages)
     const conversationHistory = messages
       .filter((m): m is { type: 'user'; content: string } | { type: 'assistant'; content: string } =>
         m.type === 'user' || m.type === 'assistant'
@@ -294,18 +381,26 @@ export default function JobChatPage() {
       .map((m) => ({ role: m.type as 'user' | 'assistant', content: m.content }));
 
     try {
+      console.log('[Chat] Sending message:', text);
+      console.log('[Chat] Job ID:', job.id);
+      console.log('[Chat] History length:', conversationHistory.length);
+
       const reply = await sendBuyerChatMessage(Number(user.id), token, text, {
         jobId: job.id,
         jobTitle: job.title,
         conversationHistory,
       });
+
+      console.log('[Chat] Received reply:', reply.substring(0, 100));
       setMessages((prev) => [...prev, { type: 'assistant', content: reply }]);
     } catch (err) {
+      console.error('[Chat] Error:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Failed to get a response. Please try again.';
       setMessages((prev) => [
         ...prev,
         {
-          type: 'assistant',
-          content: err instanceof Error ? err.message : 'Failed to get a response. Please try again.',
+          type: 'error', // ✅ Use error type for styling
+          content: errorMsg,
         },
       ]);
     } finally {
@@ -322,6 +417,7 @@ export default function JobChatPage() {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
+          <Loader2 className="animate-spin mx-auto mb-2" size={32} />
           <p className="text-muted-foreground">Loading job...</p>
         </div>
       </div>
@@ -410,10 +506,11 @@ export default function JobChatPage() {
                   </div>
                 </div>
                 {(msg.phase === 'error' && msg.error) && (
-                  <p className="text-sm text-muted-foreground">You can still ask follow-up questions about this job.</p>
+                  <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-3">
+                    <p className="text-sm text-destructive">{msg.error}</p>
+                  </div>
                 )}
                 {providers.length > 0 && (() => {
-                  // Rank: by negotiated price asc, then completion days asc; no outcome last
                   const ranked = [...providers].sort((a, b) => {
                     const oa = a.outcome;
                     const ob = b.outcome;
@@ -423,30 +520,57 @@ export default function JobChatPage() {
                     if (oa.negotiatedPrice !== ob.negotiatedPrice) return oa.negotiatedPrice - ob.negotiatedPrice;
                     return oa.negotiatedCompletionDays - ob.negotiatedCompletionDays;
                   });
-                  const dealsById = new Map((msg.deals ?? []).map((d) => [d.sellerId, d]));
+                  // sellerId and providerId are the same; key deals by that id for lookup from stream providerId
+                  const dealsById = new Map(
+                    (msg.deals ?? []).map((d) => {
+                      const id = d.sellerId ?? (d as { provider_id?: string }).provider_id;
+                      return [String(id ?? ''), d] as const;
+                    })
+                  );
+                  const getDeal = (prov: NegotiationProviderLog) => dealsById.get(String(prov.providerId));
                   return (
                     <div className="mt-2 space-y-3">
                       <p className="text-sm font-semibold text-foreground">Live negotiation by provider</p>
                       <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
-                        {ranked.map((prov, i) => (
-                          <NegotiationProviderCard
-                            key={prov.providerId}
-                            provider={prov}
-                            rank={i + 1}
-                            score={msg.phase === 'complete' ? dealsById.get(prov.providerId)?.matchScore : undefined}
-                          />
-                        ))}
+                        {ranked.map((prov, i) => {
+                          const deal = getDeal(prov);
+                          const displayName =
+                            resolvedProviderNames[prov.providerId] ??
+                            deal?.sellerName ??
+                            prov.providerName ??
+                            (msg.phase === 'complete' ? `Provider ${i + 1}` : undefined);
+                          return (
+                            <NegotiationProviderCard
+                              key={prov.providerId}
+                              provider={prov}
+                              rank={i + 1}
+                              score={msg.phase === 'complete' ? deal?.matchScore : undefined}
+                              displayNameOverride={displayName}
+                            />
+                          );
+                        })}
                       </div>
                       {msg.phase === 'complete' && (
                         <div className="space-y-3 pt-2 border-t border-border/50">
-                          <p className="text-sm font-semibold text-foreground">Provider profile</p>
+                          <p className="text-sm font-semibold text-foreground">Provider profiles (ranked)</p>
                           <div className="space-y-2">
                             {ranked.map((prov, i) => {
-                              const deal = dealsById.get(prov.providerId);
+                              const deal = getDeal(prov);
                               const agent = deal?.sellerAgent;
-                              const name = agent?.name ?? deal?.sellerName ?? prov.providerName;
                               const rankNum = i + 1;
+                              const name =
+                                resolvedProviderNames[prov.providerId] ??
+                                (agent?.name ?? deal?.sellerName ?? prov.providerName)?.trim() ??
+                                `Provider ${rankNum}`;
                               const scoreVal = deal?.matchScore;
+                              const quote = deal?.quote;
+                              const outcome = prov.outcome;
+                              const price = outcome?.negotiatedPrice ?? quote?.price;
+                              const days = outcome?.negotiatedCompletionDays ?? quote?.days ?? quote?.completionDays;
+                              const quoteLine =
+                                price != null && days != null
+                                  ? `${name} · Quote · $${price}, ${days} day${days !== 1 ? 's' : ''}`
+                                  : null;
                               return (
                                 <div
                                   key={prov.providerId}
@@ -467,15 +591,19 @@ export default function JobChatPage() {
                                       {agent.licensed != null && (agent.licensed ? ' · Licensed' : ' · Not licensed')}
                                       {agent.references != null && (agent.references ? ' · References' : '')}
                                     </p>
-                                  ) : deal?.quote != null ? (
-                                    <p className="text-xs text-muted-foreground">
-                                      {deal.quote.price != null && `Quote: $${deal.quote.price}`}
-                                      {deal.quote.completionDays != null && ` · ${deal.quote.completionDays}d`}
-                                    </p>
                                   ) : null}
-                                  {prov.outcome && (
-                                    <p className="text-xs text-accent">
-                                      ${prov.outcome.negotiatedPrice} · {prov.outcome.negotiatedCompletionDays}d
+                                  {(quote != null || outcome != null) && (
+                                    <p className="text-xs text-muted-foreground">
+                                      {quoteLine != null && (
+                                        <span className="text-accent font-medium">{quoteLine}</span>
+                                      )}
+                                      {quote != null && (quote.paymentSchedule || quote.licensed != null || quote.referencesAvailable != null) && (
+                                        <span className="block mt-0.5">
+                                          {quote.paymentSchedule && `Payment: ${quote.paymentSchedule}`}
+                                          {quote.licensed != null && ` · Licensed: ${quote.licensed ? 'Yes' : 'No'}`}
+                                          {quote.referencesAvailable != null && ` · References: ${quote.referencesAvailable ? 'Yes' : 'No'}`}
+                                        </span>
+                                      )}
                                     </p>
                                   )}
                                 </div>
@@ -488,49 +616,43 @@ export default function JobChatPage() {
                   );
                 })()}
                 {msg.phase === 'complete' && (
-                  <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
-                )}
-                {msg.phase === 'complete' && msg.deals && msg.deals.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-sm font-semibold text-foreground">Top matches</p>
-                    <div className="space-y-2">
-                      {msg.deals.map((match, i) => (
-                        <div
-                          key={match.id}
-                          className="flex items-center justify-between bg-secondary/50 rounded-lg p-3"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-primary">{i + 1}.</span>
-                            <div>
-                              <p className="text-sm font-medium text-foreground">{match.sellerAgent?.name ?? match.sellerName ?? 'Provider'}</p>
-                              {match.sellerAgent != null ? (
-                                <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                  <Star size={12} className="fill-muted-foreground text-muted-foreground" />
-                                  {match.sellerAgent.rating} • {match.sellerAgent.jobsCompleted} jobs
-                                </p>
-                              ) : match.quote?.price != null ? (
-                                <p className="text-xs text-muted-foreground">Quote: ${match.quote.price}</p>
-                              ) : null}
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-semibold text-lg text-accent">{match.matchScore}%</p>
-                            <p className="text-xs text-muted-foreground">match</p>
-                            {(match.negotiatedPrice != null || match.negotiatedCompletionDays != null) && (
-                              <p className="text-xs text-foreground mt-1">
-                                {match.negotiatedPrice != null && `$${match.negotiatedPrice}`}
-                                {match.negotiatedPrice != null && match.negotiatedCompletionDays != null && ' · '}
-                                {match.negotiatedCompletionDays != null && `${match.negotiatedCompletionDays}d`}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                  <>
+                    <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
+                    <div className="pt-2 flex flex-col gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-xs border-border text-muted-foreground hover:text-destructive hover:border-destructive/50 w-fit"
+                        disabled={cleanupLoading || !user || !token || !job}
+                        onClick={async () => {
+                          if (!user || !token || !job) return;
+                          setCleanupMessage(null);
+                          setCleanupLoading(true);
+                          try {
+                            const r = await cleanupJobCache(Number(user.id), token, job.id);
+                            const parts = [];
+                            if (r.redis?.negotiationKeys != null) parts.push(`${r.redis.negotiationKeys} negotiation keys`);
+                            if (r.redis?.dealsKey) parts.push('deals cache');
+                            if (r.mem0?.deleted != null && r.mem0.deleted > 0) parts.push(`${r.mem0.deleted} Mem0 memories`);
+                            setCleanupMessage(parts.length ? `Cleaned: ${parts.join(', ')}.` : r.error ? `Done with warning: ${r.error}` : 'Cache and Mem0 cleaned for this job.');
+                          } catch (e) {
+                            setCleanupMessage(e instanceof Error ? e.message : 'Cleanup failed.');
+                          } finally {
+                            setCleanupLoading(false);
+                          }
+                        }}
+                      >
+                        {cleanupLoading ? <Loader2 size={14} className="animate-spin shrink-0" /> : <Trash2 size={14} className="shrink-0" />}
+                        <span className="ml-1.5">Clean up Redis & Mem0 for this job</span>
+                      </Button>
+                      {cleanupMessage && (
+                        <p className={`text-xs ${cleanupMessage.startsWith('Cleaned') || cleanupMessage.includes('cleaned') ? 'text-muted-foreground' : 'text-destructive'}`}>
+                          {cleanupMessage}
+                        </p>
+                      )}
                     </div>
-                  </div>
-                )}
-                {msg.phase === 'complete' && msg.deals?.length === 0 && !providers.length && (
-                  <p className="text-sm text-muted-foreground">No providers found for this job.</p>
+                  </>
                 )}
               </div>
             );
@@ -547,8 +669,19 @@ export default function JobChatPage() {
           if (msg.type === 'assistant') {
             return (
               <div key={idx} className="flex justify-start" role="article" aria-label="Assistant reply">
-                <div className="bg-card border border-border rounded-lg px-4 py-2 max-w-[85%]">
-                  <p className="text-sm text-foreground whitespace-pre-wrap break-words">{msg.content}</p>
+                <div className="bg-card border border-border rounded-lg px-4 py-2 max-w-[85%] text-sm text-foreground [&_p]:my-1 [&_p]:leading-relaxed [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-base [&_h2]:text-base [&_h3]:text-sm [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:overflow-x-auto [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-muted [&_code]:text-xs [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_a]:text-primary [&_a]:underline [&_strong]:font-semibold">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                </div>
+              </div>
+            );
+          }
+          // ✅ Added error message styling
+          if (msg.type === 'error') {
+            return (
+              <div key={idx} className="flex justify-start" role="alert" aria-label="Error message">
+                <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-2 max-w-[85%] flex items-start gap-2">
+                  <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
+                  <p className="text-sm text-destructive whitespace-pre-wrap break-words">{msg.content}</p>
                 </div>
               </div>
             );
@@ -566,13 +699,13 @@ export default function JobChatPage() {
         <div ref={messagesEndRef} />
       </main>
 
-      {/* Suggested follow-up prompts */}
+      {/* Input Section */}
       <div className="sticky bottom-0 bg-background border-t border-border py-4">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 space-y-3">
           <p className="text-xs text-muted-foreground">Suggested questions:</p>
           <div className="flex flex-wrap gap-2">
             {[
-              'What Quote do we have?',
+              'What quotes do we have?',
               'Tell me about the top provider',
               'What is the payment schedule?',
               'Who is licensed and has references?',

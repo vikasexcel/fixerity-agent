@@ -2,6 +2,315 @@ import { Annotation, StateGraph, START, END } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../config/index.js';
+import { redisClient } from '../config/redis.js'; 
+import memoryClient from '../memory/mem0.js';
+
+/* -------------------- REDIS SESSION STORE (Short-term: Active Negotiations) -------------------- */
+
+class NegotiationSessionStore {
+  constructor(redis) {
+    this.redis = redis;
+    this.TTL = 3600; // 1 hour
+  }
+
+  async saveState(jobId, providerId, state) {
+    const key = `negotiation:${jobId}:${providerId}:state`;
+    await this.redis.setEx(
+      key,
+      this.TTL,
+      JSON.stringify({
+        ...state,
+        updated_at: Date.now(),
+      })
+    );
+  }
+
+  async getState(jobId, providerId) {
+    const key = `negotiation:${jobId}:${providerId}:state`;
+    const data = await this.redis.get(key);
+    return data ? JSON.parse(data) : null;
+  }
+
+  async appendMessage(jobId, providerId, message) {
+    const key = `negotiation:${jobId}:${providerId}:messages`;
+    await this.redis.lPush(key, JSON.stringify({
+      ...message,
+      timestamp: Date.now(),
+    }));
+    await this.redis.expire(key, this.TTL);
+    
+    // Keep only last 20 messages
+    await this.redis.lTrim(key, 0, 19);
+  }
+
+  async getAllMessages(jobId, providerId) {
+    const key = `negotiation:${jobId}:${providerId}:messages`;
+    const messages = await this.redis.lRange(key, 0, -1);
+    return messages.map(m => JSON.parse(m)).reverse();
+  }
+
+  async saveQuote(jobId, providerId, quote) {
+    const key = `negotiation:${jobId}:${providerId}:quote`;
+    await this.redis.setEx(key, this.TTL, JSON.stringify(quote));
+  }
+
+  async getQuote(jobId, providerId) {
+    const key = `negotiation:${jobId}:${providerId}:quote`;
+    const data = await this.redis.get(key);
+    return data ? JSON.parse(data) : null;
+  }
+
+  async cleanup(jobId, providerId) {
+    const pattern = `negotiation:${jobId}:${providerId}*`;
+    const keys = await this.redis.keys(pattern);
+    if (keys.length > 0) {
+      await this.redis.del(...keys);
+    }
+  }
+
+  async setStatus(jobId, providerId, status) {
+    const key = `negotiation:${jobId}:${providerId}:status`;
+    await this.redis.setEx(key, this.TTL, status);
+  }
+
+  async getStatus(jobId, providerId) {
+    const key = `negotiation:${jobId}:${providerId}:status`;
+    return await this.redis.get(key);
+  }
+}
+
+/* -------------------- MEM0 SEMANTIC MEMORY (Long-term: Learning & Patterns) -------------------- */
+
+class SemanticMemoryManager {
+  constructor(mem0Client) {
+    this.memory = mem0Client;
+  }
+
+  /**
+   * 🧠 STORE: Buyer's negotiation for learning
+   */
+  async storeBuyerNegotiation(buyerId, jobId, negotiationData) {
+    const { job, quote, providerId, conversation, outcome } = negotiationData;
+
+    try {
+      await this.memory.add({
+        messages: [
+          {
+            role: "user",
+            content: `I posted a ${job.title} job with budget $${job.budget?.min || '?'}-$${job.budget?.max || '?'}. 
+                     Start: ${job.startDate || 'ASAP'}, End: ${job.endDate || 'flexible'}. 
+                     Service category: ${job.service_category_id}.`
+          },
+          {
+            role: "assistant",
+            content: `Provider ${providerId} quoted $${quote?.price || '?'} for ${quote?.days || '?'} days. 
+                     Payment: ${quote?.paymentSchedule || 'not specified'}. 
+                     Can meet dates: ${quote?.can_meet_dates ? 'Yes' : 'No'}. 
+                     Licensed: ${quote?.licensed ? 'Yes' : 'No'}. 
+                     References: ${quote?.referencesAvailable ? 'Yes' : 'No'}.
+                     Outcome: ${outcome}.`
+          }
+        ],
+        user_id: `buyer_${buyerId}`,
+        metadata: {
+          type: 'negotiation',
+          job_id: jobId,
+          provider_id: providerId,
+          service_category: job.service_category_id,
+          final_price: quote?.price,
+          quoted_days: quote?.days,
+          outcome: outcome, // 'accepted', 'rejected', 'timeout', 'presented'
+          timestamp: Date.now(),
+          budget_min: job.budget?.min,
+          budget_max: job.budget?.max,
+          can_meet_dates: quote?.can_meet_dates,
+          licensed: quote?.licensed,
+        }
+      });
+
+      console.log(`[Mem0] ✅ Stored buyer ${buyerId} negotiation for job ${jobId}`);
+    } catch (error) {
+      console.error(`[Mem0] ❌ Error storing buyer memory:`, error.message);
+    }
+  }
+
+  /**
+   * 🧠 STORE: Provider's negotiation behavior
+   */
+  async storeProviderNegotiation(providerId, jobId, negotiationData) {
+    const { job, quote, outcome, buyerId } = negotiationData;
+
+    try {
+      await this.memory.add({
+        messages: [
+          {
+            role: "user",
+            content: `Job request: ${job.title}. Budget offered: $${job.budget?.max || '?'}. 
+                     Timeline: ${job.startDate || 'ASAP'} to ${job.endDate || 'flexible'}. 
+                     Service category: ${job.service_category_id}.`
+          },
+          {
+            role: "assistant",
+            content: `I quoted $${quote?.price || '?'} for ${quote?.days || '?'} days. 
+                     Payment terms: ${quote?.paymentSchedule || 'standard'}. 
+                     Outcome: ${outcome}.`
+          }
+        ],
+        user_id: `provider_${providerId}`,
+        metadata: {
+          type: 'negotiation',
+          job_id: jobId,
+          buyer_id: buyerId,
+          service_category: job.service_category_id,
+          quoted_price: quote?.price,
+          quoted_days: quote?.days,
+          budget_offered: job.budget?.max,
+          outcome: outcome,
+          timestamp: Date.now(),
+          price_vs_budget_ratio: quote?.price / (job.budget?.max || 1),
+        }
+      });
+
+      console.log(`[Mem0] ✅ Stored provider ${providerId} negotiation for job ${jobId}`);
+    } catch (error) {
+      console.error(`[Mem0] ❌ Error storing provider memory:`, error.message);
+    }
+  }
+
+  /**
+   * 🔍 RETRIEVE: Buyer's preferences and patterns
+   */
+  async getBuyerPreferences(buyerId, serviceCategory = null) {
+    try {
+      const query = serviceCategory 
+        ? `What are buyer ${buyerId}'s preferences for service category ${serviceCategory}? 
+           Include typical budget range, preferred provider qualities (rating, licensing), 
+           timeline preferences, and payment terms they accept.`
+        : `What are buyer ${buyerId}'s negotiation preferences and patterns across all services?`;
+
+      const memories = await this.memory.search({
+        query: query,
+        user_id: `buyer_${buyerId}`,
+        limit: 10
+      });
+
+      if (!memories || memories.length === 0) {
+        console.log(`[Mem0] No buyer preferences found for ${buyerId}`);
+        return null;
+      }
+
+      console.log(`[Mem0] Retrieved ${memories.length} buyer preferences`);
+      return {
+        memories: memories,
+        summary: this.summarizeBuyerPreferences(memories)
+      };
+    } catch (error) {
+      console.error(`[Mem0] Error fetching buyer preferences:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * 🔍 RETRIEVE: Provider's pricing patterns
+   */
+  async getProviderPattern(providerId, serviceCategory = null) {
+    try {
+      const query = serviceCategory
+        ? `What are provider ${providerId}'s typical quotes, timelines, and acceptance rates 
+           for service category ${serviceCategory}?`
+        : `What are provider ${providerId}'s negotiation patterns, typical quotes, and success rates?`;
+
+      const memories = await this.memory.search({
+        query: query,
+        user_id: `provider_${providerId}`,
+        limit: 10
+      });
+
+      if (!memories || memories.length === 0) {
+        console.log(`[Mem0] No provider patterns found for ${providerId}`);
+        return null;
+      }
+
+      console.log(`[Mem0] Retrieved ${memories.length} provider patterns`);
+      return {
+        memories: memories,
+        summary: this.summarizeProviderPattern(memories)
+      };
+    } catch (error) {
+      console.error(`[Mem0] Error fetching provider pattern:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * 🎯 RETRIEVE: Smart recommendations for current job
+   */
+  async getJobRecommendations(buyerId, job) {
+    try {
+      const memories = await this.memory.search({
+        query: `Based on buyer ${buyerId}'s past negotiations for ${job.title} 
+                (service category ${job.service_category_id}), what budget range, 
+                timeline flexibility, and provider qualities should they prioritize? 
+                What typically leads to successful outcomes?`,
+        user_id: `buyer_${buyerId}`,
+        limit: 15
+      });
+
+      if (!memories || memories.length === 0) {
+        console.log(`[Mem0] No recommendations found for buyer ${buyerId}`);
+        return null;
+      }
+
+      console.log(`[Mem0] Retrieved ${memories.length} recommendations`);
+      return {
+        memories: memories,
+        recommendations: this.extractRecommendations(memories, job)
+      };
+    } catch (error) {
+      console.error(`[Mem0] Error getting recommendations:`, error.message);
+      return null;
+    }
+  }
+
+  /* -------------------- PARSING HELPERS -------------------- */
+
+  summarizeBuyerPreferences(memories) {
+    // Extract common patterns from memories
+    // Mem0 already does semantic analysis, so we just structure it
+    return {
+      total_negotiations: memories.length,
+      top_insights: memories.slice(0, 3).map(m => ({
+        text: m.memory || m.text || m.content,
+        relevance: m.score || 0
+      }))
+    };
+  }
+
+  summarizeProviderPattern(memories) {
+    return {
+      total_quotes: memories.length,
+      top_patterns: memories.slice(0, 3).map(m => ({
+        text: m.memory || m.text || m.content,
+        relevance: m.score || 0
+      }))
+    };
+  }
+
+  extractRecommendations(memories, job) {
+    return {
+      based_on_negotiations: memories.length,
+      confidence: memories.length > 5 ? 'high' : memories.length > 2 ? 'medium' : 'low',
+      key_insights: memories.slice(0, 5).map(m => ({
+        insight: m.memory || m.text || m.content,
+        relevance: m.score || 0
+      }))
+    };
+  }
+}
+
+// Initialize stores
+const sessionStore = new NegotiationSessionStore(redisClient);
+const semanticMemory = new SemanticMemoryManager(memoryClient);
 
 /* -------------------- STATE -------------------- */
 
@@ -12,26 +321,70 @@ const MatchingState = Annotation.Root({
   round: Annotation(),
   maxRounds: Annotation(),
   deadline_ts: Annotation(),
+  buyerId: Annotation(), // ✅ For Mem0 learning
   conversation: Annotation({
-    reducer: (a, b) => a.concat(b),
+    reducer: (a, b) => {
+      const combined = a.concat(b);
+      return combined.slice(-20); // Limit to prevent memory bloat
+    },
     default: () => [],
   }),
   status: Annotation(), // collecting | done | timeout
-  collectedQuote: Annotation(), // { price, days, can_meet_dates, paymentSchedule, licensed, referencesAvailable }
+  collectedQuote: Annotation(),
+  // ✅ Mem0 learned data (optional, for context)
+  buyerPreferences: Annotation(),
+  providerPattern: Annotation(),
 });
 
-function getInitialState(input) {
-  return {
+async function getInitialState(input) {
+  const jobId = input.job.id;
+  const providerId = input.providerId;
+  const buyerId = input.buyerId;
+
+  // Try to restore from Redis if exists
+  const cached = await sessionStore.getState(jobId, providerId);
+  if (cached) {
+    console.log(`[Redis] Restored state for job ${jobId}, provider ${providerId}`);
+    return cached;
+  }
+
+  // 🧠 OPTIONAL: Retrieve learned patterns (for context in prompts)
+  let buyerPreferences = null;
+  let providerPattern = null;
+
+  if (buyerId && input.useMem0Learning !== false) {
+    buyerPreferences = await semanticMemory.getBuyerPreferences(
+      buyerId,
+      input.job.service_category_id
+    );
+    
+    providerPattern = await semanticMemory.getProviderPattern(
+      providerId,
+      input.job.service_category_id
+    );
+  }
+
+  // Create new state
+  const initialState = {
     job: input.job,
     providerId: input.providerId,
     providerServiceData: input.providerServiceData,
+    buyerId: buyerId,
     round: 0,
-    maxRounds: input.maxRounds ?? 1, // 🔒 HARD DEFAULT
+    maxRounds: input.maxRounds ?? 1,
     deadline_ts: input.deadline_ts,
     conversation: [],
     status: 'collecting',
     collectedQuote: null,
+    buyerPreferences: buyerPreferences,
+    providerPattern: providerPattern,
   };
+
+  // Save to Redis
+  await sessionStore.saveState(jobId, providerId, initialState);
+  console.log(`[Redis] Created new state for job ${jobId}, provider ${providerId}`);
+
+  return initialState;
 }
 
 /* -------------------- HELPERS -------------------- */
@@ -43,9 +396,6 @@ function formatConversation(conversation = []) {
     .join('\n');
 }
 
-/**
- * Check if provider can meet the job's date requirements
- */
 function checkDateAvailability(startDate, endDate, providerDays) {
   if (!startDate || !endDate || startDate === 'ASAP' || endDate === 'flexible') {
     return { canMeet: true, reason: '' };
@@ -75,7 +425,15 @@ function checkDateAvailability(startDate, endDate, providerDays) {
 async function buyerNode(state) {
   if (state.status !== 'collecting') return state;
   if (state.round >= state.maxRounds) {
+    await sessionStore.setStatus(state.job.id, state.providerId, 'done');
     return { status: 'done' };
+  }
+
+  // Check if buyer message already sent (idempotency via Redis)
+  const existingMessages = await sessionStore.getAllMessages(state.job.id, state.providerId);
+  if (existingMessages.some(m => m.role === 'buyer')) {
+    console.log(`[Redis] Buyer message already exists, skipping`);
+    return state;
   }
 
   const llm = new ChatOpenAI({
@@ -88,6 +446,15 @@ async function buyerNode(state) {
   const endDate = state.job.endDate || 'flexible';
   const jobTitle = state.job.title || 'service job';
 
+  // 🧠 OPTIONAL: Use buyer preferences in prompt (if available)
+  let preferenceContext = '';
+  if (state.buyerPreferences?.summary?.top_insights) {
+    const insights = state.buyerPreferences.summary.top_insights
+      .map(i => i.text)
+      .join('; ');
+    preferenceContext = `\n\nContext: Based on past interactions, ${insights}`;
+  }
+
   const prompt = `
 You are a friendly BUYER reaching out to a service provider about a job.
 
@@ -96,6 +463,7 @@ Job Details:
 - Start: ${startDate}
 - End: ${endDate}
 - Budget: $${state.job.budget?.min || '?'} - $${state.job.budget?.max || '?'}
+${preferenceContext}
 
 Write a NATURAL, CONVERSATIONAL message asking for:
 1. Their price quote
@@ -131,13 +499,24 @@ Reply ONLY with JSON:
   
   const data = JSON.parse(content);
 
+  const message = {
+    role: 'buyer',
+    message: data.message,
+  };
+
+  // Save to Redis
+  await sessionStore.appendMessage(state.job.id, state.providerId, message);
+
+  // Update state in Redis
+  const updatedState = {
+    ...state,
+    conversation: state.conversation.concat([message]),
+    round: state.round + 1,
+  };
+  await sessionStore.saveState(state.job.id, state.providerId, updatedState);
+
   return {
-    conversation: [
-      {
-        role: 'buyer',
-        message: data.message,
-      },
-    ],
+    conversation: [message],
     round: state.round + 1,
   };
 }
@@ -153,11 +532,10 @@ async function sellerNode(state) {
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  // ✅ Extract provider's actual service timeline
   const providerDays = state.providerServiceData.deadline_in_days || 
                        state.providerServiceData.service_deadline_days || 
                        state.providerServiceData.completionDays || 
-                       3; // fallback only if no data
+                       3;
 
   const startDate = state.job.startDate || 'ASAP';
   const endDate = state.job.endDate || 'flexible';
@@ -167,8 +545,16 @@ async function sellerNode(state) {
   const isLicensed = state.providerServiceData.licensed !== false;
   const hasReferences = state.providerServiceData.referencesAvailable !== false;
 
-  // ✅ Check if provider can meet the dates
   const availability = checkDateAvailability(startDate, endDate, providerDays);
+
+  // 🧠 OPTIONAL: Use provider patterns in prompt (if available)
+  let patternContext = '';
+  if (state.providerPattern?.summary?.top_patterns) {
+    const patterns = state.providerPattern.summary.top_patterns
+      .map(p => p.text)
+      .join('; ');
+    patternContext = `\n\nYour Past Behavior: ${patterns}`;
+  }
 
   const prompt = `
 You are a PROFESSIONAL SERVICE PROVIDER responding to a quote request.
@@ -178,6 +564,7 @@ Your Background:
 - Licensed: ${isLicensed ? 'Yes' : 'No'}
 - References: ${hasReferences ? 'Available' : 'Not available'}
 - Your typical completion time for this service: ${providerDays} day(s)
+${patternContext}
 
 Job Request:
 ${formatConversation(state.conversation)}
@@ -242,7 +629,6 @@ Reply ONLY with JSON:
   
   const data = JSON.parse(content);
 
-  // ✅ Validate quote structure
   if (!data.quote || typeof data.quote.price !== 'number') {
     console.warn('Invalid quote structure from LLM, using fallback');
     const budgetMax = state.job.budget?.max || 1000;
@@ -250,7 +636,7 @@ Reply ONLY with JSON:
     
     data.quote = {
       price: Math.round(basePrice),
-      days: providerDays, // ✅ Use provider's actual timeline
+      days: providerDays,
       can_meet_dates: availability.canMeet,
       paymentSchedule: '20% upfront, 80% on completion',
       licensed: isLicensed,
@@ -258,19 +644,33 @@ Reply ONLY with JSON:
     };
   }
 
-  // ✅ FORCE the correct values
-  data.quote.days = providerDays; // Always use provider's actual timeline
-  data.quote.can_meet_dates = availability.canMeet; // Always use calculated availability
+  // Force correct values
+  data.quote.days = providerDays;
+  data.quote.can_meet_dates = availability.canMeet;
   data.quote.licensed = isLicensed;
   data.quote.referencesAvailable = hasReferences;
 
+  const message = {
+    role: 'seller',
+    message: data.message,
+  };
+
+  // Save to Redis
+  await sessionStore.appendMessage(state.job.id, state.providerId, message);
+  await sessionStore.saveQuote(state.job.id, state.providerId, data.quote);
+  await sessionStore.setStatus(state.job.id, state.providerId, 'done');
+
+  // Update state in Redis
+  const updatedState = {
+    ...state,
+    conversation: state.conversation.concat([message]),
+    collectedQuote: data.quote,
+    status: 'done',
+  };
+  await sessionStore.saveState(state.job.id, state.providerId, updatedState);
+
   return {
-    conversation: [
-      {
-        role: 'seller',
-        message: data.message,
-      },
-    ],
+    conversation: [message],
     collectedQuote: data.quote,
     status: 'done',
   };
@@ -287,7 +687,8 @@ function routeAfterSeller() {
   return 'end';
 }
 
-function resolveTimeoutNode() {
+async function resolveTimeoutNode(state) {
+  await sessionStore.setStatus(state.job.id, state.providerId, 'timeout');
   return { status: 'timeout' };
 }
 
@@ -312,12 +713,24 @@ const compiled = workflow.compile();
 /* -------------------- RUNNERS -------------------- */
 
 export async function runMatching(input) {
-  const finalState = await compiled.invoke(getInitialState(input));
+  const initialState = await getInitialState(input);
+  const finalState = await compiled.invoke(initialState);
+  
+  // Retrieve from Redis for complete data
+  const jobId = input.job.id;
+  const providerId = input.providerId;
+  
+  const allMessages = await sessionStore.getAllMessages(jobId, providerId);
+  const savedQuote = await sessionStore.getQuote(jobId, providerId);
+  const status = await sessionStore.getStatus(jobId, providerId);
+  
   return {
-    status: finalState.status,
-    quote: finalState.collectedQuote,
-    transcript: finalState.conversation,
+    status: status || finalState.status,
+    quote: savedQuote || finalState.collectedQuote,
+    transcript: allMessages.length > 0 ? allMessages : finalState.conversation,
+    buyerId: input.buyerId, // Pass through for Mem0 storage
   };
 }
 
 export const matchingGraph = compiled;
+export { sessionStore, semanticMemory };
