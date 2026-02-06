@@ -66,7 +66,13 @@ app.post('/agent/buyer/match', async (req, res) => {
  */
 app.post('/agent/buyer/negotiate-and-match', async (req, res) => {
   const { user_id: userId, access_token: accessToken, job, negotiation_max_rounds: maxRounds, negotiation_time_seconds: negotiationTimeSeconds } = req.body ?? {};
-
+  console.log('────────── Request Payload ──────────');
+  console.log(`userId                    : ${userId}`);
+  console.log(`accessToken               : ${accessToken}`);
+  console.log(`job                       : ${JSON.stringify(job)}`);
+  console.log(`maxRounds                 : ${maxRounds}`);
+  console.log(`negotiationTimeSeconds    : ${negotiationTimeSeconds}`);
+  console.log('─────────────────────────────────────');
   if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !job || typeof job !== 'object') {
     return res.status(400).json({
       error: 'Missing or invalid body: user_id, access_token, and job are required.',
@@ -107,7 +113,13 @@ app.post('/agent/buyer/negotiate-and-match', async (req, res) => {
  */
 app.post('/agent/buyer/negotiate-and-match-stream', async (req, res) => {
   const { user_id: userId, access_token: accessToken, job, negotiation_max_rounds: maxRounds, negotiation_time_seconds: negotiationTimeSeconds } = req.body ?? {};
-
+  console.log('────────── Request Payload ──────────');
+  console.log(`userId                    : ${userId}`);
+  console.log(`accessToken               : ${accessToken}`);
+  console.log(`job                       : ${JSON.stringify(job)}`);
+  console.log(`maxRounds                 : ${maxRounds}`);
+  console.log(`negotiationTimeSeconds    : ${negotiationTimeSeconds}`);
+  console.log('─────────────────────────────────────');
   if (userId == null || typeof accessToken !== 'string' || !accessToken.trim() || !job || typeof job !== 'object') {
     return res.status(400).json({
       error: 'Missing or invalid body: user_id, access_token, and job are required.',

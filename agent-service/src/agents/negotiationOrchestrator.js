@@ -2,15 +2,94 @@ import { fetchProvidersByCategory, fetchProviderBasicDetails } from './buyerMatc
 import { runMatching } from './negotiationGraph.js';
 import { NEGOTIATION_TIME_SECONDS } from '../config/index.js';
 
+/* ---------------- PRIORITY PARSER ---------------- */
+
+/**
+ * Convert array-based priorities to nested object format
+ * Input:  [{ type: "price", level: "must_have", value: "1300" }, ...]
+ * Output: { must_have: { max_price: 1300, start_date: "..." }, nice_to_have: {...}, bonus: {...} }
+ */
+function parsePriorities(prioritiesArray = []) {
+  const parsed = {
+    must_have: {},
+    nice_to_have: {},
+    bonus: {}
+  };
+
+  for (const p of prioritiesArray) {
+    const level = p.level; // "must_have" | "nice_to_have" | "bonus"
+    const type = p.type;   // "price" | "startDate" | "endDate" | "rating" | "jobsCompleted" | "licensed" | "references"
+    const value = p.value;
+
+    if (!parsed[level]) continue; // Skip invalid levels
+
+    switch (type) {
+      case 'price':
+        parsed[level].max_price = Number(value);
+        break;
+      case 'startDate':
+        parsed[level].start_date = value;
+        break;
+      case 'endDate':
+        parsed[level].end_date = value;
+        break;
+      case 'rating':
+        parsed[level].min_rating = Number(value);
+        break;
+      case 'jobsCompleted':
+        parsed[level].min_jobs_completed = Number(value);
+        break;
+      case 'licensed':
+        parsed[level].licensed = value === true || value === 'true' || value === '1';
+        break;
+      case 'references':
+        parsed[level].references = value === true || value === 'true' || value === '1';
+        break;
+      default:
+        // Unknown type, skip
+        break;
+    }
+  }
+
+  return parsed;
+}
+
 /* ---------------- PROVIDER DATA ---------------- */
 
+/**
+ * Extract and normalize provider service data including deadline_in_days
+ */
 function getProviderServiceData(provider, job) {
   return {
     average_rating: provider?.average_rating ?? provider?.rating ?? 0,
     total_completed_order: provider?.total_completed_order ?? provider?.jobsCompleted ?? 0,
     licensed: provider?.licensed !== false,
     referencesAvailable: (Number(provider?.num_of_rating ?? 0) || 0) > 0,
+    // ✅ ADD deadline_in_days - this is the provider's typical completion time for this service
+    deadline_in_days: provider?.deadline_in_days ?? 
+                     provider?.service_deadline_days ?? 
+                     provider?.completionDays ?? 
+                     3, // fallback only if provider data doesn't have it
   };
+}
+
+/* ---------------- PROVIDER RANKING ---------------- */
+
+/**
+ * Rank providers by quality score to avoid always contacting same sellers
+ * Considers: rating, completed jobs, licensing status
+ */
+function rankProviders(providers = [], limit = 10) {
+  return providers
+    .map(p => ({
+      ...p,
+      rankScore: 
+        (p.average_rating ?? 0) * 10 +              // Rating weight (0-50 points)
+        Math.min(p.total_completed_order ?? 0, 50) + // Jobs cap at 50 points
+        (p.licensed ? 20 : 0)                        // Licensed bonus
+    }))
+    .sort((a, b) => b.rankScore - a.rankScore)       // Highest score first
+    .slice(0, limit);
 }
 
 /* ---------------- MAIN ORCHESTRATOR ---------------- */
@@ -21,9 +100,15 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     return { deals: [], reply: 'Job must have service_category_id.' };
   }
 
+  // ✅ PARSE PRIORITIES IF ARRAY FORMAT
+  if (Array.isArray(job.priorities)) {
+    job.priorities = parsePriorities(job.priorities);
+  }
+
   // 🔒 HARD LIMIT — CLIENT REQUIREMENT
   const maxRounds = Math.min(options.maxRounds ?? 1, 2);
-  const deadline_ts = Date.now() + (options.timeSeconds ?? NEGOTIATION_TIME_SECONDS ?? 60) * 1000;
+  const timeLimitSeconds = job.agent_time_limit_seconds ?? options.timeSeconds ?? options.negotiationTimeSeconds ?? NEGOTIATION_TIME_SECONDS ?? 60;
+  const deadline_ts = Date.now() + timeLimitSeconds * 1000;
 
   const jobSnippet = {
     id: job.id,
@@ -40,18 +125,22 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     return { deals: [], reply: 'No providers found.' };
   }
 
+  // ✅ RANK PROVIDERS BEFORE NEGOTIATING
+  const rankedProviders = rankProviders(providers, options.providerLimit ?? 10);
+
   const results = [];
 
-  for (const provider of providers.slice(0, options.providerLimit ?? 10)) {
+  for (const provider of rankedProviders) {
     const providerId = provider?.provider_id ?? provider?.id;
     if (!providerId) continue;
 
+    // ✅ NOW INCLUDES deadline_in_days
     const providerServiceData = getProviderServiceData(provider, job);
 
     const outcome = await runMatching({
       job: jobSnippet,
       providerId: String(providerId),
-      providerServiceData,
+      providerServiceData, // ✅ Contains deadline_in_days
       maxRounds,
       deadline_ts,
     });
@@ -70,33 +159,50 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     });
   }
 
-  /* ---------------- SCORING ---------------- */
+  /* ---------------- SCORING WITH MUST-HAVE ENFORCEMENT ---------------- */
 
   const scored = await Promise.all(
     results.map(async (r, idx) => {
       const basic = await fetchProviderBasicDetails(r.providerId);
+      const sellerNameFromBasic = basic ? [basic.first_name, basic.last_name].filter(Boolean).join(' ').trim() : null;
+      const sellerName = sellerNameFromBasic ?? r.provider?.name ?? r.provider?.first_name ?? 'Provider';
 
-      const priceScore =
-        job.priorities?.must_have?.max_price &&
-        r.quote.price <= job.priorities.must_have.max_price
-          ? 40
-          : 0;
+      // ✅ MUST HAVE (if ANY fail, matchScore = 0)
+      const mustHavePrice = !job.priorities?.must_have?.max_price || r.quote.price <= job.priorities.must_have.max_price;
+      const mustHaveDates = !job.priorities?.must_have?.start_date || r.quote.can_meet_dates !== false;
+      const mustHavePass = mustHavePrice && mustHaveDates;
 
+      if (!mustHavePass) {
+        return {
+          id: `deal_${job.id}_${r.providerId}_${idx}`,
+          sellerId: r.providerId,
+          sellerName,
+          quote: r.quote,
+          matchScore: 0, // ❌ FAILED MUST-HAVE
+          negotiationMessage: r.negotiationMessage ?? null,
+          failedMustHave: true,
+          failureReason: !mustHavePrice ? 'Price exceeds max budget' : 'Cannot meet required dates',
+        };
+      }
+
+      // ✅ NICE TO HAVE (20pts each)
       const ratingScore =
-        r.provider.average_rating >= (job.priorities?.nice_to_have?.min_rating ?? 0)
-          ? 20
-          : 0;
+        r.provider.average_rating >= (job.priorities?.nice_to_have?.min_rating ?? 0) ? 20 : 0;
+      
+      const jobsScore = 
+        r.provider.total_completed_order >= (job.priorities?.nice_to_have?.min_jobs_completed ?? 0) ? 20 : 0;
 
+      // ✅ BONUS (10pts each)
       const bonusScore =
         (job.priorities?.bonus?.licensed && r.provider.licensed ? 10 : 0) +
         (job.priorities?.bonus?.references && r.provider.referencesAvailable ? 10 : 0);
 
-      const matchScore = priceScore + ratingScore + bonusScore;
+      const matchScore = 40 + ratingScore + jobsScore + bonusScore; // Max = 100
 
       return {
         id: `deal_${job.id}_${r.providerId}_${idx}`,
         sellerId: r.providerId,
-        sellerName: basic?.first_name ?? r.provider.name ?? 'Provider',
+        sellerName,
         quote: r.quote,
         matchScore,
         negotiationMessage: r.negotiationMessage ?? null,
@@ -104,7 +210,9 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     })
   );
 
+  // ✅ FILTER OUT FAILED MUST-HAVES
   const topDeals = scored
+    .filter(d => !d.failedMustHave)
     .sort((a, b) => b.matchScore - a.matchScore)
     .slice(0, 5);
 
@@ -140,6 +248,7 @@ function transcriptToSteps(transcript = [], quote = null) {
       step.price = quote.price;
       step.completionDays = quote.days ?? quote.completionDays;
       step.paymentSchedule = quote.paymentSchedule;
+      step.can_meet_dates = quote.can_meet_dates;
       step.licensed = quote.licensed;
       step.referencesAvailable = quote.referencesAvailable;
     }
@@ -155,8 +264,15 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
     return;
   }
 
+  // ✅ PARSE PRIORITIES IF ARRAY FORMAT
+  if (Array.isArray(job.priorities)) {
+    job.priorities = parsePriorities(job.priorities);
+  }
+
   const maxRounds = Math.min(options.maxRounds ?? 1, 2);
-  const deadline_ts = Date.now() + (options.timeSeconds ?? options.negotiationTimeSeconds ?? NEGOTIATION_TIME_SECONDS ?? 60) * 1000;
+  const timeLimitSeconds = job.agent_time_limit_seconds ?? options.timeSeconds ?? options.negotiationTimeSeconds ?? NEGOTIATION_TIME_SECONDS ?? 60;
+  const deadline_ts = Date.now() + timeLimitSeconds * 1000;
+  
   const jobSnippet = {
     id: job.id,
     title: job.title,
@@ -173,22 +289,28 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
     return;
   }
 
-  const list = providers.slice(0, options.providerLimit ?? 10);
-  if (typeof send === 'function') send({ type: 'providers_fetched', count: list.length });
+  // ✅ RANK PROVIDERS BEFORE NEGOTIATING
+  const rankedProviders = rankProviders(providers, options.providerLimit ?? 10);
+  
+  if (typeof send === 'function') send({ type: 'providers_fetched', count: rankedProviders.length });
 
   const results = [];
-  for (const provider of list) {
+  for (const provider of rankedProviders) {
     const providerId = provider?.provider_id ?? provider?.id;
     if (!providerId) continue;
-    const providerName = provider?.name ?? provider?.first_name ?? `Provider ${providerId}`;
+    const basic = await fetchProviderBasicDetails(providerId);
+    const nameFromBasic = basic ? [basic.first_name, basic.last_name].filter(Boolean).join(' ').trim() : null;
+    const providerName = nameFromBasic ?? provider?.name ?? provider?.first_name ?? provider?.provider_name ?? `Provider ${providerId}`;
 
     if (typeof send === 'function') send({ type: 'provider_start', providerId: String(providerId), providerName });
 
+    // ✅ NOW INCLUDES deadline_in_days
     const providerServiceData = getProviderServiceData(provider, job);
+    
     const outcome = await runMatching({
       job: jobSnippet,
       providerId: String(providerId),
-      providerServiceData,
+      providerServiceData, // ✅ Contains deadline_in_days
       maxRounds,
       deadline_ts,
     });
@@ -205,6 +327,7 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
           completionDays: step.completionDays,
         };
         if (step.paymentSchedule != null) payload.paymentSchedule = step.paymentSchedule;
+        if (step.can_meet_dates != null) payload.can_meet_dates = step.can_meet_dates;
         if (step.licensed != null) payload.licensed = step.licensed;
         if (step.referencesAvailable != null) payload.referencesAvailable = step.referencesAvailable;
         send({ type: 'negotiation_step', providerId: String(providerId), providerName, step: payload });
@@ -237,29 +360,63 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
     }
   }
 
-  /* same scoring as runMatchAndRecommend */
+  /* ---------------- SAME SCORING AS runMatchAndRecommend ---------------- */
+  
   const scored = await Promise.all(
     results.map(async (r, idx) => {
       const basic = await fetchProviderBasicDetails(r.providerId);
-      const priceScore =
-        job.priorities?.must_have?.max_price && r.quote.price <= job.priorities.must_have.max_price ? 40 : 0;
+      const sellerNameFromBasic = basic ? [basic.first_name, basic.last_name].filter(Boolean).join(' ').trim() : null;
+      const sellerName = sellerNameFromBasic ?? r.provider?.name ?? r.provider?.first_name ?? 'Provider';
+
+      // ✅ MUST HAVE (if ANY fail, matchScore = 0)
+      const mustHavePrice = !job.priorities?.must_have?.max_price || r.quote.price <= job.priorities.must_have.max_price;
+      const mustHaveDates = !job.priorities?.must_have?.start_date || r.quote.can_meet_dates !== false;
+      const mustHavePass = mustHavePrice && mustHaveDates;
+
+      if (!mustHavePass) {
+        return {
+          id: `deal_${job.id}_${r.providerId}_${idx}`,
+          sellerId: r.providerId,
+          sellerName,
+          quote: r.quote,
+          matchScore: 0,
+          negotiationMessage: r.negotiationMessage ?? null,
+          failedMustHave: true,
+          failureReason: !mustHavePrice ? 'Price exceeds max budget' : 'Cannot meet required dates',
+        };
+      }
+
+      // ✅ NICE TO HAVE (20pts each)
       const ratingScore =
         r.provider.average_rating >= (job.priorities?.nice_to_have?.min_rating ?? 0) ? 20 : 0;
+      
+      const jobsScore = 
+        r.provider.total_completed_order >= (job.priorities?.nice_to_have?.min_jobs_completed ?? 0) ? 20 : 0;
+
+      // ✅ BONUS (10pts each)
       const bonusScore =
         (job.priorities?.bonus?.licensed && r.provider.licensed ? 10 : 0) +
         (job.priorities?.bonus?.references && r.provider.referencesAvailable ? 10 : 0);
-      const matchScore = priceScore + ratingScore + bonusScore;
+
+      const matchScore = 40 + ratingScore + jobsScore + bonusScore; // Max = 100
+
       return {
         id: `deal_${job.id}_${r.providerId}_${idx}`,
         sellerId: r.providerId,
-        sellerName: basic?.first_name ?? r.provider.name ?? 'Provider',
+        sellerName,
         quote: r.quote,
         matchScore,
         negotiationMessage: r.negotiationMessage ?? null,
       };
     })
   );
-  const topDeals = scored.sort((a, b) => b.matchScore - a.matchScore).slice(0, 5);
+  
+  // ✅ FILTER OUT FAILED MUST-HAVES
+  const topDeals = scored
+    .filter(d => !d.failedMustHave)
+    .sort((a, b) => b.matchScore - a.matchScore)
+    .slice(0, 5);
+    
   const reply =
     topDeals.length > 0
       ? `Found ${topDeals.length} providers that match your priorities.`

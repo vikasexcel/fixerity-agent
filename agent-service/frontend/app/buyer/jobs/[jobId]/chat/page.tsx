@@ -29,7 +29,7 @@ function normalizeJobId(id: string): string {
   return String(id).trim();
 }
 
-function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLog }) {
+function NegotiationProviderCard({ provider, rank, score }: { provider: NegotiationProviderLog; rank?: number; score?: number }) {
   const [open, setOpen] = useState(true);
   const { providerName, steps, outcome } = provider;
   return (
@@ -41,7 +41,11 @@ function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLo
       >
         {open ? <ChevronDown size={16} className="text-muted-foreground shrink-0" /> : <ChevronRight size={16} className="text-muted-foreground shrink-0" />}
         <Building2 size={16} className="text-primary shrink-0" />
+        {rank != null && <span className="text-sm font-semibold text-primary shrink-0">{rank}.</span>}
         <span className="font-medium text-foreground truncate">{providerName}</span>
+        {score != null && (
+          <span className="text-sm font-semibold text-accent shrink-0">{score}%</span>
+        )}
         {outcome && (
           <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             {outcome.status === 'accepted' && <Check size={14} className="text-accent" />}
@@ -67,7 +71,7 @@ function NegotiationProviderCard({ provider }: { provider: NegotiationProviderLo
                 <span>
                   <strong className="text-foreground">{step.role === 'buyer' ? 'You' : 'Provider'}</strong>
                   {step.action === 'accept' && (
-                    <span className="text-accent ml-1">· Deal</span>
+                    <span className="text-accent ml-1">· Quote</span>
                   )}
                   {step.price != null && step.completionDays != null && (
                     <span> · ${step.price}, {step.completionDays} day{step.completionDays !== 1 ? 's' : ''}</span>
@@ -408,16 +412,81 @@ export default function JobChatPage() {
                 {(msg.phase === 'error' && msg.error) && (
                   <p className="text-sm text-muted-foreground">You can still ask follow-up questions about this job.</p>
                 )}
-                {providers.length > 0 && (
-                  <div className="mt-2 space-y-3">
-                    <p className="text-sm font-semibold text-foreground">Live negotiation by provider</p>
-                    <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
-                      {providers.map((prov) => (
-                        <NegotiationProviderCard key={prov.providerId} provider={prov} />
-                      ))}
+                {providers.length > 0 && (() => {
+                  // Rank: by negotiated price asc, then completion days asc; no outcome last
+                  const ranked = [...providers].sort((a, b) => {
+                    const oa = a.outcome;
+                    const ob = b.outcome;
+                    if (!oa && !ob) return 0;
+                    if (!oa) return 1;
+                    if (!ob) return -1;
+                    if (oa.negotiatedPrice !== ob.negotiatedPrice) return oa.negotiatedPrice - ob.negotiatedPrice;
+                    return oa.negotiatedCompletionDays - ob.negotiatedCompletionDays;
+                  });
+                  const dealsById = new Map((msg.deals ?? []).map((d) => [d.sellerId, d]));
+                  return (
+                    <div className="mt-2 space-y-3">
+                      <p className="text-sm font-semibold text-foreground">Live negotiation by provider</p>
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
+                        {ranked.map((prov, i) => (
+                          <NegotiationProviderCard
+                            key={prov.providerId}
+                            provider={prov}
+                            rank={i + 1}
+                            score={msg.phase === 'complete' ? dealsById.get(prov.providerId)?.matchScore : undefined}
+                          />
+                        ))}
+                      </div>
+                      {msg.phase === 'complete' && (
+                        <div className="space-y-3 pt-2 border-t border-border/50">
+                          <p className="text-sm font-semibold text-foreground">Provider profile</p>
+                          <div className="space-y-2">
+                            {ranked.map((prov, i) => {
+                              const deal = dealsById.get(prov.providerId);
+                              const agent = deal?.sellerAgent;
+                              const name = agent?.name ?? deal?.sellerName ?? prov.providerName;
+                              const rankNum = i + 1;
+                              const scoreVal = deal?.matchScore;
+                              return (
+                                <div
+                                  key={prov.providerId}
+                                  className="bg-secondary/30 rounded-lg border border-border/50 p-3 space-y-1.5"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="font-medium text-foreground">
+                                      <span className="text-primary font-semibold">{rankNum}.</span> {name}
+                                    </p>
+                                    {scoreVal != null && (
+                                      <span className="text-sm font-semibold text-accent shrink-0">{scoreVal}% match</span>
+                                    )}
+                                  </div>
+                                  {agent != null ? (
+                                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                      <Star size={12} className="fill-muted-foreground text-muted-foreground" />
+                                      {agent.rating} · {agent.jobsCompleted} jobs
+                                      {agent.licensed != null && (agent.licensed ? ' · Licensed' : ' · Not licensed')}
+                                      {agent.references != null && (agent.references ? ' · References' : '')}
+                                    </p>
+                                  ) : deal?.quote != null ? (
+                                    <p className="text-xs text-muted-foreground">
+                                      {deal.quote.price != null && `Quote: $${deal.quote.price}`}
+                                      {deal.quote.completionDays != null && ` · ${deal.quote.completionDays}d`}
+                                    </p>
+                                  ) : null}
+                                  {prov.outcome && (
+                                    <p className="text-xs text-accent">
+                                      ${prov.outcome.negotiatedPrice} · {prov.outcome.negotiatedCompletionDays}d
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
                 {msg.phase === 'complete' && (
                   <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
                 )}
@@ -503,7 +572,7 @@ export default function JobChatPage() {
           <p className="text-xs text-muted-foreground">Suggested questions:</p>
           <div className="flex flex-wrap gap-2">
             {[
-              'What deal do we have?',
+              'What Quote do we have?',
               'Tell me about the top provider',
               'What is the payment schedule?',
               'Who is licensed and has references?',
