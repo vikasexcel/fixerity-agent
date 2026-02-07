@@ -53,6 +53,33 @@ export interface ProviderHomeResponse {
 }
 
 /**
+ * Basic provider details (name, contact).
+ * Laravel: POST /api/on-demand/provider-basic-details
+ */
+export interface ProviderBasicDetails {
+  first_name: string;
+  last_name: string;
+  email: string;
+  contact_number: string;
+  gender: number;
+}
+
+/**
+ * Get provider basic details (name, email, contact).
+ * Laravel: POST /api/on-demand/provider-basic-details
+ */
+export async function getProviderBasicDetails(providerId: number): Promise<ProviderBasicDetails> {
+  const data = await apiPost<{ status: number; message: string; message_code: number; data: ProviderBasicDetails }>(
+    'on-demand/provider-basic-details',
+    { provider_id: providerId }
+  );
+  if (data.status !== 1 || !data.data) {
+    throw new Error(data.message || 'Provider basic details not found');
+  }
+  return data.data;
+}
+
+/**
  * Get provider home/dashboard data.
  * Laravel: POST /api/on-demand/home
  */

@@ -271,6 +271,59 @@ export async function sendBuyerChatMessage(
   return data.reply ?? '';
 }
 
+/** Options for buyer direct chat with a provider. */
+export interface BuyerDirectChatOptions {
+  jobId: string;
+  jobTitle?: string;
+  providerId: number;
+  providerName?: string;
+  price?: number;
+  days?: number;
+  paymentSchedule?: string;
+  rating?: number;
+  jobsCompleted?: number;
+  conversationHistory?: ConversationTurn[];
+}
+
+/**
+ * Send a direct chat message to a matched provider (AI-simulated provider response).
+ */
+export async function sendBuyerDirectChatMessage(
+  userId: number,
+  accessToken: string,
+  message: string,
+  options: BuyerDirectChatOptions
+): Promise<string> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/buyer/direct-chat`;
+  const body: Record<string, unknown> = {
+    user_id: userId,
+    access_token: accessToken,
+    job_id: options.jobId,
+    provider_id: options.providerId,
+    message,
+  };
+  if (options.jobTitle) body.job_title = options.jobTitle;
+  if (options.providerName) body.provider_name = options.providerName;
+  if (options.price != null) body.price = options.price;
+  if (options.days != null) body.days = options.days;
+  if (options.paymentSchedule) body.payment_schedule = options.paymentSchedule;
+  if (options.rating != null) body.rating = options.rating;
+  if (options.jobsCompleted != null) body.jobs_completed = options.jobsCompleted;
+  if (options.conversationHistory?.length) body.conversation_history = options.conversationHistory;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as { reply?: string; error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error ?? res.statusText ?? 'Direct chat request failed');
+  }
+  return data.reply ?? '';
+}
+
 /**
  * Clear Redis cache and Mem0 memories for a job (negotiation data + cached deals).
  * Call after recommended providers when user wants to reset/clean up for that job.

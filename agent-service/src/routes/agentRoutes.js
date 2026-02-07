@@ -6,6 +6,7 @@ import { OPENAI_API_KEY } from '../config/index.js';
 import { runNegotiationAndMatchStream, cleanupJobNegotiations } from '../agents/negotiationOrchestrator.js';
 import { sessionStore, semanticMemory } from '../agents/negotiationGraph.js';
 import { fetchProviderBasicDetails } from '../agents/buyerMatchAgent.js';
+import { runBuyerDirectChatAgent } from '../agents/buyerDirectChatAgent.js';
 import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
 
@@ -129,6 +130,64 @@ router.post('/buyer/chat', async (req, res) => {
     console.error('[buyer-chat] Error:', err.message);
     res.status(500).json({
       error: err?.message || 'Failed to process chat message.',
+    });
+  }
+});
+
+/**
+ * POST /agent/buyer/direct-chat
+ * Buyer direct chat with a matched provider (AI-simulated provider responses).
+ * Body: { user_id, access_token, job_id, provider_id, message, job_title?, provider_name?, price?, days?, payment_schedule?, rating?, jobs_completed?, conversation_history? }
+ */
+router.post('/buyer/direct-chat', async (req, res) => {
+  const body = req.body ?? {};
+  const {
+    user_id: userId,
+    access_token: accessToken,
+    job_id: jobId,
+    provider_id: providerId,
+    message,
+    job_title: jobTitle,
+    provider_name: providerName,
+    price,
+    days,
+    payment_schedule: paymentSchedule,
+    rating,
+    jobs_completed: jobsCompleted,
+    conversation_history: conversationHistory,
+  } = body;
+
+  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({ error: 'Missing or invalid user_id or access_token.' });
+  }
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    return res.status(400).json({ error: 'Missing or invalid message.' });
+  }
+  if (!jobId || typeof jobId !== 'string' || !String(jobId).trim()) {
+    return res.status(400).json({ error: 'Missing or invalid job_id.' });
+  }
+  if (providerId == null) {
+    return res.status(400).json({ error: 'Missing provider_id.' });
+  }
+
+  try {
+    const reply = await runBuyerDirectChatAgent(Number(userId), accessToken.trim(), message.trim(), {
+      jobId: String(jobId).trim(),
+      jobTitle: jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : undefined,
+      providerId: Number(providerId),
+      providerName: providerName && String(providerName).trim() ? String(providerName).trim() : undefined,
+      price: typeof price === 'number' ? price : price != null ? Number(price) : undefined,
+      days: typeof days === 'number' ? days : days != null ? Number(days) : undefined,
+      paymentSchedule: paymentSchedule && String(paymentSchedule).trim() ? String(paymentSchedule).trim() : undefined,
+      rating: typeof rating === 'number' ? rating : rating != null ? Number(rating) : undefined,
+      jobsCompleted: typeof jobsCompleted === 'number' ? jobsCompleted : jobsCompleted != null ? Number(jobsCompleted) : undefined,
+      conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
+    });
+    res.json({ reply: reply.reply });
+  } catch (err) {
+    console.error('[buyer-direct-chat] Error:', err.message);
+    res.status(500).json({
+      error: err?.message || 'Direct chat request failed.',
     });
   }
 });

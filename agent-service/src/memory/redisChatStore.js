@@ -202,3 +202,14 @@ export function sellerSessionId(providerId, orderId) {
   }
   return `seller:${providerId}`;
 }
+
+/**
+ * Build session ID for buyer direct chat with a specific provider (per job).
+ * @param {number|string} userId
+ * @param {string} jobId
+ * @param {number|string} providerId
+ * @returns {string}
+ */
+export function buyerDirectChatSessionId(userId, jobId, providerId) {
+  return `buyer:direct:${userId}:job:${String(jobId || '').trim()}:provider:${providerId}`;
+}

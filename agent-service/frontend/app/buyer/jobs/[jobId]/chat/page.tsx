@@ -7,13 +7,13 @@ import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check, AlertCircle, Trash2 } from 'lucide-react';
+import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check, AlertCircle, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { matchJobToProvidersWithNegotiationStream, sendBuyerChatMessage, cleanupJobCache, type NegotiationStep } from '@/lib/agent-api';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs, updateJobStatus } from '@/lib/jobs-api';
-import { getProviderDetails } from '@/lib/provider-api';
+import { getProviderDetails, getProviderBasicDetails, type ProviderBasicDetails } from '@/lib/provider-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 type MatchPhase = 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
@@ -143,6 +143,9 @@ export default function JobChatPage() {
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
   const [resolvedProviderNames, setResolvedProviderNames] = useState<Record<string, string>>({});
+  const [viewDetailsProvider, setViewDetailsProvider] = useState<{ providerId: string; providerName: string } | null>(null);
+  const [viewDetailsProfile, setViewDetailsProfile] = useState<ProviderBasicDetails | null>(null);
+  const [viewDetailsLoading, setViewDetailsLoading] = useState(false);
 
   const { session } = useAuth();
   const user = session.user;
@@ -552,8 +555,8 @@ export default function JobChatPage() {
                       </div>
                       {msg.phase === 'complete' && (
                         <div className="space-y-3 pt-2 border-t border-border/50">
-                          <p className="text-sm font-semibold text-foreground">Provider profiles (ranked)</p>
-                          <div className="space-y-2">
+                          <p className="text-sm font-semibold text-foreground">Top Matches:</p>
+                          <div className="space-y-4">
                             {ranked.map((prov, i) => {
                               const deal = getDeal(prov);
                               const agent = deal?.sellerAgent;
@@ -562,50 +565,66 @@ export default function JobChatPage() {
                                 resolvedProviderNames[prov.providerId] ??
                                 (agent?.name ?? deal?.sellerName ?? prov.providerName)?.trim() ??
                                 `Provider ${rankNum}`;
-                              const scoreVal = deal?.matchScore;
                               const quote = deal?.quote;
                               const outcome = prov.outcome;
                               const price = outcome?.negotiatedPrice ?? quote?.price;
                               const days = outcome?.negotiatedCompletionDays ?? quote?.days ?? quote?.completionDays;
-                              const quoteLine =
-                                price != null && days != null
-                                  ? `${name} · Quote · $${price}, ${days} day${days !== 1 ? 's' : ''}`
-                                  : null;
+                              const rating = agent?.rating ?? 0;
+                              const jobsCount = agent?.jobsCompleted ?? 0;
+                              const paymentSchedule = quote?.paymentSchedule;
                               return (
                                 <div
                                   key={prov.providerId}
-                                  className="bg-secondary/30 rounded-lg border border-border/50 p-3 space-y-1.5"
+                                  className="bg-secondary/30 rounded-lg border border-border/50 p-3 space-y-2"
                                 >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="font-medium text-foreground">
-                                      <span className="text-primary font-semibold">{rankNum}.</span> {name}
-                                    </p>
-                                    {scoreVal != null && (
-                                      <span className="text-sm font-semibold text-accent shrink-0">{scoreVal}% match</span>
+                                  <p className="font-medium text-foreground">
+                                    <span className="text-primary font-semibold">{rankNum}.</span> {name}
+                                    {price != null && days != null && (
+                                      <span className="text-muted-foreground font-normal"> - ${price}, {days} day{days !== 1 ? 's' : ''}</span>
                                     )}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                    <Star size={12} className="fill-muted-foreground text-muted-foreground shrink-0" />
+                                    {rating > 0 ? `${rating}/5` : 'N/A'}, {jobsCount} jobs
+                                  </p>
+                                  <div className="flex flex-wrap gap-2 pt-1">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="text-xs"
+                                      onClick={() => {
+                                        setViewDetailsProvider({ providerId: prov.providerId, providerName: name });
+                                        setViewDetailsProfile(null);
+                                        setViewDetailsLoading(true);
+                                        getProviderBasicDetails(Number(prov.providerId))
+                                          .then((profile) => setViewDetailsProfile(profile))
+                                          .catch(() => setViewDetailsProfile(null))
+                                          .finally(() => setViewDetailsLoading(false));
+                                      }}
+                                    >
+                                      View Details
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      className="text-xs bg-primary hover:bg-primary/90 text-primary-foreground"
+                                      onClick={() => {
+                                        const params = new URLSearchParams();
+                                        params.set('name', name);
+                                        if (price != null) params.set('price', String(price));
+                                        if (days != null) params.set('days', String(days));
+                                        if (rating > 0) params.set('rating', String(rating));
+                                        if (jobsCount > 0) params.set('jobs', String(jobsCount));
+                                        if (paymentSchedule) params.set('payment', paymentSchedule);
+                                        const query = params.toString();
+                                        const url = `/buyer/jobs/${encodeURIComponent(job.id)}/direct-chat/${encodeURIComponent(prov.providerId)}${query ? `?${query}` : ''}`;
+                                        window.open(url, '_blank', 'noopener,noreferrer');
+                                      }}
+                                    >
+                                      Contact Directly
+                                    </Button>
                                   </div>
-                                  {agent != null ? (
-                                    <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                      <Star size={12} className="fill-muted-foreground text-muted-foreground" />
-                                      {agent.rating} · {agent.jobsCompleted} jobs
-                                      {agent.licensed != null && (agent.licensed ? ' · Licensed' : ' · Not licensed')}
-                                      {agent.references != null && (agent.references ? ' · References' : '')}
-                                    </p>
-                                  ) : null}
-                                  {(quote != null || outcome != null) && (
-                                    <p className="text-xs text-muted-foreground">
-                                      {quoteLine != null && (
-                                        <span className="text-accent font-medium">{quoteLine}</span>
-                                      )}
-                                      {quote != null && (quote.paymentSchedule || quote.licensed != null || quote.referencesAvailable != null) && (
-                                        <span className="block mt-0.5">
-                                          {quote.paymentSchedule && `Payment: ${quote.paymentSchedule}`}
-                                          {quote.licensed != null && ` · Licensed: ${quote.licensed ? 'Yes' : 'No'}`}
-                                          {quote.referencesAvailable != null && ` · References: ${quote.referencesAvailable ? 'Yes' : 'No'}`}
-                                        </span>
-                                      )}
-                                    </p>
-                                  )}
                                 </div>
                               );
                             })}
@@ -750,6 +769,65 @@ export default function JobChatPage() {
           </form>
         </div>
       </div>
+
+      {/* View Details Modal */}
+      {viewDetailsProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setViewDetailsProvider(null)}>
+          <div
+            className="bg-card border border-border rounded-lg shadow-lg max-w-md w-full max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 bg-card border-b border-border px-4 py-3 flex items-center justify-between">
+              <h3 className="font-semibold text-foreground">Provider Details</h3>
+              <button
+                type="button"
+                onClick={() => setViewDetailsProvider(null)}
+                className="p-1 rounded-lg hover:bg-secondary text-muted-foreground"
+                aria-label="Close"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4">
+              {viewDetailsLoading && (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 size={24} className="animate-spin text-primary" />
+                </div>
+              )}
+              {!viewDetailsLoading && viewDetailsProfile && (
+                <div className="space-y-4">
+                  <div>
+                    <p className="font-medium text-foreground">
+                      {viewDetailsProfile.first_name}
+                      {viewDetailsProfile.last_name ? ` ${viewDetailsProfile.last_name}` : ''}
+                    </p>
+                  </div>
+                  <dl className="space-y-2 text-sm">
+                    <div>
+                      <dt className="text-muted-foreground">Email</dt>
+                      <dd className="text-foreground font-medium">{viewDetailsProfile.email}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Contact number</dt>
+                      <dd className="text-foreground font-medium">{viewDetailsProfile.contact_number}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Gender</dt>
+                      <dd className="text-foreground font-medium">
+                        {viewDetailsProfile.gender === 1 ? 'Male' : viewDetailsProfile.gender === 2 ? 'Female' : `Other (${viewDetailsProfile.gender})`}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              )}
+              {!viewDetailsLoading && !viewDetailsProfile && (
+                <p className="text-sm text-muted-foreground py-4">Could not load provider details.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
