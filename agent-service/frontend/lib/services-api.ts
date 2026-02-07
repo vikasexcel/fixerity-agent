@@ -54,6 +54,56 @@ export async function fetchSubCategories(
   return data.category_list.map((c) => ({ id: c.category_id, name: c.category_name }));
 }
 
+/**
+ * Fetch subcategories for a service category (provider auth).
+ * Uses on-demand/get-subcategory-list - does not require provider_service_id.
+ * Laravel: POST /api/on-demand/get-subcategory-list
+ */
+export async function fetchProviderSubCategories(
+  providerId: number,
+  accessToken: string,
+  serviceCategoryId: number
+): Promise<Array<{ id: number; name: string }>> {
+  const data = await apiPost<{
+    status: number;
+    category_list?: Array<{ category_id: number; category_name: string }>;
+  }>('on-demand/get-subcategory-list', {
+    provider_id: providerId,
+    access_token: accessToken,
+    service_category_id: serviceCategoryId,
+  });
+  if (data.status !== 1 || !data.category_list) {
+    return [];
+  }
+  return data.category_list.map((c) => ({ id: c.category_id, name: c.category_name }));
+}
+
+/**
+ * Fetch service categories for sellers/providers.
+ * Uses on-demand/get-service-list API - returns categories the provider can add.
+ * Laravel: POST /api/on-demand/get-service-list
+ */
+export async function fetchProviderServiceCategories(
+  providerId: number,
+  accessToken: string
+): Promise<ServiceCategory[]> {
+  const data = await apiPost<{
+    status: number;
+    service_category_list?: Array<{ service_cat_id: number; service_cat_name: string }>;
+  }>('on-demand/get-service-list', {
+    provider_id: providerId,
+    access_token: accessToken,
+  });
+  if (data.status !== 1 || !data.service_category_list) {
+    return [];
+  }
+  return data.service_category_list.map((s) => ({
+    service_category_id: s.service_cat_id,
+    service_category_name: s.service_cat_name,
+    service_category_icon: undefined,
+  }));
+}
+
 export async function fetchAddressList(
   userId: number,
   accessToken: string

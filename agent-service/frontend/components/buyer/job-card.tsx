@@ -3,13 +3,16 @@
 import { Job } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Eye, Zap, Users } from 'lucide-react';
 
 interface JobCardProps {
   job: Job;
-  onView?: (job: Job) => void;
+  onViewDetails?: (job: Job) => void;
+  onStartAgent?: (job: Job) => void;
+  onRecommendProviders?: (job: Job) => void;
 }
 
-export function JobCard({ job, onView }: JobCardProps) {
+export function JobCard({ job, onViewDetails, onStartAgent, onRecommendProviders }: JobCardProps) {
   const getPriorityColor = (level: string) => {
     switch (level) {
       case 'must_have':
@@ -58,9 +61,31 @@ export function JobCard({ job, onView }: JobCardProps) {
         </div>
       </div>
 
-      <Button onClick={() => onView?.(job)} className="w-full bg-primary hover:bg-primary/90 text-primary-foreground">
-        View Job Details
-      </Button>
+      <div className="flex flex-col gap-2">
+        <Button
+          onClick={() => onViewDetails?.(job)}
+          variant="outline"
+          className="w-full bg-transparent"
+        >
+          <Eye size={16} className="mr-2 shrink-0" />
+          View details
+        </Button>
+        <Button
+          onClick={() => onStartAgent?.(job)}
+          className="w-full bg-primary hover:bg-primary/90 text-primary-foreground"
+        >
+          <Zap size={16} className="mr-2 shrink-0" />
+          Start agent
+        </Button>
+        <Button
+          onClick={() => onRecommendProviders?.(job)}
+          variant="secondary"
+          className="w-full"
+        >
+          <Users size={16} className="mr-2 shrink-0" />
+          Recommend providers
+        </Button>
+      </div>
     </div>
   );
 }

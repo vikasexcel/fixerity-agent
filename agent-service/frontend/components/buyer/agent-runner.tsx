@@ -3,14 +3,16 @@
 import { useState, useEffect } from 'react';
 import { Zap, Check, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { matchJobToProviders } from '@/lib/agent-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { matchJobToProviders, matchJobToProvidersWithNegotiation } from '@/lib/agent-api';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 interface AgentRunnerProps {
   job: Job;
   onComplete: (deals: Deal[]) => void;
   onClose: () => void;
+  /** When true, uses negotiate-and-match API (buyer-seller negotiation on price and completion time). */
+  useNegotiation?: boolean;
 }
 
 interface AgentStatus {
@@ -21,7 +23,8 @@ interface AgentStatus {
   error?: string;
 }
 
-export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
+export function AgentRunner({ job, onComplete, onClose, useNegotiation = false }: AgentRunnerProps) {
+  const { session } = useAuth();
   const [status, setStatus] = useState<AgentStatus>({
     phase: 'initializing',
     agentsScanned: 0,
@@ -32,10 +35,10 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
   const [isRunning, setIsRunning] = useState(true);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning || !session.user) return;
 
     const runAgent = async () => {
-      const user = getAuthSession().user;
+      const user = session.user;
       const token = getAccessToken();
       if (!user || !token) {
         setStatus((prev) => ({
@@ -47,10 +50,16 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
         return;
       }
 
-      setStatus((prev) => ({ ...prev, phase: 'scanning', progress: 20 }));
+      setStatus((prev) => ({
+        ...prev,
+        phase: useNegotiation ? 'evaluating' : 'scanning',
+        progress: 20,
+      }));
 
       try {
-        const deals = await matchJobToProviders(job, Number(user.id), token);
+        const deals = useNegotiation
+          ? await matchJobToProvidersWithNegotiation(job, Number(user.id), token)
+          : await matchJobToProviders(job, Number(user.id), token);
         setStatus((prev) => ({ ...prev, phase: 'complete', progress: 100 }));
         setMatches(deals);
         onComplete(deals);
@@ -66,12 +75,12 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
     };
 
     runAgent();
-  }, [job.id]);
+  }, [job.id, session.user, useNegotiation]);
 
   const phases: Record<AgentStatus['phase'], string> = {
     initializing: 'Initializing buyer agent...',
     scanning: 'Scanning available providers...',
-    evaluating: 'Evaluating capabilities...',
+    evaluating: useNegotiation ? 'Negotiating with providers...' : 'Evaluating capabilities...',
     ranking: 'Ranking and matching...',
     complete: 'Matching complete!',
     error: status.error ?? 'Error',
@@ -178,6 +187,13 @@ export function AgentRunner({ job, onComplete, onClose }: AgentRunnerProps) {
                   <div className="text-right">
                     <p className="font-semibold text-lg text-accent">{match.matchScore}%</p>
                     <p className="text-xs text-muted-foreground">match</p>
+                    {(match.negotiatedPrice != null || match.negotiatedCompletionDays != null) && (
+                      <p className="text-xs text-foreground mt-1">
+                        {match.negotiatedPrice != null && `$${match.negotiatedPrice}`}
+                        {match.negotiatedPrice != null && match.negotiatedCompletionDays != null && ' · '}
+                        {match.negotiatedCompletionDays != null && `${match.negotiatedCompletionDays}d`}
+                      </p>
+                    )}
                   </div>
                 </div>
               ))}

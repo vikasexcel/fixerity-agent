@@ -3061,7 +3061,7 @@ class UserController extends Controller
     public function postOtherServiceProviderDetails(Request $request) {
         $validator = Validator::make($request->all(), [
             "user_id" => "nullable|numeric",
-            "access_token" => "nullable|numeric",
+            "access_token" => "nullable", // string or numeric (customer vs provider/seller agents)
             "provider_id" => "required|numeric",
             "service_category_id" => "required|numeric",
             "lat" => "required|numeric",
@@ -3075,8 +3075,9 @@ class UserController extends Controller
             ]);
         }
 
+        // Only validate user when both user_id and access_token are present (customer). Do not validate user when only provider_id is sent (seller/agent).
         $user_details = $user_currency = null;
-        if ($request->get('user_id') <> null && $request->get('access_token') <> null){
+        if ($request->get('user_id') <> null && $request->get('access_token') <> null) {
             $user_details = $this->userClassapi->checkUserAllow($request->get('user_id'), $request->get('access_token'));
             if ($decoded['status'] = json_decode($user_details) == false) {
                 return $user_details;

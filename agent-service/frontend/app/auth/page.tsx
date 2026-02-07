@@ -1,11 +1,11 @@
 'use client';
 
 import React from 'react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { login, signup } from '@/lib/auth-context';
+import { useAuth } from '@/lib/auth-context';
 
 type AuthMode = 'signin' | 'signup';
 type UserRole = 'buyer' | 'seller';
@@ -15,6 +15,7 @@ const CURRENCIES = ['USD', 'EUR', 'GBP', 'INR', 'JPY', 'AUD'];
 const LANGUAGES = ['en', 'es', 'fr', 'de', 'hi', 'ja'];
 
 export default function AuthPage() {
+  const { session, login, signup } = useAuth();
   const [mode, setMode] = useState<AuthMode>('signin');
   const [role, setRole] = useState<UserRole>('buyer');
   const [email, setEmail] = useState('');
@@ -28,6 +29,12 @@ export default function AuthPage() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
+
+  useEffect(() => {
+    if (session.isLoading) return;
+    if (session.user?.role === 'buyer') router.push('/buyer/dashboard');
+    else if (session.user?.role === 'seller') router.push('/seller/dashboard');
+  }, [session.isLoading, session.user, router]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();

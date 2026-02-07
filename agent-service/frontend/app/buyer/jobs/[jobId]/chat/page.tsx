@@ -1,25 +1,129 @@
+// app/buyer/job/[jobId]/chat/page.tsx (Updated with better error handling)
+
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Zap, Star, Send, Loader2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { ArrowLeft, Zap, Star, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check, AlertCircle, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { matchJobToProviders, sendBuyerChatMessage } from '@/lib/agent-api';
-import { getAuthSession, getAccessToken } from '@/lib/auth-context';
+import { matchJobToProvidersWithNegotiationStream, sendBuyerChatMessage, cleanupJobCache, type NegotiationStep } from '@/lib/agent-api';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs, updateJobStatus } from '@/lib/jobs-api';
+import { getProviderDetails } from '@/lib/provider-api';
 import type { Job, Deal } from '@/lib/dummy-data';
 
 type MatchPhase = 'initializing' | 'scanning' | 'evaluating' | 'ranking' | 'complete' | 'error';
 
+export type NegotiationProviderLog = {
+  providerId: string;
+  providerName: string;
+  steps: NegotiationStep[];
+  outcome?: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number };
+};
+
 type ChatMessage =
-  | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string }
+  | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string; negotiationProviders?: NegotiationProviderLog[]; providersCount?: number }
   | { type: 'user'; content: string }
-  | { type: 'assistant'; content: string };
+  | { type: 'assistant'; content: string }
+  | { type: 'error'; content: string }; // ✅ Added error message type
 
 function normalizeJobId(id: string): string {
   return String(id).trim();
+}
+
+function NegotiationProviderCard({
+  provider,
+  rank,
+  score,
+  displayNameOverride,
+}: {
+  provider: NegotiationProviderLog;
+  rank?: number;
+  score?: number;
+  displayNameOverride?: string;
+}) {
+  const [open, setOpen] = useState(true);
+  const { providerName, steps, outcome } = provider;
+  const displayName =
+    (displayNameOverride && displayNameOverride.trim()) ||
+    (providerName && String(providerName).trim()) ||
+    (rank != null ? `Provider ${rank}` : 'Provider');
+  const quoteLine =
+    outcome != null
+      ? `${displayName} · Quote · $${outcome.negotiatedPrice}, ${outcome.negotiatedCompletionDays} day${outcome.negotiatedCompletionDays !== 1 ? 's' : ''}`
+      : null;
+  return (
+    <div className="bg-secondary/30 rounded-lg border border-border/50 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 p-3 text-left hover:bg-secondary/50 transition"
+      >
+        {open ? <ChevronDown size={16} className="text-muted-foreground shrink-0" /> : <ChevronRight size={16} className="text-muted-foreground shrink-0" />}
+        <Building2 size={16} className="text-primary shrink-0" />
+        {rank != null && <span className="text-sm font-semibold text-primary shrink-0">{rank}.</span>}
+        <span className="font-medium text-foreground truncate">{displayName}</span>
+        {score != null && (
+          <span className="text-sm font-semibold text-accent shrink-0">{score}%</span>
+        )}
+        {outcome && (
+          <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+            {outcome.status === 'accepted' && <Check size={14} className="text-accent" />}
+            {quoteLine}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-0 space-y-1.5">
+          {steps.length === 0 && (
+            <p className="text-xs text-muted-foreground py-1">Waiting for offers…</p>
+          )}
+          {steps.map((step, i) => (
+            <div key={i} className="flex items-start gap-2 text-sm">
+              <span className="shrink-0 mt-0.5">
+                {step.role === 'buyer' ? (
+                  <User size={14} className="text-primary" />
+                ) : (
+                  <Building2 size={14} className="text-accent" />
+                )}
+              </span>
+              <div className="min-w-0 flex-1 text-foreground">
+                <span>
+                  <strong className="text-foreground">{step.role === 'buyer' ? 'You' : 'Provider'}</strong>
+                  {step.action === 'accept' && (
+                    <span className="text-accent ml-1">· Quote</span>
+                  )}
+                  {step.price != null && step.completionDays != null && (
+                    <span> · ${step.price}, {step.completionDays} day{step.completionDays !== 1 ? 's' : ''}</span>
+                  )}
+                </span>
+                {step.message && (
+                  <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">{step.message}</p>
+                )}
+                {(step.paymentSchedule != null || step.licensed != null || step.referencesAvailable != null) && (
+                  <ul className="text-muted-foreground mt-1.5 text-xs leading-relaxed space-y-0.5 list-none pl-0">
+                    {step.paymentSchedule != null && (
+                      <li><span className="text-foreground/80">Payment:</span> {step.paymentSchedule}</li>
+                    )}
+                    {step.licensed != null && (
+                      <li><span className="text-foreground/80">Licensed:</span> {step.licensed ? 'Yes' : 'No'}</li>
+                    )}
+                    {step.referencesAvailable != null && (
+                      <li><span className="text-foreground/80">References:</span> {step.referencesAvailable ? 'Yes' : 'No'}</li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function JobChatPage() {
@@ -35,8 +139,13 @@ export default function JobChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
+  const [negotiationStarted, setNegotiationStarted] = useState(false); // ✅ Track if negotiation ran
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+  const [resolvedProviderNames, setResolvedProviderNames] = useState<Record<string, string>>({});
 
-  const user = getAuthSession().user;
+  const { session } = useAuth();
+  const user = session.user;
   const token = getAccessToken();
 
   // Resolve job: sessionStorage first (from create), then listJobs
@@ -88,54 +197,164 @@ export default function JobChatPage() {
 
   // Auth redirect
   useEffect(() => {
-    if (!user || user.role !== 'buyer') {
+    if (!session.isLoading && (!user || user.role !== 'buyer')) {
       router.push('/auth');
     }
-  }, [user, router]);
+  }, [session.isLoading, user, router]);
 
-  // Run match when job is resolved
+  // Resolve provider names from API when we have a complete match but name is missing or generic
   useEffect(() => {
-    if (!job || !user || !token || messages.length > 0) return;
+    if (!job || !token) return;
+    const completeMatch = messages.find(
+      (m): m is Extract<ChatMessage, { type: 'match' }> =>
+        m.type === 'match' && m.phase === 'complete' && (m.negotiationProviders?.length ?? 0) > 0
+    );
+    if (!completeMatch?.negotiationProviders) return;
+
+    const dealsById = new Map(
+      (completeMatch.deals ?? []).map((d) => {
+        const id = d.sellerId ?? (d as { provider_id?: string }).provider_id;
+        return [String(id ?? ''), d] as const;
+      })
+    );
+
+    const toResolve = completeMatch.negotiationProviders.filter((prov) => {
+      const deal = dealsById.get(String(prov.providerId));
+      const name = (deal?.sellerName ?? prov.providerName)?.trim();
+      if (name && !/^Provider\s*\d+$/i.test(name)) return false;
+      return true;
+    });
+
+    if (toResolve.length === 0) return;
+
+    const serviceCategoryId = job.service_category_id ?? 0;
+    const lat = typeof job.lat === 'number' ? job.lat : 0;
+    const long = typeof job.long === 'number' ? job.long : 0;
+
+    let cancelled = false;
+    (async () => {
+      for (const prov of toResolve) {
+        if (cancelled) break;
+        try {
+          const profile = await getProviderDetails(
+            Number(prov.providerId),
+            serviceCategoryId,
+            lat,
+            long,
+            token
+          );
+          if (cancelled) break;
+          const name = profile?.provider_name?.trim();
+          if (name) {
+            setResolvedProviderNames((prev) => ({ ...prev, [String(prov.providerId)]: name }));
+          }
+        } catch {
+          // ignore per-provider errors
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, job?.id, job?.service_category_id, job?.lat, job?.long, token]);
+
+  // Run negotiation + match with live streaming when job is resolved
+  useEffect(() => {
+    if (!job || !user || !token || negotiationStarted) return;
 
     const runMatch = async () => {
+      setNegotiationStarted(true); // ✅ Mark as started
+
       setMessages([
         {
           type: 'match',
-          phase: 'scanning',
+          phase: 'evaluating',
           deals: undefined,
           error: undefined,
+          negotiationProviders: [],
         },
       ]);
 
+      const providersById = new Map<string, NegotiationProviderLog>();
+
+      function updateMatchMessage(updates: Partial<Extract<ChatMessage, { type: 'match' }>>) {
+        setMessages((prev) =>
+          prev.map((m, i) => (i === 0 && m.type === 'match' ? { ...m, ...updates } : m))
+        );
+      }
+
       try {
-        const deals = await matchJobToProviders(job, Number(user.id), token);
-        setMessages([
+        await matchJobToProvidersWithNegotiationStream(
+          job,
+          Number(user.id),
+          token,
           {
-            type: 'match',
-            phase: 'complete',
-            deals,
-            error: undefined,
+            onEvent: (event) => {
+              if (event.type === 'providers_fetched') {
+                updateMatchMessage({ providersCount: event.count });
+              } else if (event.type === 'provider_start') {
+                providersById.set(event.providerId, {
+                  providerId: event.providerId,
+                  providerName: event.providerName,
+                  steps: [],
+                });
+                updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+              } else if (event.type === 'negotiation_step') {
+                const log = providersById.get(event.providerId);
+                if (log) {
+                  const updated = { ...log, steps: [...log.steps, event.step] };
+                  providersById.set(event.providerId, updated);
+                  updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+                }
+              } else if (event.type === 'provider_done') {
+                const log = providersById.get(event.providerId);
+                if (log) {
+                  const updated = { ...log, outcome: event.outcome };
+                  providersById.set(event.providerId, updated);
+                  updateMatchMessage({ negotiationProviders: Array.from(providersById.values()) });
+                }
+              } else if (event.type === 'done') {
+                if (event.error) {
+                  updateMatchMessage({ phase: 'error', error: event.error, deals: event.deals ?? [] });
+                } else {
+                  updateMatchMessage({
+                    phase: 'complete',
+                    deals: event.deals ?? [],
+                    negotiationProviders: Array.from(providersById.values()),
+                  });
+                }
+              }
+            },
           },
-        ]);
+          {}
+        );
+
+        setMessages((prev) =>
+          prev.map((m, i) => {
+            if (i === 0 && m.type === 'match' && m.phase !== 'complete' && m.phase !== 'error') {
+              return { ...m, phase: 'complete' as const, deals: m.deals ?? [], negotiationProviders: Array.from(providersById.values()) };
+            }
+            return m;
+          })
+        );
 
         const numJobId = job.id.startsWith('job_') ? parseInt(job.id.replace('job_', ''), 10) : parseInt(job.id, 10);
         if (!isNaN(numJobId)) {
           updateJobStatus(Number(user.id), token, numJobId, 'matched').catch(() => {});
         }
       } catch (err) {
-        setMessages([
-          {
-            type: 'match',
-            phase: 'error',
-            deals: undefined,
-            error: err instanceof Error ? err.message : 'Matching failed. Please try again.',
-          },
-        ]);
+        setMessages((prev) =>
+          prev.map((m, i) =>
+            i === 0 && m.type === 'match'
+              ? { ...m, phase: 'error' as const, error: err instanceof Error ? err.message : 'Matching failed. Please try again.' }
+              : m
+          )
+        );
       }
     };
 
     runMatch();
-  }, [job?.id]);
+  }, [job?.id, user?.id, token, negotiationStarted]); // ✅ Added negotiationStarted to deps
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -154,6 +373,7 @@ export default function JobChatPage() {
     setMessages((prev) => [...prev, { type: 'user', content: text }]);
     setSending(true);
 
+    // ✅ Build conversation history (exclude match messages)
     const conversationHistory = messages
       .filter((m): m is { type: 'user'; content: string } | { type: 'assistant'; content: string } =>
         m.type === 'user' || m.type === 'assistant'
@@ -161,18 +381,26 @@ export default function JobChatPage() {
       .map((m) => ({ role: m.type as 'user' | 'assistant', content: m.content }));
 
     try {
+      console.log('[Chat] Sending message:', text);
+      console.log('[Chat] Job ID:', job.id);
+      console.log('[Chat] History length:', conversationHistory.length);
+
       const reply = await sendBuyerChatMessage(Number(user.id), token, text, {
         jobId: job.id,
         jobTitle: job.title,
         conversationHistory,
       });
+
+      console.log('[Chat] Received reply:', reply.substring(0, 100));
       setMessages((prev) => [...prev, { type: 'assistant', content: reply }]);
     } catch (err) {
+      console.error('[Chat] Error:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Failed to get a response. Please try again.';
       setMessages((prev) => [
         ...prev,
         {
-          type: 'assistant',
-          content: err instanceof Error ? err.message : 'Failed to get a response. Please try again.',
+          type: 'error', // ✅ Use error type for styling
+          content: errorMsg,
         },
       ]);
     } finally {
@@ -189,6 +417,7 @@ export default function JobChatPage() {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
+          <Loader2 className="animate-spin mx-auto mb-2" size={32} />
           <p className="text-muted-foreground">Loading job...</p>
         </div>
       </div>
@@ -237,6 +466,7 @@ export default function JobChatPage() {
         {messages.map((msg, idx) => {
           if (msg.type === 'match') {
             const isRunning = msg.phase !== 'complete' && msg.phase !== 'error';
+            const providers = msg.negotiationProviders ?? [];
             return (
               <div
                 key={idx}
@@ -263,10 +493,12 @@ export default function JobChatPage() {
                   </div>
                   <div>
                     {isRunning && (
-                      <p className="font-medium text-foreground">Matching your job to providers...</p>
+                      <p className="font-medium text-foreground">
+                        Negotiating with providers{msg.providersCount != null ? ` (${msg.providersCount} found)` : ''}…
+                      </p>
                     )}
                     {msg.phase === 'complete' && (
-                      <p className="font-medium text-foreground">Match complete</p>
+                      <p className="font-medium text-foreground">Negotiation complete</p>
                     )}
                     {msg.phase === 'error' && (
                       <p className="font-medium text-destructive">Matching failed</p>
@@ -274,41 +506,153 @@ export default function JobChatPage() {
                   </div>
                 </div>
                 {(msg.phase === 'error' && msg.error) && (
-                  <p className="text-sm text-muted-foreground">You can still ask follow-up questions about this job.</p>
-                )}
-                {msg.phase === 'complete' && (
-                  <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
-                )}
-                {msg.phase === 'complete' && msg.deals && msg.deals.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-sm font-semibold text-foreground">Top matches</p>
-                    <div className="space-y-2">
-                      {msg.deals.map((match, i) => (
-                        <div
-                          key={match.id}
-                          className="flex items-center justify-between bg-secondary/50 rounded-lg p-3"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-primary">{i + 1}.</span>
-                            <div>
-                              <p className="text-sm font-medium text-foreground">{match.sellerAgent.name}</p>
-                              <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                <Star size={12} className="fill-muted-foreground text-muted-foreground" />
-                                {match.sellerAgent.rating} • {match.sellerAgent.jobsCompleted} jobs
-                              </p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-semibold text-lg text-accent">{match.matchScore}%</p>
-                            <p className="text-xs text-muted-foreground">match</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                  <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-3">
+                    <p className="text-sm text-destructive">{msg.error}</p>
                   </div>
                 )}
-                {msg.phase === 'complete' && msg.deals?.length === 0 && (
-                  <p className="text-sm text-muted-foreground">No providers found for this job.</p>
+                {providers.length > 0 && (() => {
+                  const ranked = [...providers].sort((a, b) => {
+                    const oa = a.outcome;
+                    const ob = b.outcome;
+                    if (!oa && !ob) return 0;
+                    if (!oa) return 1;
+                    if (!ob) return -1;
+                    if (oa.negotiatedPrice !== ob.negotiatedPrice) return oa.negotiatedPrice - ob.negotiatedPrice;
+                    return oa.negotiatedCompletionDays - ob.negotiatedCompletionDays;
+                  });
+                  // sellerId and providerId are the same; key deals by that id for lookup from stream providerId
+                  const dealsById = new Map(
+                    (msg.deals ?? []).map((d) => {
+                      const id = d.sellerId ?? (d as { provider_id?: string }).provider_id;
+                      return [String(id ?? ''), d] as const;
+                    })
+                  );
+                  const getDeal = (prov: NegotiationProviderLog) => dealsById.get(String(prov.providerId));
+                  return (
+                    <div className="mt-2 space-y-3">
+                      <p className="text-sm font-semibold text-foreground">Live negotiation by provider</p>
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
+                        {ranked.map((prov, i) => {
+                          const deal = getDeal(prov);
+                          const displayName =
+                            resolvedProviderNames[prov.providerId] ??
+                            deal?.sellerName ??
+                            prov.providerName ??
+                            (msg.phase === 'complete' ? `Provider ${i + 1}` : undefined);
+                          return (
+                            <NegotiationProviderCard
+                              key={prov.providerId}
+                              provider={prov}
+                              rank={i + 1}
+                              score={msg.phase === 'complete' ? deal?.matchScore : undefined}
+                              displayNameOverride={displayName}
+                            />
+                          );
+                        })}
+                      </div>
+                      {msg.phase === 'complete' && (
+                        <div className="space-y-3 pt-2 border-t border-border/50">
+                          <p className="text-sm font-semibold text-foreground">Provider profiles (ranked)</p>
+                          <div className="space-y-2">
+                            {ranked.map((prov, i) => {
+                              const deal = getDeal(prov);
+                              const agent = deal?.sellerAgent;
+                              const rankNum = i + 1;
+                              const name =
+                                resolvedProviderNames[prov.providerId] ??
+                                (agent?.name ?? deal?.sellerName ?? prov.providerName)?.trim() ??
+                                `Provider ${rankNum}`;
+                              const scoreVal = deal?.matchScore;
+                              const quote = deal?.quote;
+                              const outcome = prov.outcome;
+                              const price = outcome?.negotiatedPrice ?? quote?.price;
+                              const days = outcome?.negotiatedCompletionDays ?? quote?.days ?? quote?.completionDays;
+                              const quoteLine =
+                                price != null && days != null
+                                  ? `${name} · Quote · $${price}, ${days} day${days !== 1 ? 's' : ''}`
+                                  : null;
+                              return (
+                                <div
+                                  key={prov.providerId}
+                                  className="bg-secondary/30 rounded-lg border border-border/50 p-3 space-y-1.5"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="font-medium text-foreground">
+                                      <span className="text-primary font-semibold">{rankNum}.</span> {name}
+                                    </p>
+                                    {scoreVal != null && (
+                                      <span className="text-sm font-semibold text-accent shrink-0">{scoreVal}% match</span>
+                                    )}
+                                  </div>
+                                  {agent != null ? (
+                                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                      <Star size={12} className="fill-muted-foreground text-muted-foreground" />
+                                      {agent.rating} · {agent.jobsCompleted} jobs
+                                      {agent.licensed != null && (agent.licensed ? ' · Licensed' : ' · Not licensed')}
+                                      {agent.references != null && (agent.references ? ' · References' : '')}
+                                    </p>
+                                  ) : null}
+                                  {(quote != null || outcome != null) && (
+                                    <p className="text-xs text-muted-foreground">
+                                      {quoteLine != null && (
+                                        <span className="text-accent font-medium">{quoteLine}</span>
+                                      )}
+                                      {quote != null && (quote.paymentSchedule || quote.licensed != null || quote.referencesAvailable != null) && (
+                                        <span className="block mt-0.5">
+                                          {quote.paymentSchedule && `Payment: ${quote.paymentSchedule}`}
+                                          {quote.licensed != null && ` · Licensed: ${quote.licensed ? 'Yes' : 'No'}`}
+                                          {quote.referencesAvailable != null && ` · References: ${quote.referencesAvailable ? 'Yes' : 'No'}`}
+                                        </span>
+                                      )}
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+                {msg.phase === 'complete' && (
+                  <>
+                    <p className="text-sm text-muted-foreground">You can ask follow-up questions about this job or the matched providers below.</p>
+                    <div className="pt-2 flex flex-col gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-xs border-border text-muted-foreground hover:text-destructive hover:border-destructive/50 w-fit"
+                        disabled={cleanupLoading || !user || !token || !job}
+                        onClick={async () => {
+                          if (!user || !token || !job) return;
+                          setCleanupMessage(null);
+                          setCleanupLoading(true);
+                          try {
+                            const r = await cleanupJobCache(Number(user.id), token, job.id);
+                            const parts = [];
+                            if (r.redis?.negotiationKeys != null) parts.push(`${r.redis.negotiationKeys} negotiation keys`);
+                            if (r.redis?.dealsKey) parts.push('deals cache');
+                            if (r.mem0?.deleted != null && r.mem0.deleted > 0) parts.push(`${r.mem0.deleted} Mem0 memories`);
+                            setCleanupMessage(parts.length ? `Cleaned: ${parts.join(', ')}.` : r.error ? `Done with warning: ${r.error}` : 'Cache and Mem0 cleaned for this job.');
+                          } catch (e) {
+                            setCleanupMessage(e instanceof Error ? e.message : 'Cleanup failed.');
+                          } finally {
+                            setCleanupLoading(false);
+                          }
+                        }}
+                      >
+                        {cleanupLoading ? <Loader2 size={14} className="animate-spin shrink-0" /> : <Trash2 size={14} className="shrink-0" />}
+                        <span className="ml-1.5">Clean up Redis & Mem0 for this job</span>
+                      </Button>
+                      {cleanupMessage && (
+                        <p className={`text-xs ${cleanupMessage.startsWith('Cleaned') || cleanupMessage.includes('cleaned') ? 'text-muted-foreground' : 'text-destructive'}`}>
+                          {cleanupMessage}
+                        </p>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
             );
@@ -325,8 +669,19 @@ export default function JobChatPage() {
           if (msg.type === 'assistant') {
             return (
               <div key={idx} className="flex justify-start" role="article" aria-label="Assistant reply">
-                <div className="bg-card border border-border rounded-lg px-4 py-2 max-w-[85%]">
-                  <p className="text-sm text-foreground whitespace-pre-wrap break-words">{msg.content}</p>
+                <div className="bg-card border border-border rounded-lg px-4 py-2 max-w-[85%] text-sm text-foreground [&_p]:my-1 [&_p]:leading-relaxed [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-base [&_h2]:text-base [&_h3]:text-sm [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:overflow-x-auto [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-muted [&_code]:text-xs [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_a]:text-primary [&_a]:underline [&_strong]:font-semibold">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                </div>
+              </div>
+            );
+          }
+          // ✅ Added error message styling
+          if (msg.type === 'error') {
+            return (
+              <div key={idx} className="flex justify-start" role="alert" aria-label="Error message">
+                <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-2 max-w-[85%] flex items-start gap-2">
+                  <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
+                  <p className="text-sm text-destructive whitespace-pre-wrap break-words">{msg.content}</p>
                 </div>
               </div>
             );
@@ -344,14 +699,39 @@ export default function JobChatPage() {
         <div ref={messagesEndRef} />
       </main>
 
-      {/* Input */}
+      {/* Input Section */}
       <div className="sticky bottom-0 bg-background border-t border-border py-4">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 space-y-3">
+          <p className="text-xs text-muted-foreground">Suggested questions:</p>
+          <div className="flex flex-wrap gap-2">
+            {[
+              'What quotes do we have?',
+              'Tell me about the top provider',
+              'What is the payment schedule?',
+              'Who is licensed and has references?',
+              'What is the timeline for completion?',
+            ].map((label) => (
+              <Button
+                key={label}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="text-xs bg-card border-border"
+                disabled={sending}
+                onClick={() => {
+                  setInputValue(label);
+                  inputRef.current?.focus();
+                }}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
           <form onSubmit={handleSend} className="flex gap-2">
             <Input
               ref={inputRef}
               type="text"
-              placeholder="Ask a follow-up question about this job..."
+              placeholder="Ask a follow-up question about this job, providers, or payments..."
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               disabled={sending}

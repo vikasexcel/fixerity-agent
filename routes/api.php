@@ -162,11 +162,16 @@ Route::group(['middleware' => 'setLocaleLang'], function () {
 
             Route::post('/get-service-list', [ProviderController::class,'postOnDemandServiceList'])->name('post:on_demand:service_list');
             Route::post('/provider-service-list', [ProviderController::class,'postOnDemandProviderServiceList'])->name('post:on_demand:provider_service_list');
+            Route::post('/provider-service-data', [ProviderController::class,'postOnDemandProviderServiceData'])->name('post:on_demand:provider_service_data');
+            Route::post('/provider-basic-details', [ProviderController::class,'postOnDemandProviderBasicDetails'])->name('post:on_demand:provider_basic_details');
+            Route::post('/public/provider-service-by-category', [ProviderController::class,'postPublicProviderServiceByCategory'])->name('post:on_demand:public_provider_service_by_category');
+            Route::post('/update-agent-config', [ProviderController::class,'postOnDemandUpdateAgentConfig'])->name('post:on_demand:update_agent_config');
             Route::post('/add-services', [ProviderController::class,'postOnDemandAddServices'])->name('post:on_demand:add_services');
             Route::post('/change-service-current-status', [ProviderController::class,'postOnDemandChangeServiceCurrentStatus'])->name('post:on_demand:change_service_current_status');
             Route::post('/remove-service', [ProviderController::class,'postOnDemandRemoveService'])->name('post:on_demand:remove_service');
             Route::post('/package-list', [ProviderController::class,'postOnDemandPackageList'])->name('post:on_demand:package_list');
             Route::post('/get-category-list', [ProviderController::class,'postOnDemandGetCategoryList'])->name('post:on_demand:get_category_list');
+            Route::post('/get-subcategory-list', [ProviderController::class,'postOnDemandGetSubcategoryList'])->name('post:on_demand:get_subcategory_list');
             Route::post('/add-update-package', [ProviderController::class,'postOnDemandAddUpdatePackage'])->name('post:on_demand:add_update_package');
             Route::post('/change-package-status', [ProviderController::class,'postOnDemandChangePackageStatus'])->name('post:on_demand:change_package_status');
             Route::post('/delete-package', [ProviderController::class,'postOnDemandDeletePackage'])->name('post:on_demand:delete_package');

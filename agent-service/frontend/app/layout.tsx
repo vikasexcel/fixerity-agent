@@ -1,8 +1,10 @@
 import React from "react"
+import Script from "next/script";
 import type { Metadata } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { ThemeProvider } from '@/components/theme-provider'
+import { AuthProvider } from '@/lib/auth-context'
 import './globals.css'
 
 const _geist = Geist({ subsets: ["latin"] });
@@ -38,10 +40,27 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="font-sans antialiased">
+      <head>
+        {process.env.NODE_ENV === "development" && (
+          <Script
+            src="//unpkg.com/react-grab/dist/index.global.js"
+            crossOrigin="anonymous"
+            strategy="beforeInteractive"
+          />
+        )}
+        {process.env.NODE_ENV === "development" && (
+          <Script
+            src="//unpkg.com/@react-grab/cursor/dist/client.global.js"
+            strategy="lazyOnload"
+          />
+        )}
+      </head>
+      <body className="font-sans antialiased" suppressHydrationWarning>
         <ThemeProvider>
-          {children}
-          <Analytics />
+          <AuthProvider>
+            {children}
+            <Analytics />
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

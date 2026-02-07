@@ -54,12 +54,32 @@ export interface Deal {
   id: string;
   jobId: string;
   sellerId: string;
-  sellerAgent: Agent;
+  /** Present when using dummy/full data; API negotiate-and-match may return sellerName + quote instead. */
+  sellerAgent?: Agent;
   matchScore: number;
   matchReasons: string[];
   status: 'proposed' | 'rejected' | 'accepted';
   createdAt: string;
   job?: Job; // Optional: included when returned from match API
+  /** Agreed price from negotiation (negotiate-and-match endpoint). */
+  negotiatedPrice?: number;
+  /** Agreed completion time in days (negotiate-and-match endpoint). */
+  negotiatedCompletionDays?: number;
+  /** Whether negotiation ended in accept or timeout. */
+  negotiationStatus?: 'accepted' | 'timeout';
+  /** Name from API when sellerAgent is not populated. */
+  sellerName?: string;
+  /** Quote from API (e.g. price, days, paymentSchedule, licensed, referencesAvailable). */
+  quote?: {
+    price?: number;
+    days?: number;
+    completionDays?: number;
+    paymentSchedule?: string;
+    licensed?: boolean;
+    referencesAvailable?: boolean;
+  };
+  /** Provider's AI response message (stored from negotiate-and-match). */
+  negotiationMessage?: string;
 }
 
 // Dummy Users
