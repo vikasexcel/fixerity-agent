@@ -148,6 +148,110 @@ export type NegotiationStreamEvent =
   | { type: 'provider_done'; providerId: string; providerName: string; outcome: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number } }
   | { type: 'done'; deals?: Deal[]; error?: string };
 
+/** Collected job info from unified agent (conversation phase). */
+export type UnifiedCollectedData = {
+  service_category_id?: number | null;
+  service_category_name?: string | null;
+  title?: string | null;
+  description?: string | null;
+  budget?: { min?: number | null; max?: number | null };
+  startDate?: string | null;
+  endDate?: string | null;
+  priorities?: unknown[];
+  location?: string | null;
+};
+
+/** Event from unified agent POST /agent/chat SSE stream. */
+export type UnifiedChatStreamEvent =
+  | { type: 'session'; sessionId: string; phase: string }
+  | { type: 'phase'; phase: string }
+  | { type: 'message'; text: string; action?: string }
+  | { type: 'collected'; data: UnifiedCollectedData; missing: string[] }
+  | { type: 'phase_transition'; from: string; to: string; job?: Record<string, unknown> }
+  | { type: 'providers_fetched'; count: number }
+  | { type: 'provider_start'; providerId: string; providerName: string }
+  | { type: 'negotiation_step'; providerId: string; providerName?: string; step: NegotiationStep }
+  | { type: 'provider_done'; providerId: string; providerName?: string; outcome: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number } }
+  | { type: 'done'; deals?: Deal[]; reply?: string }
+  | { type: 'deals_detail'; deals: unknown[] }
+  | { type: 'filtered_deals'; deals: unknown[]; count: number }
+  | { type: 'provider_selected'; deal: unknown }
+  | { type: 'error'; error: string }
+  | { type: 'stream_end' };
+
+/**
+ * Unified agent chat: single endpoint for conversation + negotiation + refinement.
+ * POST /agent/chat with SSE; pass sessionId on subsequent messages to continue session.
+ */
+export async function unifiedAgentChatStream(
+  buyerId: string,
+  accessToken: string,
+  message: string,
+  callbacks: {
+    sessionId?: string | null;
+    onEvent: (event: UnifiedChatStreamEvent) => void;
+    signal?: AbortSignal;
+  }
+): Promise<{ sessionId: string | null }> {
+  const base = getAgentServiceUrl();
+  const url = `${base}/agent/chat`;
+  const body: { buyerId: string; accessToken: string; message: string; sessionId?: string } = {
+    buyerId,
+    accessToken,
+    message,
+  };
+  if (callbacks.sessionId) body.sessionId = callbacks.sessionId;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: callbacks.signal,
+  });
+
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data?.error ?? res.statusText ?? 'Unified chat request failed');
+  }
+
+  const reader = res.body?.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let sessionId: string | null = null;
+
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event = JSON.parse(line.slice(6)) as UnifiedChatStreamEvent;
+            if (event.type === 'session' && event.sessionId) sessionId = event.sessionId;
+            callbacks.onEvent(event);
+          } catch {
+            // skip malformed
+          }
+        }
+      }
+    }
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6)) as UnifiedChatStreamEvent;
+        if (event.type === 'session' && event.sessionId) sessionId = event.sessionId;
+        callbacks.onEvent(event);
+      } catch {
+        // skip
+      }
+    }
+  }
+
+  return { sessionId };
+}
+
 /**
  * Match job to providers with negotiation, streaming each step via onEvent (for live UI).
  * Uses POST /agent/buyer/negotiate-and-match-stream (SSE).

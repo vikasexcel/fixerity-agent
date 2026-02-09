@@ -5,6 +5,17 @@ import { OPENAI_API_KEY } from '../config/index.js';
 import { redisClient } from '../config/redis.js'; 
 import memoryClient from '../memory/mem0.js';
 
+/* ================================================================================
+   NEGOTIATION GRAPH - Provider Quote Collection
+   ================================================================================
+   This graph handles the actual negotiation with providers:
+   1. Buyer (AI) sends job details and requests quote
+   2. Seller (AI simulating provider) responds with quote
+   3. Collects structured quote data
+   
+   Now integrated with the unified agent system for seamless flow.
+   ================================================================================ */
+
 /* -------------------- REDIS SESSION STORE (Short-term: Active Negotiations) -------------------- */
 
 class NegotiationSessionStore {
@@ -33,20 +44,20 @@ class NegotiationSessionStore {
 
   async appendMessage(jobId, providerId, message) {
     const key = `negotiation:${jobId}:${providerId}:messages`;
-    await this.redis.lPush(key, JSON.stringify({
+    await this.redis.rPush(key, JSON.stringify({
       ...message,
       timestamp: Date.now(),
     }));
     await this.redis.expire(key, this.TTL);
     
     // Keep only last 20 messages
-    await this.redis.lTrim(key, 0, 19);
+    await this.redis.lTrim(key, -20, -1);
   }
 
   async getAllMessages(jobId, providerId) {
     const key = `negotiation:${jobId}:${providerId}:messages`;
     const messages = await this.redis.lRange(key, 0, -1);
-    return messages.map(m => JSON.parse(m)).reverse();
+    return messages.map(m => JSON.parse(m));
   }
 
   async saveQuote(jobId, providerId, quote) {
@@ -61,7 +72,7 @@ class NegotiationSessionStore {
   }
 
   async cleanup(jobId, providerId) {
-    const pattern = `negotiation:${jobId}:${providerId}*`;
+    const pattern = `negotiation:${jobId}:${providerId}:*`;
     const keys = await this.redis.keys(pattern);
     if (keys.length > 0) {
       await this.redis.del(...keys);
@@ -119,7 +130,7 @@ class SemanticMemoryManager {
           service_category: job.service_category_id,
           final_price: quote?.price,
           quoted_days: quote?.days,
-          outcome: outcome, // 'accepted', 'rejected', 'timeout', 'presented'
+          outcome: outcome,
           timestamp: Date.now(),
           budget_min: job.budget?.min,
           budget_max: job.budget?.max,
@@ -275,8 +286,6 @@ class SemanticMemoryManager {
   /* -------------------- PARSING HELPERS -------------------- */
 
   summarizeBuyerPreferences(memories) {
-    // Extract common patterns from memories
-    // Mem0 already does semantic analysis, so we just structure it
     return {
       total_negotiations: memories.length,
       top_insights: memories.slice(0, 3).map(m => ({
@@ -321,19 +330,20 @@ const MatchingState = Annotation.Root({
   round: Annotation(),
   maxRounds: Annotation(),
   deadline_ts: Annotation(),
-  buyerId: Annotation(), // ✅ For Mem0 learning
+  buyerId: Annotation(),
   conversation: Annotation({
     reducer: (a, b) => {
       const combined = a.concat(b);
-      return combined.slice(-20); // Limit to prevent memory bloat
+      return combined.slice(-20);
     },
     default: () => [],
   }),
   status: Annotation(), // collecting | done | timeout
   collectedQuote: Annotation(),
-  // ✅ Mem0 learned data (optional, for context)
   buyerPreferences: Annotation(),
   providerPattern: Annotation(),
+  // New: Streaming callback
+  streamCallback: Annotation(),
 });
 
 async function getInitialState(input) {
@@ -345,10 +355,10 @@ async function getInitialState(input) {
   const cached = await sessionStore.getState(jobId, providerId);
   if (cached) {
     console.log(`[Redis] Restored state for job ${jobId}, provider ${providerId}`);
-    return cached;
+    return { ...cached, streamCallback: input.streamCallback };
   }
 
-  // 🧠 OPTIONAL: Retrieve learned patterns (for context in prompts)
+  // 🧠 OPTIONAL: Retrieve learned patterns
   let buyerPreferences = null;
   let providerPattern = null;
 
@@ -378,6 +388,7 @@ async function getInitialState(input) {
     collectedQuote: null,
     buyerPreferences: buyerPreferences,
     providerPattern: providerPattern,
+    streamCallback: input.streamCallback,
   };
 
   // Save to Redis
@@ -446,7 +457,7 @@ async function buyerNode(state) {
   const endDate = state.job.endDate || 'flexible';
   const jobTitle = state.job.title || 'service job';
 
-  // 🧠 OPTIONAL: Use buyer preferences in prompt (if available)
+  // 🧠 OPTIONAL: Use buyer preferences in prompt
   let preferenceContext = '';
   if (state.buyerPreferences?.summary?.top_insights) {
     const insights = state.buyerPreferences.summary.top_insights
@@ -507,6 +518,20 @@ Reply ONLY with JSON:
   // Save to Redis
   await sessionStore.appendMessage(state.job.id, state.providerId, message);
 
+  // Stream callback if provided
+  if (typeof state.streamCallback === 'function') {
+    state.streamCallback({
+      type: 'negotiation_step',
+      providerId: state.providerId,
+      step: {
+        role: 'buyer',
+        round: state.round + 1,
+        action: 'request',
+        message: data.message,
+      }
+    });
+  }
+
   // Update state in Redis
   const updatedState = {
     ...state,
@@ -547,7 +572,7 @@ async function sellerNode(state) {
 
   const availability = checkDateAvailability(startDate, endDate, providerDays);
 
-  // 🧠 OPTIONAL: Use provider patterns in prompt (if available)
+  // 🧠 OPTIONAL: Use provider patterns in prompt
   let patternContext = '';
   if (state.providerPattern?.summary?.top_patterns) {
     const patterns = state.providerPattern.summary.top_patterns
@@ -660,6 +685,26 @@ Reply ONLY with JSON:
   await sessionStore.saveQuote(state.job.id, state.providerId, data.quote);
   await sessionStore.setStatus(state.job.id, state.providerId, 'done');
 
+  // Stream callback if provided
+  if (typeof state.streamCallback === 'function') {
+    state.streamCallback({
+      type: 'negotiation_step',
+      providerId: state.providerId,
+      step: {
+        role: 'seller',
+        round: state.round,
+        action: 'quote',
+        message: data.message,
+        price: data.quote.price,
+        completionDays: data.quote.days,
+        paymentSchedule: data.quote.paymentSchedule,
+        can_meet_dates: data.quote.can_meet_dates,
+        licensed: data.quote.licensed,
+        referencesAvailable: data.quote.referencesAvailable,
+      }
+    });
+  }
+
   // Update state in Redis
   const updatedState = {
     ...state,
@@ -689,6 +734,15 @@ function routeAfterSeller() {
 
 async function resolveTimeoutNode(state) {
   await sessionStore.setStatus(state.job.id, state.providerId, 'timeout');
+  
+  // Stream callback if provided
+  if (typeof state.streamCallback === 'function') {
+    state.streamCallback({
+      type: 'negotiation_timeout',
+      providerId: state.providerId,
+    });
+  }
+  
   return { status: 'timeout' };
 }
 
@@ -728,7 +782,7 @@ export async function runMatching(input) {
     status: status || finalState.status,
     quote: savedQuote || finalState.collectedQuote,
     transcript: allMessages.length > 0 ? allMessages : finalState.conversation,
-    buyerId: input.buyerId, // Pass through for Mem0 storage
+    buyerId: input.buyerId,
   };
 }
 

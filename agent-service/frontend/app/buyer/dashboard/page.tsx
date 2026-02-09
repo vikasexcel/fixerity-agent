@@ -54,6 +54,13 @@ export default function BuyerDashboard() {
               <p className="text-muted-foreground text-sm mt-1">Welcome back, {user?.name}</p>
             </div>
             <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={() => router.push('/buyer/unified-chat')}
+                className="border-border"
+              >
+                Chat to find providers
+              </Button>
               <Button 
                 onClick={() => setShowCreateModal(true)}
                 className="bg-primary hover:bg-primary/90 text-primary-foreground"

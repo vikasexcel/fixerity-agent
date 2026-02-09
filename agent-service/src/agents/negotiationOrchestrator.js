@@ -3,6 +3,14 @@ import { runMatching, sessionStore, semanticMemory } from './negotiationGraph.js
 import { NEGOTIATION_TIME_SECONDS } from '../config/index.js';
 import { redisClient } from '../config/redis.js';
 
+/* ================================================================================
+   NEGOTIATION ORCHESTRATOR
+   ================================================================================
+   This module orchestrates the provider matching and negotiation process.
+   It works with the unified agent system, receiving jobs from the conversation
+   graph and finding/negotiating with providers.
+   ================================================================================ */
+
 /* ---------------- REDIS PROVIDER CACHE (Short-term: 24 hours) ---------------- */
 
 class ProviderCache {
@@ -40,12 +48,10 @@ class ProviderCache {
     return fresh;
   }
 
-  /** Cache key for provider basic details (first_name, last_name, email, etc.) from provider-basic-details API. */
   static BASIC_KEY(providerId) {
     return `provider:${providerId}:basic`;
   }
 
-  /** Get provider basic details from cache or fetch via fetchFn. Use this for names; do not use getCached which shares key with list data. */
   async getBasicCached(providerId, fetchFn) {
     const key = ProviderCache.BASIC_KEY(providerId);
     try {
@@ -163,7 +169,6 @@ function rankProviders(providers = [], limit = 10) {
 /* ---------------- 🧠 SMART PROVIDER FILTERING (Using Mem0) ---------------- */
 
 async function smartFilterProviders(providers, buyerId, job) {
-  // 🧠 Get buyer's learned preferences
   const buyerPrefs = await semanticMemory.getBuyerPreferences(
     buyerId,
     job.service_category_id
@@ -177,9 +182,6 @@ async function smartFilterProviders(providers, buyerId, job) {
   console.log(`[Mem0] Found ${buyerPrefs.memories.length} buyer preferences, applying smart filter`);
 
   // TODO: Implement intelligent filtering based on memories
-  // For now, just return all providers (you can enhance this later)
-  // Example enhancement: Filter by learned price range, preferred ratings, etc.
-
   return providers;
 }
 
@@ -188,7 +190,6 @@ async function smartFilterProviders(providers, buyerId, job) {
 async function enhanceJobPriorities(job, buyerId) {
   if (!buyerId) return job;
 
-  // 🧠 Get intelligent recommendations
   const recommendations = await semanticMemory.getJobRecommendations(buyerId, job);
 
   if (!recommendations || !recommendations.memories || recommendations.memories.length === 0) {
@@ -198,15 +199,6 @@ async function enhanceJobPriorities(job, buyerId) {
 
   console.log(`[Mem0] Found ${recommendations.memories.length} recommendations`);
   console.log(`[Mem0] Confidence: ${recommendations.recommendations?.confidence || 'unknown'}`);
-
-  // If no priorities set and we have high confidence recommendations
-  if (!job.priorities && recommendations.recommendations?.confidence === 'high') {
-    console.log('[Mem0] Applying learned priorities');
-    
-    // Extract learned patterns (you can enhance this parsing)
-    // For now, we keep original priorities if they exist
-    // TODO: Parse memories to extract budget ranges, rating preferences, etc.
-  }
 
   return job;
 }
@@ -220,7 +212,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
   }
 
   const buyerId = job.buyer_id || options.buyerId;
-  const useMem0 = options.useMem0 !== false; // Default: enabled
+  const useMem0 = options.useMem0 !== false;
 
   // Parse priorities if array format
   if (Array.isArray(job.priorities)) {
@@ -251,7 +243,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     return { deals: [], reply: 'No providers found.' };
   }
 
-  // 🧠 STEP 2: Smart filter providers using Mem0 (if available)
+  // 🧠 STEP 2: Smart filter providers using Mem0
   let filteredProviders = providers;
   if (useMem0 && buyerId) {
     filteredProviders = await smartFilterProviders(providers, buyerId, job);
@@ -264,7 +256,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
   await providerCache.batchCache(rankedProviders);
   console.log(`[Redis] Cached ${rankedProviders.length} providers`);
 
-  // ⚡ STEP 3: Stream scoring - Don't accumulate all results
+  // ⚡ STEP 3: Stream scoring
   const topDeals = [];
 
   for (const provider of rankedProviders) {
@@ -277,10 +269,11 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
       job: jobSnippet,
       providerId: String(providerId),
       providerServiceData,
-      buyerId: buyerId, // ✅ Pass buyerId for Mem0
+      buyerId: buyerId,
       maxRounds,
       deadline_ts,
-      useMem0Learning: useMem0, // ✅ Enable/disable Mem0 in graph
+      useMem0Learning: useMem0,
+      streamCallback: options.streamCallback,
     });
 
     if (!outcome?.quote) continue;
@@ -310,7 +303,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     if (scored.failedMustHave) {
       console.log(`[Skip] Provider ${providerId} failed must-have: ${scored.failureReason}`);
       
-      // 🧠 STEP 4a: Store rejection in Mem0 for learning
+      // 🧠 STEP 4a: Store rejection in Mem0
       if (useMem0 && buyerId) {
         await semanticMemory.storeBuyerNegotiation(buyerId, job.id, {
           job: jobSnippet,
@@ -331,18 +324,16 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
       topDeals.pop();
     }
 
-    // 🧠 STEP 4b: Store successful quote in Mem0 for learning
+    // 🧠 STEP 4b: Store successful quote in Mem0
     if (useMem0 && buyerId) {
-      // Store for buyer
       await semanticMemory.storeBuyerNegotiation(buyerId, job.id, {
         job: jobSnippet,
         quote: outcome.quote,
         providerId: String(providerId),
         conversation: outcome.transcript,
-        outcome: 'presented' // Will update to 'accepted' when buyer confirms
+        outcome: 'presented'
       });
 
-      // Store for provider
       await semanticMemory.storeProviderNegotiation(String(providerId), job.id, {
         job: jobSnippet,
         quote: outcome.quote,
@@ -393,7 +384,7 @@ async function scoreProvider(result, job) {
     (job.priorities?.bonus?.licensed && r.provider.licensed ? 10 : 0) +
     (job.priorities?.bonus?.references && r.provider.referencesAvailable ? 10 : 0);
 
-  const matchScore = 40 + ratingScore + jobsScore + bonusScore; // Max = 100
+  const matchScore = 40 + ratingScore + jobsScore + bonusScore;
 
   return {
     id: `deal_${job.id}_${r.providerId}_${Date.now()}`,
@@ -516,6 +507,7 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
       maxRounds,
       deadline_ts,
       useMem0Learning: useMem0,
+      streamCallback: send, // Pass stream callback to negotiation graph
     });
 
     const steps = transcriptToSteps(outcome?.transcript, outcome?.quote);
@@ -565,7 +557,6 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
       if (scored.failedMustHave) {
         console.log(`[Skip] Provider ${providerId} failed must-have: ${scored.failureReason}`);
         
-        // 🧠 Store rejection
         if (useMem0 && buyerId) {
           await semanticMemory.storeBuyerNegotiation(buyerId, job.id, {
             job: jobSnippet,
@@ -585,7 +576,6 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
         topDeals.pop();
       }
 
-      // 🧠 Store learning
       if (useMem0 && buyerId) {
         await semanticMemory.storeBuyerNegotiation(buyerId, job.id, {
           job: jobSnippet,
@@ -621,10 +611,6 @@ export async function runNegotiationAndMatchStream(job, buyerAccessToken, option
 
 /* ---------------- 🧠 UPDATE OUTCOME (When buyer accepts/rejects) ---------------- */
 
-/**
- * Call this when buyer makes final decision on a deal
- * This updates Mem0 with the actual outcome
- */
 export async function updateNegotiationOutcome(buyerId, jobId, providerId, outcome) {
   if (!buyerId || !jobId || !providerId) {
     console.warn('[Mem0] Missing required IDs for outcome update');
@@ -632,7 +618,6 @@ export async function updateNegotiationOutcome(buyerId, jobId, providerId, outco
   }
 
   try {
-    // Update buyer's memory with final outcome
     await semanticMemory.memory.add({
       messages: [
         {
@@ -645,12 +630,11 @@ export async function updateNegotiationOutcome(buyerId, jobId, providerId, outco
         type: 'outcome_update',
         job_id: jobId,
         provider_id: providerId,
-        final_outcome: outcome, // 'accepted' or 'rejected'
+        final_outcome: outcome,
         timestamp: Date.now()
       }
     });
 
-    // Update provider's memory
     await semanticMemory.memory.add({
       messages: [
         {
@@ -706,3 +690,7 @@ export async function cleanupExpiredNegotiations() {
   console.log(`[Redis] Cleaned up ${cleaned} expired keys`);
   return { cleaned };
 }
+
+/* ---------------- EXPORT FOR UNIFIED AGENT ---------------- */
+
+export { providerCache };

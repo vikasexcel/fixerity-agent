@@ -9,6 +9,8 @@ import { fetchProviderBasicDetails } from '../agents/buyerMatchAgent.js';
 import { runBuyerDirectChatAgent } from '../agents/buyerDirectChatAgent.js';
 import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
+import { handleAgentChat, sessionManager } from '../agents/Unifiedagent.js';
+import { conversationStore } from '../agents/conversationGraph.js';
 
 const router = express.Router();
 
@@ -537,5 +539,248 @@ async function saveDealsForJob(userId, jobId, deals) {
 
   console.log(`[Chat] Saved ${deals.length} deals to database for job ${jobId}`);
 }
+
+/* ================================================================================
+   UNIFIED AGENT API ROUTES
+   ================================================================================
+   
+   POST /api/agent/chat - Main streaming endpoint for all interactions
+   GET  /api/agent/session/:sessionId - Get session state
+   DELETE /api/agent/session/:sessionId - Clear session
+   
+   ================================================================================ */
+
+/* -------------------- SSE HELPER -------------------- */
+
+function setupSSE(res) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // For nginx
+  res.flushHeaders();
+
+  // Send function that formats SSE properly
+  const send = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      // Force flush if available
+      if (res.flush) res.flush();
+    } catch (error) {
+      console.error('[SSE] Error sending:', error.message);
+    }
+  };
+
+  // Handle client disconnect
+  const cleanup = () => {
+    console.log('[SSE] Client disconnected');
+  };
+  
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+
+  return send;
+}
+
+/* -------------------- MAIN CHAT ENDPOINT (SSE Streaming) -------------------- */
+
+/**
+ * POST /api/agent/chat
+ * 
+ * Main unified endpoint for all user interactions.
+ * Uses Server-Sent Events (SSE) for streaming responses.
+ * 
+ * Request Body:
+ * {
+ *   "sessionId": "optional - existing session ID",
+ *   "buyerId": "required - user ID",
+ *   "accessToken": "required - user access token",
+ *   "message": "required - user's message"
+ * }
+ * 
+ * SSE Response Events:
+ * - session: { sessionId, phase }
+ * - phase: { phase: 'conversation' | 'negotiation' | 'refinement' | 'complete' }
+ * - message: { text, action? }
+ * - collected: { data, missing }
+ * - phase_transition: { from, to, job? }
+ * - providers_fetched: { count }
+ * - provider_start: { providerId, providerName }
+ * - negotiation_step: { providerId, providerName, step }
+ * - provider_done: { providerId, providerName, outcome }
+ * - done: { deals, reply }
+ * - deals_detail: { deals }
+ * - filtered_deals: { deals, count }
+ * - provider_selected: { deal }
+ * - error: { error }
+ * 
+ * Example Usage (JavaScript):
+ * ```
+ * const eventSource = new EventSource('/api/agent/chat?' + new URLSearchParams({
+ *   // Note: EventSource only supports GET, so use fetch with streaming instead
+ * }));
+ * 
+ * // Better approach with fetch:
+ * const response = await fetch('/api/agent/chat', {
+ *   method: 'POST',
+ *   headers: { 'Content-Type': 'application/json' },
+ *   body: JSON.stringify({ buyerId, accessToken, message })
+ * });
+ * 
+ * const reader = response.body.getReader();
+ * const decoder = new TextDecoder();
+ * 
+ * while (true) {
+ *   const { done, value } = await reader.read();
+ *   if (done) break;
+ *   
+ *   const text = decoder.decode(value);
+ *   const lines = text.split('\n');
+ *   for (const line of lines) {
+ *     if (line.startsWith('data: ')) {
+ *       const data = JSON.parse(line.slice(6));
+ *       handleEvent(data);
+ *     }
+ *   }
+ * }
+ * ```
+ */
+router.post('/chat', async (req, res) => {
+  const send = setupSSE(res);
+
+  try {
+    const { sessionId, buyerId, accessToken, message } = req.body;
+
+    // Validate required fields
+    if (!buyerId) {
+      send({ type: 'error', error: 'buyerId is required' });
+      res.end();
+      return;
+    }
+
+    if (!accessToken) {
+      send({ type: 'error', error: 'accessToken is required' });
+      res.end();
+      return;
+    }
+
+    if (!message) {
+      send({ type: 'error', error: 'message is required' });
+      res.end();
+      return;
+    }
+
+    // Handle the chat
+    await handleAgentChat(
+      {
+        sessionId,
+        buyerId: String(buyerId),
+        accessToken: String(accessToken),
+        message: String(message),
+      },
+      send
+    );
+
+    // End the stream
+    send({ type: 'stream_end' });
+    res.end();
+
+  } catch (error) {
+    console.error('[Agent Route] Error:', error);
+    send({ type: 'error', error: error.message || 'Internal server error' });
+    res.end();
+  }
+});
+
+/* -------------------- GET SESSION STATE -------------------- */
+
+/**
+ * GET /api/agent/session/:sessionId
+ * 
+ * Retrieve the current state of a session.
+ * Useful for reconnecting or checking status.
+ */
+router.get('/session/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = await sessionManager.getSession(sessionId);
+    
+    if (!session) {
+      return res.status(404).json({
+        status: 0,
+        message: 'Session not found',
+        sessionId,
+      });
+    }
+
+    // Get conversation messages
+    const messages = await conversationStore.getMessages(sessionId);
+
+    res.json({
+      status: 1,
+      message: 'Success',
+      session: {
+        sessionId: session.sessionId,
+        phase: session.phase,
+        buyerId: session.buyerId,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+        job: session.job || null,
+        deals: session.deals || [],
+      },
+      messages: messages || [],
+    });
+
+  } catch (error) {
+    console.error('[Agent Route] Get session error:', error);
+    res.status(500).json({
+      status: 0,
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
+/* -------------------- DELETE SESSION -------------------- */
+
+/**
+ * DELETE /api/agent/session/:sessionId
+ * 
+ * Clear a session and all associated data.
+ */
+router.delete('/session/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    await sessionManager.cleanup(sessionId);
+
+    res.json({
+      status: 1,
+      message: 'Session cleared successfully',
+      sessionId,
+    });
+
+  } catch (error) {
+    console.error('[Agent Route] Delete session error:', error);
+    res.status(500).json({
+      status: 0,
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
+/* -------------------- HEALTH CHECK -------------------- */
+
+/**
+ * GET /api/agent/health
+ * 
+ * Health check endpoint
+ */
+router.get('/health', (req, res) => {
+  res.json({
+    status: 1,
+    message: 'Agent service is healthy',
+    timestamp: Date.now(),
+  });
+});
 
 export default router;
