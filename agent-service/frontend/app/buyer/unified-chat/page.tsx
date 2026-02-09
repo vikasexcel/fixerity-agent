@@ -13,6 +13,7 @@ import {
 } from '@/lib/agent-api';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import type { Deal } from '@/lib/dummy-data';
+import { ProviderMatchCard } from '@/components/ProviderMatchCard';
 
 type MatchPhase = 'evaluating' | 'complete' | 'error';
 
@@ -27,7 +28,8 @@ type UnifiedChatMessage =
   | { type: 'match'; phase: MatchPhase; deals?: Deal[]; error?: string; negotiationProviders?: NegotiationProviderLog[]; providersCount?: number }
   | { type: 'user'; content: string }
   | { type: 'assistant'; content: string }
-  | { type: 'error'; content: string };
+  | { type: 'error'; content: string }
+  | { type: 'provider_matches'; deals: Deal[] }; // New type for final matches
 
 function NegotiationProviderCard({
   provider,
@@ -128,6 +130,42 @@ export default function UnifiedChatPage() {
     );
   };
 
+  const handleApprove = async (deal: Deal) => {
+    console.log('Approving deal:', deal);
+    setMessages((prev) => [
+      ...prev,
+      { 
+        type: 'assistant', 
+        content: `Great! Booking ${deal.sellerName} for $${deal.quote.price}. They'll contact you shortly!` 
+      }
+    ]);
+    // TODO: Call API to approve/book the provider
+  };
+
+  const handleReject = async (deal: Deal) => {
+    console.log('Rejecting deal:', deal);
+    setMessages((prev) => [
+      ...prev,
+      { 
+        type: 'assistant', 
+        content: `Noted. I've removed ${deal.sellerName} from your options. Would you like to see other providers?` 
+      }
+    ]);
+    // TODO: Call API to reject the provider
+  };
+
+  const handleContact = async (deal: Deal) => {
+    console.log('Contacting provider:', deal);
+    setMessages((prev) => [
+      ...prev,
+      { 
+        type: 'assistant', 
+        content: `Opening direct message with ${deal.sellerName}...` 
+      }
+    ]);
+    // TODO: Navigate to direct messaging with provider
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputValue.trim();
@@ -204,6 +242,14 @@ export default function UnifiedChatPage() {
                   deals: event.deals ?? [],
                   negotiationProviders: Array.from(providersById.values()),
                 });
+                
+                // Add provider matches as a separate message for better UI
+                if (event.deals && event.deals.length > 0) {
+                  setMessages((prev) => [
+                    ...prev,
+                    { type: 'provider_matches', deals: event.deals }
+                  ]);
+                }
               }
               if (event.reply) {
                 setMessages((prev) => [...prev, { type: 'assistant', content: event.reply! }]);
@@ -301,6 +347,30 @@ export default function UnifiedChatPage() {
                       ))}
                     </div>
                   )}
+                </div>
+              );
+            }
+            if (m.type === 'provider_matches') {
+              return (
+                <div key={i} className="space-y-3">
+                  <div className="bg-card border border-border rounded-lg p-4">
+                    <h3 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+                      <Building2 size={18} className="text-primary" />
+                      Top Matches
+                    </h3>
+                    <div className="space-y-3">
+                      {m.deals.map((deal, idx) => (
+                        <ProviderMatchCard
+                          key={deal.id || idx}
+                          deal={deal}
+                          rank={idx + 1}
+                          onApprove={handleApprove}
+                          onReject={handleReject}
+                          onContact={handleContact}
+                        />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               );
             }
