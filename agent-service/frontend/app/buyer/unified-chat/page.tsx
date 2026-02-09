@@ -156,14 +156,8 @@ export default function UnifiedChatPage() {
 
   const handleContact = async (deal: Deal) => {
     console.log('Contacting provider:', deal);
-    setMessages((prev) => [
-      ...prev,
-      { 
-        type: 'assistant', 
-        content: `Opening direct message with ${deal.sellerName}...` 
-      }
-    ]);
     // TODO: Navigate to direct messaging with provider
+    // Example: router.push(`/buyer/messages/${deal.sellerId}`);
   };
 
   const handleSend = async (e: React.FormEvent) => {
