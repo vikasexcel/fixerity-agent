@@ -2,9 +2,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { redisClient } from '../config/redis.js';
 import { runConversation, conversationStore, serviceCategoryManager } from './conversationGraph.js';
 import { runNegotiationAndMatchStream, updateNegotiationOutcome } from './negotiationOrchestrator.js';
+import { ChatOpenAI } from '@langchain/openai';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { OPENAI_API_KEY } from '../config/index.js';
 
 /* ================================================================================
-   UNIFIED AGENT - Updated with Human-in-the-Loop Confirmation
+   UNIFIED AGENT - Updated with LLM-Based Intent Detection
    ================================================================================ */
 
 class UnifiedSessionManager {
@@ -79,66 +82,119 @@ class UnifiedSessionManager {
 
 const sessionManager = new UnifiedSessionManager(redisClient);
 
-/* -------------------- INTENT ROUTER (UPDATED) -------------------- */
+/* -------------------- LLM-BASED INTENT ROUTER (NEW) -------------------- */
 
-async function quickIntentCheck(message, currentPhase, hasDeals, jobReadiness) {
-  const lowerMessage = message.toLowerCase();
+async function intelligentIntentCheck(message, session) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const { phase, job, deals } = session;
+  const hasDeals = deals && deals.length > 0;
   
-  // Check for start over
-  if (lowerMessage.includes('start over') || 
-      lowerMessage.includes('new job') || 
-      lowerMessage.includes('different service') ||
-      lowerMessage.includes('cancel')) {
-    return 'restart';
-  }
-  
-  // In confirmation phase, check for explicit confirmation
-  if (currentPhase === 'confirmation') {
-    if (lowerMessage.includes('yes') ||
-        lowerMessage.includes('proceed') ||
-        lowerMessage.includes('find providers') ||
-        lowerMessage.includes('go ahead') ||
-        lowerMessage.includes('looks good') ||
-        lowerMessage.includes('confirm')) {
-      return 'confirm_and_proceed';
-    }
+  // Get conversation history for context
+  const conversationHistory = await conversationStore.getMessages(session.sessionId);
+  const recentMessages = conversationHistory
+    .slice(-5)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n');
+
+  const jobContext = job ? `
+Current Job:
+- Title: ${job.title}
+- Service: ${job.service_category_id}
+- Budget: $${job.budget.min}-$${job.budget.max}
+- Start: ${job.startDate}
+- End: ${job.endDate}
+- Location: ${job.location || 'Not specified'}
+` : 'No job created yet.';
+
+  const dealsContext = hasDeals ? `
+Available Providers: ${deals.length} providers found
+Top provider: ${deals[0].sellerName} at $${deals[0].quote.price}
+` : 'No providers found yet.';
+
+  const prompt = `
+You are an intent classifier for a conversational service marketplace agent.
+
+Current Phase: ${phase}
+(Phases: conversation = collecting job info, confirmation = reviewing job before search, negotiation = finding providers, refinement = discussing results)
+
+Recent Conversation:
+${recentMessages || 'No previous messages'}
+
+${jobContext}
+
+${dealsContext}
+
+User's Current Message: "${message}"
+
+Classify the user's intent into ONE of these categories:
+
+1. **restart** - User wants to start over, cancel, or create a new/different job
+   Examples: "start over", "new job", "cancel", "different service"
+
+2. **confirm_and_proceed** - User explicitly confirms to proceed (only in confirmation phase)
+   Examples: "yes", "proceed", "go ahead", "looks good", "find providers", "confirm"
+
+3. **modify_before_confirm** - User wants to change/add details before confirming (in confirmation phase)
+   Examples: "change budget", "add description", "modify", "update location"
+
+4. **continue_conversation** - User is providing job information or answering questions (in conversation phase)
+   Examples: "I need cleaning", "my budget is $500", "next week", answering any collection question
+
+5. **refinement_question** - User is asking about job/provider details (in refinement phase)
+   Examples: "what's the job title?", "tell me about providers", "how much?", "who is licensed?"
+
+6. **select_provider** - User wants to select/book a specific provider (in refinement phase)
+   Examples: "select first", "book Aayush", "choose provider 2", "go with them"
+
+7. **filter_results** - User wants to filter/sort providers (in refinement phase)
+   Examples: "show only licensed", "cheapest option", "highest rated", "fastest"
+
+8. **ask_question** - User is asking a general question not related to current phase
+   Examples: "how does this work?", "what services do you offer?"
+
+Classification Rules:
+- In "conversation" phase → mostly "continue_conversation" unless asking general questions
+- In "confirmation" phase → "confirm_and_proceed" or "modify_before_confirm"
+- In "refinement" phase → "refinement_question", "select_provider", or "filter_results"
+- "restart" can happen in any phase
+- Consider conversation context and user's natural language
+
+Reply ONLY with JSON:
+{
+  "intent": "<one of the 8 intents above>",
+  "confidence": "<high|medium|low>",
+  "reasoning": "<brief explanation of why this intent was chosen>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON. Be accurate in intent classification.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const result = JSON.parse(content);
+
+    console.log(`[Intent] Detected: ${result.intent} (${result.confidence}) - ${result.reasoning}`);
     
-    if (lowerMessage.includes('add') ||
-        lowerMessage.includes('change') ||
-        lowerMessage.includes('modify') ||
-        lowerMessage.includes('update')) {
-      return 'modify_before_confirm';
-    }
-  }
-  
-  // Check for provider selection
-  if (hasDeals && (
-      lowerMessage.includes('select') ||
-      lowerMessage.includes('choose') ||
-      lowerMessage.includes('pick') ||
-      lowerMessage.includes('go with') ||
-      lowerMessage.includes('book'))) {
-    return 'select_provider';
-  }
-  
-  // Check for filtering
-  if (hasDeals && (
-      lowerMessage.includes('only licensed') ||
-      lowerMessage.includes('filter') ||
-      lowerMessage.includes('show me') ||
-      lowerMessage.includes('cheaper') ||
-      lowerMessage.includes('highest rated'))) {
-    return 'filter_results';
-  }
-  
-  // Default based on phase
-  if (currentPhase === 'conversation') {
+    return result.intent;
+  } catch (error) {
+    console.error('[Intent] LLM classification error:', error.message);
+    
+    // Fallback to simple phase-based routing
+    if (phase === 'conversation') return 'continue_conversation';
+    if (phase === 'confirmation') return 'confirm_and_proceed';
+    if (phase === 'refinement') return 'refinement_question';
+    
     return 'continue_conversation';
-  } else if (currentPhase === 'refinement') {
-    return 'refinement_question';
   }
-  
-  return 'continue_conversation';
 }
 
 /* -------------------- MAIN HANDLER (UPDATED) -------------------- */
@@ -180,11 +236,9 @@ export async function handleAgentChat(input, send) {
 
     serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken).catch(console.error);
 
-    const currentPhase = session.phase || 'conversation';
-    const hasDeals = session.deals && session.deals.length > 0;
-    
-    const intent = await quickIntentCheck(message, currentPhase, hasDeals);
-    console.log(`[Agent] Phase: ${currentPhase}, Intent: ${intent}`);
+    // Use LLM-based intent detection
+    const intent = await intelligentIntentCheck(message, session);
+    console.log(`[Agent] Phase: ${session.phase}, Intent: ${intent}`);
 
     switch (intent) {
       case 'restart':
@@ -208,6 +262,9 @@ export async function handleAgentChat(input, send) {
       case 'refinement_question':
         await handleRefinement(session, message, send);
         break;
+      case 'ask_question':
+        await handleGeneralQuestion(session, message, send);
+        break;
       default:
         await handleConversation(session, message, send);
     }
@@ -218,7 +275,7 @@ export async function handleAgentChat(input, send) {
   }
 }
 
-/* -------------------- CONVERSATION HANDLER -------------------- */
+/* -------------------- CONVERSATION HANDLER (UPDATED) -------------------- */
 
 async function handleConversation(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
@@ -252,6 +309,11 @@ async function handleConversation(session, message, send) {
     
     await sessionManager.updatePhase(sessionId, 'confirmation');
     
+    await conversationStore.appendMessage(sessionId, {
+      role: 'system',
+      content: `Job preview ready: ${JSON.stringify(result.collected)}`
+    });
+    
     send({ 
       type: 'phase_transition', 
       from: 'conversation',
@@ -269,6 +331,11 @@ async function handleConversation(session, message, send) {
     await sessionManager.setJob(sessionId, result.job);
     await sessionManager.updatePhase(sessionId, 'negotiation');
 
+    await conversationStore.appendMessage(sessionId, {
+      role: 'system',
+      content: `Job created: ${result.job.title} (ID: ${result.job.id})`
+    });
+
     send({ 
       type: 'phase_transition', 
       from: 'confirmation',
@@ -285,7 +352,7 @@ async function handleConversation(session, message, send) {
   }
 }
 
-/* -------------------- CONFIRM AND PROCEED HANDLER (NEW) -------------------- */
+/* -------------------- CONFIRM AND PROCEED HANDLER -------------------- */
 
 async function handleConfirmAndProceed(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
@@ -294,12 +361,11 @@ async function handleConfirmAndProceed(session, message, send) {
 
   send({ type: 'phase', phase: 'confirmation' });
   
-  // User confirmed, so we pass a "confirm" intent message
   const result = await runConversation({
     sessionId,
     buyerId,
     accessToken,
-    message: message, // The confirmation message
+    message: message,
   });
 
   if (result.phase === 'complete' && result.job) {
@@ -320,7 +386,6 @@ async function handleConfirmAndProceed(session, message, send) {
 
     await handleNegotiation(session, result.job, send);
   } else {
-    // Shouldn't happen, but handle gracefully
     send({
       type: 'message',
       text: result.response || "Let me know when you're ready to proceed!",
@@ -328,14 +393,13 @@ async function handleConfirmAndProceed(session, message, send) {
   }
 }
 
-/* -------------------- MODIFY BEFORE CONFIRM HANDLER (NEW) -------------------- */
+/* -------------------- MODIFY BEFORE CONFIRM HANDLER -------------------- */
 
 async function handleModifyBeforeConfirm(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
 
   console.log('[Agent] User wants to modify details before confirming');
 
-  // Reset to conversation phase
   await sessionManager.updatePhase(sessionId, 'conversation');
 
   send({ 
@@ -346,7 +410,6 @@ async function handleModifyBeforeConfirm(session, message, send) {
 
   send({ type: 'phase', phase: 'conversation' });
 
-  // Process the modification request
   const result = await runConversation({
     sessionId,
     buyerId,
@@ -368,7 +431,6 @@ async function handleModifyBeforeConfirm(session, message, send) {
     jobReadiness: result.jobReadiness,
   });
 
-  // Check if back to confirmation
   if (result.phase === 'confirmation') {
     await sessionManager.updatePhase(sessionId, 'confirmation');
     
@@ -389,6 +451,8 @@ async function handleNegotiation(session, job, send) {
   const { sessionId, buyerId, accessToken } = session;
 
   send({ type: 'phase', phase: 'negotiation' });
+
+  await sessionManager.setJob(sessionId, job);
 
   const result = await runNegotiationAndMatchStream(
     job,
@@ -416,9 +480,15 @@ async function handleNegotiation(session, job, send) {
 
   if (result?.deals && result.deals.length > 0) {
     const topDeal = result.deals[0];
+    
+    await conversationStore.appendMessage(sessionId, {
+      role: 'system',
+      content: `Search completed. Found ${result.deals.length} providers for ${job.title}. Top match: ${topDeal.sellerName} at $${topDeal.quote.price}.`
+    });
+    
     send({ 
       type: 'message', 
-      text: `Great news! I found ${result.deals.length} providers for you. The best match is ${topDeal.sellerName} at $${topDeal.quote.price} (${topDeal.quote.days} days). Would you like to book them, or see more details?`,
+      text: `Great news! I found ${result.deals.length} providers for your ${job.title} job. The best match is ${topDeal.sellerName} at $${topDeal.quote.price} (${topDeal.quote.days} days). Would you like to book them, or see more details?`,
     });
   } else {
     send({ 
@@ -430,49 +500,206 @@ async function handleNegotiation(session, job, send) {
   send({ type: 'phase', phase: 'refinement' });
 }
 
-/* -------------------- OTHER HANDLERS (UNCHANGED) -------------------- */
+/* -------------------- REFINEMENT HANDLER (WITH FULL CONTEXT) -------------------- */
 
 async function handleRefinement(session, message, send) {
-  const { deals } = session;
+  const { deals, job, sessionId } = session;
 
   send({ type: 'phase', phase: 'refinement' });
 
-  const lowerMessage = message.toLowerCase();
+  const conversationHistory = await conversationStore.getMessages(sessionId);
+  
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+    openAIApiKey: OPENAI_API_KEY,
+  });
 
-  if (lowerMessage.includes('more detail') || lowerMessage.includes('tell me more')) {
-    if (deals && deals.length > 0) {
-      send({
-        type: 'deals_detail',
-        deals: deals.map(d => ({
-          id: d.id,
-          name: d.sellerName,
-          price: d.quote.price,
-          days: d.quote.days,
-          paymentSchedule: d.quote.paymentSchedule,
-          licensed: d.quote.licensed,
-          referencesAvailable: d.quote.referencesAvailable,
-          can_meet_dates: d.quote.can_meet_dates,
-          matchScore: d.matchScore,
-          message: d.negotiationMessage,
-        })),
-      });
-      send({
-        type: 'message',
-        text: "Here are the details for all providers. Let me know if you'd like to select one!",
-      });
-    } else {
-      send({
-        type: 'message',
-        text: "I don't have any provider results saved. Would you like to search again?",
-      });
-    }
-  } else {
+  const recentMessages = conversationHistory
+    .slice(-10)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n');
+
+  const jobContext = job ? `
+Job Details:
+- Title: ${job.title}
+- Service Category: ${job.service_category_id}
+- Budget: $${job.budget.min}-$${job.budget.max}
+- Start Date: ${job.startDate}
+- End Date: ${job.endDate}
+- Location: ${job.location || 'Not specified'}
+- Description: ${job.description || 'No detailed description'}
+` : 'No job details available.';
+
+  const dealsContext = deals && deals.length > 0 ? `
+Available Providers (${deals.length}):
+${deals.map((d, i) => `
+${i + 1}. ${d.sellerName}
+   - Price: $${d.quote.price}
+   - Completion: ${d.quote.days} days
+   - Payment: ${d.quote.paymentSchedule}
+   - Licensed: ${d.quote.licensed ? 'Yes' : 'No'}
+   - References: ${d.quote.referencesAvailable ? 'Yes' : 'No'}
+   - Can Meet Dates: ${d.quote.can_meet_dates !== false ? 'Yes' : 'No'}
+   - Match Score: ${d.matchScore}/100
+   ${d.negotiationMessage ? '   - Provider Message: ' + d.negotiationMessage : ''}
+`).join('\n')}
+` : 'No providers found yet.';
+
+  const prompt = `
+You are a helpful assistant in the refinement phase after finding service providers.
+
+Conversation History:
+${recentMessages}
+
+${jobContext}
+
+${dealsContext}
+
+User's Question: "${message}"
+
+Instructions:
+- Answer the user's question naturally and conversationally using the context above
+- If they ask about the job (title, budget, dates, location, description), use the job details
+- If they ask about providers (prices, timelines, qualifications), use the provider details
+- If they want to compare providers, present the comparison clearly
+- Be specific and use actual numbers/names from the context
+- Keep responses friendly and conversational (2-4 sentences)
+- Don't repeat what was already said unless specifically asked
+- If information is not available, acknowledge it honestly
+
+Reply ONLY with JSON:
+{
+  "message": "<your natural, helpful response>",
+  "intent": "<info_request|provider_selection|filter_request|new_search|comparison|other>",
+  "requires_action": true/false
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON. Be conversational and helpful.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const response = JSON.parse(content);
+
+    console.log(`[Refinement] Response intent: ${response.intent}`);
+
     send({
       type: 'message',
-      text: "I'm here to help! You can ask me to show more details, select a provider, filter by criteria, or start a new search.",
+      text: response.message,
+    });
+
+    await conversationStore.appendMessage(sessionId, { 
+      role: 'user', 
+      content: message 
+    });
+    await conversationStore.appendMessage(sessionId, { 
+      role: 'assistant', 
+      content: response.message 
+    });
+
+    // Handle additional actions based on intent
+    if (response.intent === 'info_request') {
+      const lowerMessage = message.toLowerCase();
+      
+      if (lowerMessage.includes('all providers') || 
+          lowerMessage.includes('all details') || 
+          lowerMessage.includes('show all') ||
+          lowerMessage.includes('complete details')) {
+        send({
+          type: 'deals_detail',
+          deals: deals?.map(d => ({
+            id: d.id,
+            name: d.sellerName,
+            price: d.quote.price,
+            days: d.quote.days,
+            paymentSchedule: d.quote.paymentSchedule,
+            licensed: d.quote.licensed,
+            referencesAvailable: d.quote.referencesAvailable,
+            can_meet_dates: d.quote.can_meet_dates,
+            matchScore: d.matchScore,
+            message: d.negotiationMessage,
+          })) || [],
+        });
+      }
+    }
+
+  } catch (error) {
+    console.error('[Refinement] Error:', error.message);
+    
+    const fallbackResponse = job 
+      ? `Your job "${job.title}" has a budget of $${job.budget.min}-$${job.budget.max} and is scheduled to start ${job.startDate}. I found ${deals?.length || 0} providers. What would you like to know?`
+      : "I'm here to help! You can ask about the job details, providers, or start a new search.";
+    
+    send({
+      type: 'message',
+      text: fallbackResponse,
     });
   }
 }
+
+/* -------------------- GENERAL QUESTION HANDLER (NEW) -------------------- */
+
+async function handleGeneralQuestion(session, message, send) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const prompt = `
+You are a helpful assistant for a service marketplace platform.
+
+User's Question: "${message}"
+
+This is a general question about how the platform works, not about a specific job or provider.
+
+Provide a helpful, friendly answer. Keep it brief (2-3 sentences).
+
+Reply ONLY with JSON:
+{
+  "message": "<your helpful response>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const response = JSON.parse(content);
+
+    send({
+      type: 'message',
+      text: response.message,
+    });
+
+    await conversationStore.appendMessage(session.sessionId, { 
+      role: 'user', 
+      content: message 
+    });
+    await conversationStore.appendMessage(session.sessionId, { 
+      role: 'assistant', 
+      content: response.message 
+    });
+
+  } catch (error) {
+    console.error('[GeneralQuestion] Error:', error.message);
+    send({
+      type: 'message',
+      text: "I'm here to help you find service providers! You can describe what service you need, and I'll guide you through the process.",
+    });
+  }
+}
+
+/* -------------------- RESTART HANDLER -------------------- */
 
 async function handleRestart(session, send) {
   const { sessionId, buyerId, accessToken } = session;
@@ -513,6 +740,8 @@ async function handleRestart(session, send) {
     jobReadiness: 'incomplete',
   });
 }
+
+/* -------------------- PROVIDER SELECTION HANDLER -------------------- */
 
 async function handleProviderSelection(session, message, send) {
   const { sessionId, buyerId, deals, job } = session;
@@ -582,6 +811,8 @@ async function handleProviderSelection(session, message, send) {
   }
 }
 
+/* -------------------- FILTER RESULTS HANDLER -------------------- */
+
 async function handleFilterResults(session, message, send) {
   const { deals } = session;
 
@@ -639,4 +870,4 @@ async function handleFilterResults(session, message, send) {
   }
 }
 
-export { sessionManager, quickIntentCheck };
+export { sessionManager, intelligentIntentCheck, intelligentIntentCheck as quickIntentCheck };
