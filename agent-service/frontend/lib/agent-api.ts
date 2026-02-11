@@ -182,9 +182,11 @@ export type UnifiedChatStreamEvent =
 /**
  * Unified agent chat: single endpoint for conversation + negotiation + refinement.
  * POST /agent/chat with SSE; pass sessionId on subsequent messages to continue session.
+ * Identify caller by userType: 'buyer' | 'seller' and the corresponding id (buyerId or sellerId).
  */
 export async function unifiedAgentChatStream(
-  buyerId: string,
+  userType: 'buyer' | 'seller',
+  userId: string,
   accessToken: string,
   message: string,
   callbacks: {
@@ -195,11 +197,16 @@ export async function unifiedAgentChatStream(
 ): Promise<{ sessionId: string | null }> {
   const base = getAgentServiceUrl();
   const url = `${base}/agent/chat`;
-  const body: { buyerId: string; accessToken: string; message: string; sessionId?: string } = {
-    buyerId,
+  const body: Record<string, string> = {
+    userType,
     accessToken,
     message,
   };
+  if (userType === 'buyer') {
+    body.buyerId = userId;
+  } else {
+    body.sellerId = userId;
+  }
   if (callbacks.sessionId) body.sessionId = callbacks.sessionId;
 
   const res = await fetch(url, {

@@ -5,6 +5,9 @@ import { redisClient } from './config/redis.js';
 import cors from 'cors';
 import { sequelize } from './db.js';
 import JobMatchQuote from './models/JobMatchQuote.js';
+import SellerProfile from './models/SellerProfile.js';
+import { JobListing } from './models/JobListing.js';
+import { SellerBid } from './models/SellerBid.js';
 import memoryClient from './memory/mem0.js';
 import agentRoutes from './routes/agentRoutes.js';
 dotenv.config();
@@ -65,6 +68,12 @@ async function startServer() {
     console.log('Database connection established.');
     await JobMatchQuote.sync();
     console.log('Table job_match_quotes ready (created if not exist).');
+    await SellerProfile.sync();
+    console.log('Table seller_profiles ready (created if not exist).');
+    await JobListing.sync();
+    console.log('Table job_listings ready (created if not exist).');
+    await SellerBid.sync();
+    console.log('Table seller_bids ready (created if not exist).');
   } catch (err) {
     console.error('Database error:', err.message);
     process.exitCode = 1;

@@ -4,6 +4,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../config/index.js';
 import { redisClient } from '../config/redis.js';
 import { MemorySaver } from '@langchain/langgraph';
+import { JobListing } from '../models/JobListing.js';
 
 /* ================================================================================
    CONVERSATION GRAPH - Job Creation Through Natural Conversation
@@ -543,6 +544,9 @@ function checkCompletenessNode(state) {
 /* -------------------- GENERATE RESPONSE NODE (UPDATED) -------------------- */
 
 async function generateResponseNode(state) {
+  if (state.error) {
+    return { response: { message: state.error } };
+  }
   const llm = new ChatOpenAI({
     model: 'gpt-4o-mini',
     temperature: 0.7,
@@ -723,33 +727,65 @@ Reply ONLY with JSON:
 
 /* -------------------- BUILD JOB NODE (UPDATED) -------------------- */
 
-function buildJobNode(state) {
+function normalizeLocation(location) {
+  if (location == null) return null;
+  if (typeof location === 'string') return { address: location };
+  if (typeof location === 'object' && (location.address !== undefined || location.lat !== undefined)) {
+    return { address: location.address ?? '', lat: location.lat ?? null, lng: location.lng ?? null };
+  }
+  return null;
+}
+
+async function buildJobNode(state) {
   const collected = state.collected;
-  
   const jobId = `job_${state.buyerId}_${Date.now()}`;
 
-  const job = {
-    id: jobId,
+  const budgetMax = collected.budget?.max;
+  const budgetMin = collected.budget?.min ?? (budgetMax != null ? Math.floor(budgetMax * 0.5) : 100);
+
+  const payload = {
+    job_id: jobId,
     buyer_id: state.buyerId,
+    service_category_id: collected.service_category_id,
     title: collected.title || `${collected.service_category_name} Service`,
     description: collected.description || `Looking for ${collected.service_category_name} service`,
-    service_category_id: collected.service_category_id,
-    budget: {
-      min: collected.budget?.min || Math.floor((collected.budget?.max || 100) * 0.5),
-      max: collected.budget?.max,
-    },
-    startDate: collected.startDate || 'ASAP',
-    endDate: collected.endDate || 'flexible',
-    location: collected.location || null,
-    priorities: collected.priorities || [],
-    created_at: Date.now(),
+    budget: { min: budgetMin, max: budgetMax },
+    start_date: collected.startDate || 'ASAP',
+    end_date: collected.endDate || 'flexible',
+    location: normalizeLocation(collected.location),
+    priorities: collected.priorities?.length ? collected.priorities : null,
+    specific_requirements: null,
+    status: 'open',
   };
 
-  console.log(`[BuildJob] Created job: ${jobId}`);
-  return { 
-    job,
-    phase: 'complete', // Mark as complete, ready for negotiation
-  };
+  try {
+    const created = await JobListing.create(payload);
+    const row = created.get({ plain: true });
+
+    const job = {
+      id: row.job_id,
+      buyer_id: row.buyer_id,
+      title: row.title,
+      description: row.description,
+      service_category_id: row.service_category_id,
+      budget: row.budget,
+      startDate: row.start_date,
+      endDate: row.end_date,
+      location: row.location,
+      priorities: row.priorities || [],
+      created_at: row.created_at,
+    };
+
+    console.log(`[BuildJob] Created job: ${jobId}`);
+    return { job, phase: 'complete' };
+  } catch (error) {
+    console.error('[BuildJob] JobListing.create failed:', error.message);
+    return {
+      job: null,
+      phase: 'conversation',
+      error: 'Failed to create job. Please try again.',
+    };
+  }
 }
 
 /* -------------------- ROUTING FUNCTIONS (UPDATED) -------------------- */

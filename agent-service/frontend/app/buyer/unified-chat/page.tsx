@@ -173,6 +173,7 @@ export default function UnifiedChatPage() {
 
     try {
       const { sessionId } = await unifiedAgentChatStream(
+        'buyer',
         String(user.id),
         token,
         text,
