@@ -91,6 +91,13 @@ export default function SellerDashboard() {
                 Run Agent Scan
               </Button> */}
               <Button
+                onClick={() => router.push('/seller/messages')}
+                variant="outline"
+                className="border-border"
+              >
+                Chat with buyers
+              </Button>
+              <Button
                 onClick={() => setShowEditProfile(true)}
                 className="bg-primary hover:bg-primary/90 text-primary-foreground"
               >
