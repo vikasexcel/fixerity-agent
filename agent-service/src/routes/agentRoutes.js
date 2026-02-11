@@ -1,16 +1,11 @@
-// routes/agentRoutes.js (or wherever your routes are)
+
 import express from 'express';
-import { ChatOpenAI } from '@langchain/openai';
-import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages';
-import { OPENAI_API_KEY } from '../config/index.js';
 import { runNegotiationAndMatchStream, cleanupJobNegotiations } from '../agents/negotiationOrchestrator.js';
-import { sessionStore, semanticMemory } from '../agents/negotiationGraph.js';
-import { fetchProviderBasicDetails } from '../agents/buyerMatchAgent.js';
-import { runBuyerDirectChatAgent } from '../agents/buyerDirectChatAgent.js';
 import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
-import { handleAgentChat, sessionManager } from '../agents/Unifiedagent.js';
 import { conversationStore } from '../agents/conversationGraph.js';
+import { buyerSessionManager as sessionManager, sellerSessionManager,handleAgentChat } from '../agents/Unifiedagent.js';
+import { sellerProfileStore } from '../agents/seller/sellerProfileGraph.js';
 
 const router = express.Router();
 
@@ -76,129 +71,6 @@ router.post('/buyer/negotiate-and-match-stream', async (req, res) => {
   }
 });
 
-router.post('/buyer/chat', async (req, res) => {
-  const body = req.body ?? {};
-  const {
-    user_id: userId,
-    access_token: accessToken,
-    message,
-    context: bodyContext,
-  } = body;
-
-  // Accept either context object or flat job_id / job_title / conversation_history
-  const context = bodyContext ?? {
-    jobId: body.job_id ?? body.jobId,
-    jobTitle: body.job_title ?? body.jobTitle,
-    conversationHistory: body.conversation_history ?? body.conversationHistory ?? [],
-  };
-
-  console.log('────────── Buyer Chat Request ──────────');
-  console.log(`userId        : ${userId}`);
-  console.log(`message       : ${message}`);
-  console.log(`jobId         : ${context?.jobId}`);
-  console.log(`jobTitle      : ${context?.jobTitle}`);
-  console.log(`history items : ${context?.conversationHistory?.length || 0}`);
-  console.log('────────────────────────────────────────');
-
-  // Validation
-  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
-    return res.status(400).json({
-      error: 'Missing or invalid user_id or access_token.',
-    });
-  }
-
-  if (!message || typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({
-      error: 'Missing or invalid message.',
-    });
-  }
-
-  if (!context || !context.jobId) {
-    return res.status(400).json({
-      error: 'Missing context.jobId.',
-    });
-  }
-
-  try {
-    const reply = await handleBuyerChat(
-      Number(userId),
-      accessToken.trim(),
-      message.trim(),
-      context
-    );
-
-    res.json({ reply });
-  } catch (err) {
-    console.error('[buyer-chat] Error:', err.message);
-    res.status(500).json({
-      error: err?.message || 'Failed to process chat message.',
-    });
-  }
-});
-
-/**
- * POST /agent/buyer/direct-chat
- * Buyer direct chat with a matched provider (AI-simulated provider responses).
- * Body: { user_id, access_token, job_id, provider_id, message, job_title?, provider_name?, price?, days?, payment_schedule?, rating?, jobs_completed?, conversation_history? }
- */
-router.post('/buyer/direct-chat', async (req, res) => {
-  const body = req.body ?? {};
-  const {
-    user_id: userId,
-    access_token: accessToken,
-    job_id: jobId,
-    provider_id: providerId,
-    message,
-    job_title: jobTitle,
-    provider_name: providerName,
-    price,
-    days,
-    payment_schedule: paymentSchedule,
-    rating,
-    jobs_completed: jobsCompleted,
-    conversation_history: conversationHistory,
-  } = body;
-
-  if (userId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
-    return res.status(400).json({ error: 'Missing or invalid user_id or access_token.' });
-  }
-  if (!message || typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({ error: 'Missing or invalid message.' });
-  }
-  if (!jobId || typeof jobId !== 'string' || !String(jobId).trim()) {
-    return res.status(400).json({ error: 'Missing or invalid job_id.' });
-  }
-  if (providerId == null) {
-    return res.status(400).json({ error: 'Missing provider_id.' });
-  }
-
-  try {
-    const reply = await runBuyerDirectChatAgent(Number(userId), accessToken.trim(), message.trim(), {
-      jobId: String(jobId).trim(),
-      jobTitle: jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : undefined,
-      providerId: Number(providerId),
-      providerName: providerName && String(providerName).trim() ? String(providerName).trim() : undefined,
-      price: typeof price === 'number' ? price : price != null ? Number(price) : undefined,
-      days: typeof days === 'number' ? days : days != null ? Number(days) : undefined,
-      paymentSchedule: paymentSchedule && String(paymentSchedule).trim() ? String(paymentSchedule).trim() : undefined,
-      rating: typeof rating === 'number' ? rating : rating != null ? Number(rating) : undefined,
-      jobsCompleted: typeof jobsCompleted === 'number' ? jobsCompleted : jobsCompleted != null ? Number(jobsCompleted) : undefined,
-      conversationHistory: Array.isArray(conversationHistory) ? conversationHistory : [],
-    });
-    res.json({ reply: reply.reply });
-  } catch (err) {
-    console.error('[buyer-direct-chat] Error:', err.message);
-    res.status(500).json({
-      error: err?.message || 'Direct chat request failed.',
-    });
-  }
-});
-
-/**
- * POST /agent/buyer/job-cleanup
- * Clears Redis (negotiation + deals cache) and Mem0 memories for the given job.
- * Body: { user_id, access_token, job_id }
- */
 router.post('/buyer/job-cleanup', async (req, res) => {
   const { user_id: userId, access_token: accessToken, job_id: jobId } = req.body ?? {};
 
@@ -253,265 +125,6 @@ router.post('/buyer/job-cleanup', async (req, res) => {
   }
 });
 
-/* ==================== CHAT HANDLER (Core Logic) ==================== */
-
-async function handleBuyerChat(userId, accessToken, message, context) {
-  const { jobId, jobTitle, conversationHistory = [] } = context;
-
-  console.log(`[Chat] Processing message for user ${userId}, job ${jobId}`);
-
-  // 1. Retrieve deals from Redis cache (fast) or database (fallback)
-  const deals = await getDealsForJob(userId, jobId);
-  console.log(`[Chat] Found ${deals?.length || 0} deals for job ${jobId}`);
-
-  // 1b. Enrich deals with provider basic details (name, email, contact) from provider-basic-details API for chat answers
-  const dealsWithDetails = await enrichDealsWithProviderBasicDetails(deals || []);
-
-  // 2. Retrieve negotiation context from Redis (conversation transcripts)
-  const negotiationContext = await getNegotiationContext(jobId);
-  console.log(`[Chat] Found ${negotiationContext.length} negotiation transcripts`);
-
-  // 3. (Optional) Get buyer preferences from Mem0
-  let buyerPreferences = null;
-  try {
-    buyerPreferences = await semanticMemory.getBuyerPreferences(String(userId));
-    console.log(`[Chat] Retrieved buyer preferences from Mem0`);
-  } catch (err) {
-    console.log(`[Chat] No Mem0 preferences found:`, err.message);
-  }
-
-  // 4. Build comprehensive context for LLM (include provider contact details so user can ask "how do I contact X?")
-  const systemPrompt = buildSystemPrompt({
-    jobId,
-    jobTitle,
-    deals: dealsWithDetails,
-    negotiationContext,
-    buyerPreferences,
-  });
-
-  // 5. Build conversation messages for LLM
-  const llmMessages = buildLLMMessages(systemPrompt, conversationHistory, message);
-
-  // 6. Call LLM to generate response
-  const llm = new ChatOpenAI({
-    model: 'gpt-4o-mini',
-    temperature: 0.7,
-    openAIApiKey: OPENAI_API_KEY,
-  });
-
-  const response = await llm.invoke(llmMessages);
-  const reply = response.content.trim();
-
-  console.log(`[Chat] Generated reply (${reply.length} chars)`);
-
-  // 7. (Optional) Store conversation in Mem0 for learning
-  try {
-    await semanticMemory.memory.add({
-      messages: [
-        { role: 'user', content: message },
-        { role: 'assistant', content: reply },
-      ],
-      user_id: `buyer_${userId}`,
-      metadata: {
-        type: 'followup_chat',
-        job_id: jobId,
-        timestamp: Date.now(),
-      },
-    });
-    console.log(`[Chat] Stored conversation in Mem0`);
-  } catch (err) {
-    console.log(`[Chat] Failed to store in Mem0:`, err.message);
-  }
-
-  return reply;
-}
-
-/* ==================== HELPER: Enrich Deals With Provider Basic Details ==================== */
-
-async function enrichDealsWithProviderBasicDetails(deals) {
-  if (!deals || deals.length === 0) return deals;
-  const enriched = await Promise.all(
-    deals.map(async (deal) => {
-      const providerId = deal.sellerId ?? deal.provider_id;
-      if (!providerId) return deal;
-      try {
-        const basic = await fetchProviderBasicDetails(Number(providerId));
-        if (basic) {
-          return { ...deal, sellerBasicDetails: basic };
-        }
-      } catch (err) {
-        console.warn(`[Chat] Could not fetch basic details for provider ${providerId}:`, err.message);
-      }
-      return deal;
-    })
-  );
-  return enriched;
-}
-
-/* ==================== HELPER: Get Deals ==================== */
-
-async function getDealsForJob(userId, jobId) {
-  // Try Redis first (fast, recent)
-  const cacheKey = `deals:${userId}:${jobId}`;
-  
-  try {
-    const cached = await redisClient.get(cacheKey);
-    if (cached) {
-      console.log(`[Chat] Deals cache HIT for ${cacheKey}`);
-      return JSON.parse(cached);
-    }
-  } catch (err) {
-    console.log(`[Chat] Redis cache error:`, err.message);
-  }
-
-  // Fallback to database
-  try {
-    // TODO: Replace with your actual database query
-    // const deals = await db.deals.findMany({ where: { userId, jobId } });
-    
-    // For now, return empty array if not in cache
-    console.log(`[Chat] Deals cache MISS for ${cacheKey}, returning empty`);
-    return [];
-  } catch (err) {
-    console.error(`[Chat] Database error:`, err.message);
-    return [];
-  }
-}
-
-/* ==================== HELPER: Get Negotiation Context ==================== */
-
-async function getNegotiationContext(jobId) {
-  const context = [];
-
-  try {
-    // Get all negotiation keys for this job
-    const pattern = `negotiation:${jobId}:*:messages`;
-    const keys = await redisClient.keys(pattern);
-
-    console.log(`[Chat] Found ${keys.length} negotiation message keys`);
-
-    for (const key of keys) {
-      // Extract provider ID from key: negotiation:job_10:provider_123:messages
-      const parts = key.split(':');
-      const providerId = parts[2];
-
-      // Get messages for this provider
-      const messages = await sessionStore.getAllMessages(jobId, providerId);
-      
-      if (messages && messages.length > 0) {
-        context.push({
-          providerId,
-          messages,
-        });
-      }
-    }
-
-    console.log(`[Chat] Retrieved ${context.length} provider negotiations`);
-  } catch (err) {
-    console.error(`[Chat] Error getting negotiation context:`, err.message);
-  }
-
-  return context;
-}
-
-/* ==================== HELPER: Build System Prompt ==================== */
-
-function buildSystemPrompt({ jobId, jobTitle, deals, negotiationContext, buyerPreferences }) {
-  let prompt = `You are a helpful assistant for a buyer who is looking for service providers.
-
-Current Job:
-- Job ID: ${jobId}
-- Job Title: ${jobTitle}
-`;
-
-  // Add deals information (include provider basic details when available so user can ask for contact info)
-  if (deals && deals.length > 0) {
-    prompt += `\nMatched Providers (${deals.length} total):\n`;
-    deals.forEach((deal, index) => {
-      const displayName = deal.sellerName || `Provider ${deal.sellerId}`;
-      prompt += `\n${index + 1}. ${displayName}
-   - Match Score: ${deal.matchScore}%
-   - Quote: $${deal.quote?.price || 'N/A'}
-   - Completion Days: ${deal.quote?.completionDays || deal.quote?.days || 'N/A'}
-   - Payment Schedule: ${deal.quote?.paymentSchedule || 'Not specified'}
-   - Licensed: ${deal.quote?.licensed ? 'Yes' : 'No'}
-   - References Available: ${deal.quote?.referencesAvailable ? 'Yes' : 'No'}
-   - Can Meet Dates: ${deal.quote?.can_meet_dates !== false ? 'Yes' : 'No'}`;
-      if (deal.sellerBasicDetails) {
-        const b = deal.sellerBasicDetails;
-        const fullName = [b.first_name, b.last_name].filter(Boolean).join(' ').trim() || displayName;
-        prompt += `
-   - Provider contact details: Name: ${fullName}${b.email ? `, Email: ${b.email}` : ''}${b.contact_number ? `, Contact number: ${b.contact_number}` : ''}`;
-      }
-      if (deal.sellerAgent) {
-        prompt += `
-   - Rating: ${deal.sellerAgent.rating}/5
-   - Jobs Completed: ${deal.sellerAgent.jobsCompleted}`;
-      }
-      if (deal.negotiationMessage) {
-        prompt += `
-   - Message: "${deal.negotiationMessage}"`;
-      }
-    });
-  } else {
-    prompt += `\nNo providers matched for this job yet.`;
-  }
-
-  // Add negotiation transcripts
-  if (negotiationContext && negotiationContext.length > 0) {
-    prompt += `\n\nNegotiation Transcripts:\n`;
-    negotiationContext.forEach((ctx) => {
-      const dealInfo = deals?.find(d => d.sellerId === ctx.providerId);
-      const providerName = dealInfo?.sellerName || `Provider ${ctx.providerId}`;
-      
-      prompt += `\n--- ${providerName} ---\n`;
-      ctx.messages.forEach((msg) => {
-        prompt += `${msg.role === 'buyer' ? 'Buyer' : 'Provider'}: ${msg.message}\n`;
-      });
-    });
-  }
-
-  // Add buyer preferences (if available from Mem0)
-  if (buyerPreferences?.summary?.top_insights) {
-    prompt += `\n\nBuyer's Past Preferences (learned):\n`;
-    buyerPreferences.summary.top_insights.forEach((insight, i) => {
-      prompt += `${i + 1}. ${insight.text}\n`;
-    });
-  }
-
-  prompt += `\n\nInstructions:
-- Answer the buyer's questions based on the information above
-- Be helpful, friendly, and professional
-- If asked about specific providers, reference their details accurately
-- If asked to compare providers, explain differences clearly
-- If information is not available, say so honestly
-- Keep responses concise but informative
-- If buyer asks about negotiating further, explain that they can contact providers directly`;
-
-  return prompt;
-}
-
-/* ==================== HELPER: Build LLM Messages ==================== */
-
-function buildLLMMessages(systemPrompt, conversationHistory, currentMessage) {
-  const messages = [new SystemMessage(systemPrompt)];
-
-  // Add conversation history (chronological order; assistant as AIMessage for correct roles)
-  conversationHistory.forEach((msg) => {
-    if (msg.role === 'user') {
-      messages.push(new HumanMessage(msg.content));
-    } else if (msg.role === 'assistant') {
-      messages.push(new AIMessage(msg.content));
-    }
-  });
-
-  // Add current message
-  messages.push(new HumanMessage(currentMessage));
-
-  return messages;
-}
-
-/* ==================== HELPER: Save Deals (You should already have this) ==================== */
 
 async function saveDealsForJob(userId, jobId, deals) {
   // Cache in Redis for 1 hour
@@ -581,78 +194,42 @@ function setupSSE(res) {
   return send;
 }
 
-/* -------------------- MAIN CHAT ENDPOINT (SSE Streaming) -------------------- */
+
+
+
+
+/* -------------------- UNIFIED CHAT ENDPOINT -------------------- */
 
 /**
  * POST /api/agent/chat
  * 
- * Main unified endpoint for all user interactions.
- * Uses Server-Sent Events (SSE) for streaming responses.
+ * Unified chat endpoint for both buyers and sellers
  * 
- * Request Body:
- * {
- *   "sessionId": "optional - existing session ID",
- *   "buyerId": "required - user ID",
- *   "accessToken": "required - user access token",
- *   "message": "required - user's message"
- * }
- * 
- * SSE Response Events:
- * - session: { sessionId, phase }
- * - phase: { phase: 'conversation' | 'negotiation' | 'refinement' | 'complete' }
- * - message: { text, action? }
- * - collected: { data, missing }
- * - phase_transition: { from, to, job? }
- * - providers_fetched: { count }
- * - provider_start: { providerId, providerName }
- * - negotiation_step: { providerId, providerName, step }
- * - provider_done: { providerId, providerName, outcome }
- * - done: { deals, reply }
- * - deals_detail: { deals }
- * - filtered_deals: { deals, count }
- * - provider_selected: { deal }
- * - error: { error }
- * 
- * Example Usage (JavaScript):
- * ```
- * const eventSource = new EventSource('/api/agent/chat?' + new URLSearchParams({
- *   // Note: EventSource only supports GET, so use fetch with streaming instead
- * }));
- * 
- * // Better approach with fetch:
- * const response = await fetch('/api/agent/chat', {
- *   method: 'POST',
- *   headers: { 'Content-Type': 'application/json' },
- *   body: JSON.stringify({ buyerId, accessToken, message })
- * });
- * 
- * const reader = response.body.getReader();
- * const decoder = new TextDecoder();
- * 
- * while (true) {
- *   const { done, value } = await reader.read();
- *   if (done) break;
- *   
- *   const text = decoder.decode(value);
- *   const lines = text.split('\n');
- *   for (const line of lines) {
- *     if (line.startsWith('data: ')) {
- *       const data = JSON.parse(line.slice(6));
- *       handleEvent(data);
- *     }
- *   }
- * }
- * ```
+ * Body:
+ * - userType: 'buyer' | 'seller' (required)
+ * - sessionId: string (optional - will create if not provided)
+ * - buyerId: number (required if userType='buyer')
+ * - sellerId: number (required if userType='seller')
+ * - accessToken: string (required)
+ * - message: string (required)
  */
 router.post('/chat', async (req, res) => {
   const send = setupSSE(res);
 
   try {
-    const { sessionId, buyerId, accessToken, message } = req.body;
+    const { userType, sessionId, buyerId, sellerId, accessToken, message } = req.body;
 
-    // Validate required fields
-    if (!buyerId) {
-      send({ type: 'error', error: 'buyerId is required' });
+    // Validate userType
+    if (!userType || !['buyer', 'seller'].includes(userType)) {
+      send({ type: 'error', error: 'userType must be "buyer" or "seller"' });
+      res.end();
+      return;
+    }
+
+    // Validate user ID based on type
+    const userId = userType === 'buyer' ? buyerId : sellerId;
+    if (!userId) {
+      send({ type: 'error', error: `${userType}Id is required` });
       res.end();
       return;
     }
@@ -669,16 +246,22 @@ router.post('/chat', async (req, res) => {
       return;
     }
 
+    // Build input object based on userType
+    const input = {
+      userType,
+      sessionId,
+      accessToken: String(accessToken),
+      message: String(message),
+    };
+
+    if (userType === 'buyer') {
+      input.buyerId = String(buyerId);
+    } else {
+      input.sellerId = String(sellerId);
+    }
+
     // Handle the chat
-    await handleAgentChat(
-      {
-        sessionId,
-        buyerId: String(buyerId),
-        accessToken: String(accessToken),
-        message: String(message),
-      },
-      send
-    );
+    await handleAgentChat(input, send);
 
     // End the stream
     send({ type: 'stream_end' });
@@ -696,37 +279,51 @@ router.post('/chat', async (req, res) => {
 /**
  * GET /api/agent/session/:sessionId
  * 
- * Retrieve the current state of a session.
- * Useful for reconnecting or checking status.
+ * Retrieve the current state of a session (buyer or seller)
  */
 router.get('/session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
 
-    const session = await sessionManager.getSession(sessionId);
-    
-    if (!session) {
-      return res.status(404).json({
-        status: 0,
-        message: 'Session not found',
-        sessionId,
-      });
-    }
+    // Try buyer session first
+    let session = await sessionManager.getSession(sessionId);
+    let userType = 'buyer';
+    let messages = [];
 
-    // Get conversation messages
-    const messages = await conversationStore.getMessages(sessionId);
+    if (!session) {
+      // Try seller session
+      session = await sellerSessionManager.getSession(sessionId);
+      userType = 'seller';
+      
+      if (!session) {
+        return res.status(404).json({
+          status: 0,
+          message: 'Session not found',
+          sessionId,
+        });
+      }
+      
+      messages = await sellerProfileStore.getMessages(sessionId);
+    } else {
+      messages = await conversationStore.getMessages(sessionId);
+    }
 
     res.json({
       status: 1,
       message: 'Success',
+      userType,
       session: {
         sessionId: session.sessionId,
         phase: session.phase,
-        buyerId: session.buyerId,
+        userId: session.buyerId || session.sellerId,
         created_at: session.created_at,
         updated_at: session.updated_at,
+        // Buyer-specific
         job: session.job || null,
         deals: session.deals || [],
+        // Seller-specific
+        profile: session.profile || null,
+        matchedJobs: session.matchedJobs || [],
       },
       messages: messages || [],
     });
@@ -745,13 +342,15 @@ router.get('/session/:sessionId', async (req, res) => {
 /**
  * DELETE /api/agent/session/:sessionId
  * 
- * Clear a session and all associated data.
+ * Clear a session and all associated data (buyer or seller)
  */
 router.delete('/session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
 
-    await sessionManager.cleanup(sessionId);
+    // Try both managers
+    await sessionManager.cleanup(sessionId).catch(() => {});
+    await sellerSessionManager.cleanup(sessionId).catch(() => {});
 
     res.json({
       status: 1,
@@ -780,6 +379,7 @@ router.get('/health', (req, res) => {
     status: 1,
     message: 'Agent service is healthy',
     timestamp: Date.now(),
+    supportedUserTypes: ['buyer', 'seller'],
   });
 });
 

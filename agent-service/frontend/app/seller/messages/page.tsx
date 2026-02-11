@@ -3,26 +3,25 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Send } from 'lucide-react';
+import { ArrowLeft, Send, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useAuth } from '@/lib/auth-context';
+import { useAuth, getAccessToken } from '@/lib/auth-context';
+import { unifiedAgentChatStream } from '@/lib/agent-api';
 
 type Message = { role: 'seller' | 'buyer'; content: string };
-
-const MOCK_MESSAGES: Message[] = [
-  { role: 'buyer', content: 'Hi, I need help with a plumbing job next week.' },
-  { role: 'seller', content: 'Sure, I can help. What day works for you?' },
-];
 
 export default function SellerMessagesPage() {
   const router = useRouter();
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [messages, setMessages] = useState<Message[]>(MOCK_MESSAGES);
+  const sessionIdRef = useRef<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
+  const [sending, setSending] = useState(false);
 
   const { session } = useAuth();
   const user = session.user;
+  const token = getAccessToken();
 
   useEffect(() => {
     if (!session.isLoading && (!user || user.role !== 'seller')) {
@@ -34,13 +33,45 @@ export default function SellerMessagesPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSend = (e: React.FormEvent) => {
+  const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputValue.trim();
-    if (!text) return;
+    if (!text || !user || !token || sending) return;
 
     setInputValue('');
     setMessages((prev) => [...prev, { role: 'seller', content: text }]);
+    setSending(true);
+
+    try {
+      const { sessionId } = await unifiedAgentChatStream(
+        'seller',
+        String(user.id),
+        token,
+        text,
+        {
+          sessionId: sessionIdRef.current,
+          onEvent: (event) => {
+            if (event.type === 'session' && event.sessionId) {
+              sessionIdRef.current = event.sessionId;
+            }
+            if (event.type === 'message') {
+              setMessages((prev) => [...prev, { role: 'buyer', content: event.text }]);
+            }
+            if (event.type === 'error') {
+              setMessages((prev) => [...prev, { role: 'buyer', content: `Error: ${event.error}` }]);
+            }
+          },
+        }
+      );
+      if (sessionId) sessionIdRef.current = sessionId;
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        { role: 'buyer', content: err instanceof Error ? err.message : 'Something went wrong.' },
+      ]);
+    } finally {
+      setSending(false);
+    }
   };
 
   if (!user || user.role !== 'seller') {
@@ -92,14 +123,15 @@ export default function SellerMessagesPage() {
               className="flex-1 bg-card border-border"
               aria-label="Message input"
               autoComplete="off"
+              disabled={sending}
             />
             <Button
               type="submit"
-              disabled={!inputValue.trim()}
+              disabled={!inputValue.trim() || sending}
               className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0"
               aria-label="Send message"
             >
-              <Send size={20} />
+              {sending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
             </Button>
           </form>
         </div>

@@ -1,7 +1,8 @@
-import { fetchProvidersByCategory, fetchProviderBasicDetails } from './buyerMatchAgent.js';
+
 import { runMatching, sessionStore, semanticMemory } from './negotiationGraph.js';
 import { NEGOTIATION_TIME_SECONDS } from '../config/index.js';
 import { redisClient } from '../config/redis.js';
+import { fetchProviderBasicDetails, fetchProvidersByCategory } from '../tools/buyer/buyerAgentTools.js';
 
 /* ================================================================================
    NEGOTIATION ORCHESTRATOR

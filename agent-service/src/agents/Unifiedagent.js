@@ -2,13 +2,20 @@ import { v4 as uuidv4 } from 'uuid';
 import { redisClient } from '../config/redis.js';
 import { runConversation, conversationStore, serviceCategoryManager } from './conversationGraph.js';
 import { runNegotiationAndMatchStream, updateNegotiationOutcome } from './negotiationOrchestrator.js';
+import { runSellerProfileConversation, sellerProfileStore } from './seller/sellerProfileGraph.js';
+import { findJobsForSeller } from './seller/jobMatchingGraph.js';
+import { submitSellerBid } from './seller/sellerBiddingGraph.js';
+import { getSellerDashboard } from './seller/sellerOrchestrator.js';
+import { SellerProfile } from '../models/SellerProfile.js'
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../config/index.js';
 
 /* ================================================================================
-   UNIFIED AGENT - Updated with LLM-Based Intent Detection
+   UNIFIED AGENT - Supports Both Buyer and Seller
    ================================================================================ */
+
+/* -------------------- BUYER SESSION MANAGER -------------------- */
 
 class UnifiedSessionManager {
   constructor(redis) {
@@ -29,7 +36,7 @@ class UnifiedSessionManager {
     };
 
     await this.saveSession(sessionId, session);
-    console.log(`[Session] Created new session: ${sessionId}`);
+    console.log(`[BuyerSession] Created new session: ${sessionId}`);
     
     return session;
   }
@@ -76,130 +83,103 @@ class UnifiedSessionManager {
     const key = `unified:${sessionId}`;
     await this.redis.del(key);
     await conversationStore.cleanup(sessionId);
-    console.log(`[Session] Cleaned up session: ${sessionId}`);
+    console.log(`[BuyerSession] Cleaned up session: ${sessionId}`);
   }
 }
 
-const sessionManager = new UnifiedSessionManager(redisClient);
+export const buyerSessionManager = new UnifiedSessionManager(redisClient);
 
-/* -------------------- LLM-BASED INTENT ROUTER (NEW) -------------------- */
+/* -------------------- SELLER SESSION MANAGER -------------------- */
 
-async function intelligentIntentCheck(message, session) {
-  const llm = new ChatOpenAI({
-    model: 'gpt-4o-mini',
-    temperature: 0,
-    openAIApiKey: OPENAI_API_KEY,
-  });
+class SellerSessionManager {
+  constructor(redis) {
+    this.redis = redis;
+    this.TTL = 7200;
+  }
 
-  const { phase, job, deals } = session;
-  const hasDeals = deals && deals.length > 0;
-  
-  // Get conversation history for context
-  const conversationHistory = await conversationStore.getMessages(session.sessionId);
-  const recentMessages = conversationHistory
-    .slice(-5)
-    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
-    .join('\n');
-
-  const jobContext = job ? `
-Current Job:
-- Title: ${job.title}
-- Service: ${job.service_category_id}
-- Budget: $${job.budget.min}-$${job.budget.max}
-- Start: ${job.startDate}
-- End: ${job.endDate}
-- Location: ${job.location || 'Not specified'}
-` : 'No job created yet.';
-
-  const dealsContext = hasDeals ? `
-Available Providers: ${deals.length} providers found
-Top provider: ${deals[0].sellerName} at $${deals[0].quote.price}
-` : 'No providers found yet.';
-
-  const prompt = `
-You are an intent classifier for a conversational service marketplace agent.
-
-Current Phase: ${phase}
-(Phases: conversation = collecting job info, confirmation = reviewing job before search, negotiation = finding providers, refinement = discussing results)
-
-Recent Conversation:
-${recentMessages || 'No previous messages'}
-
-${jobContext}
-
-${dealsContext}
-
-User's Current Message: "${message}"
-
-Classify the user's intent into ONE of these categories:
-
-1. **restart** - User wants to start over, cancel, or create a new/different job
-   Examples: "start over", "new job", "cancel", "different service"
-
-2. **confirm_and_proceed** - User explicitly confirms to proceed (only in confirmation phase)
-   Examples: "yes", "proceed", "go ahead", "looks good", "find providers", "confirm"
-
-3. **modify_before_confirm** - User wants to change/add details before confirming (in confirmation phase)
-   Examples: "change budget", "add description", "modify", "update location"
-
-4. **continue_conversation** - User is providing job information or answering questions (in conversation phase)
-   Examples: "I need cleaning", "my budget is $500", "next week", answering any collection question
-
-5. **refinement_question** - User is asking about job/provider details (in refinement phase)
-   Examples: "what's the job title?", "tell me about providers", "how much?", "who is licensed?"
-
-6. **select_provider** - User wants to select/book a specific provider (in refinement phase)
-   Examples: "select first", "book Aayush", "choose provider 2", "go with them"
-
-7. **filter_results** - User wants to filter/sort providers (in refinement phase)
-   Examples: "show only licensed", "cheapest option", "highest rated", "fastest"
-
-8. **ask_question** - User is asking a general question not related to current phase
-   Examples: "how does this work?", "what services do you offer?"
-
-Classification Rules:
-- In "conversation" phase → mostly "continue_conversation" unless asking general questions
-- In "confirmation" phase → "confirm_and_proceed" or "modify_before_confirm"
-- In "refinement" phase → "refinement_question", "select_provider", or "filter_results"
-- "restart" can happen in any phase
-- Consider conversation context and user's natural language
-
-Reply ONLY with JSON:
-{
-  "intent": "<one of the 8 intents above>",
-  "confidence": "<high|medium|low>",
-  "reasoning": "<brief explanation of why this intent was chosen>"
-}
-`;
-
-  try {
-    const res = await llm.invoke([
-      new SystemMessage('Only output valid JSON. Be accurate in intent classification.'),
-      new HumanMessage(prompt),
-    ]);
-
-    let content = res.content.trim();
-    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-    const result = JSON.parse(content);
-
-    console.log(`[Intent] Detected: ${result.intent} (${result.confidence}) - ${result.reasoning}`);
+  async createSession(sellerId, accessToken) {
+    const sessionId = `seller_session_${sellerId}_${Date.now()}_${uuidv4().slice(0, 8)}`;
     
-    return result.intent;
-  } catch (error) {
-    console.error('[Intent] LLM classification error:', error.message);
+    const session = {
+      sessionId,
+      sellerId,
+      accessToken,
+      phase: 'profile_check', // profile_check | profile_creation | job_browsing | bidding
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
+
+    await this.saveSession(sessionId, session);
+    console.log(`[SellerSession] Created new session: ${sessionId}`);
     
-    // Fallback to simple phase-based routing
-    if (phase === 'conversation') return 'continue_conversation';
-    if (phase === 'confirmation') return 'confirm_and_proceed';
-    if (phase === 'refinement') return 'refinement_question';
-    
-    return 'continue_conversation';
+    return session;
+  }
+
+  async saveSession(sessionId, data) {
+    const key = `seller_unified:${sessionId}`;
+    await this.redis.setEx(key, this.TTL, JSON.stringify({
+      ...data,
+      updated_at: Date.now(),
+    }));
+  }
+
+  async getSession(sessionId) {
+    const key = `seller_unified:${sessionId}`;
+    const data = await this.redis.get(key);
+    return data ? JSON.parse(data) : null;
+  }
+
+  async updatePhase(sessionId, phase) {
+    const session = await this.getSession(sessionId);
+    if (session) {
+      session.phase = phase;
+      await this.saveSession(sessionId, session);
+    }
+  }
+
+  async setProfile(sessionId, profile) {
+    const session = await this.getSession(sessionId);
+    if (session) {
+      session.profile = profile;
+      await this.saveSession(sessionId, session);
+    }
+  }
+
+  async setMatchedJobs(sessionId, jobs) {
+    const session = await this.getSession(sessionId);
+    if (session) {
+      session.matchedJobs = jobs;
+      await this.saveSession(sessionId, session);
+    }
+  }
+
+  async cleanup(sessionId) {
+    const key = `seller_unified:${sessionId}`;
+    await this.redis.del(key);
+    await sellerProfileStore.cleanup(sessionId);
+    console.log(`[SellerSession] Cleaned up session: ${sessionId}`);
   }
 }
 
-/* -------------------- MAIN HANDLER (UPDATED) -------------------- */
+export const sellerSessionManager = new SellerSessionManager(redisClient);
+
+/* -------------------- MAIN ROUTER -------------------- */
 
 export async function handleAgentChat(input, send) {
+  const { userType } = input; // 'buyer' or 'seller'
+
+  if (userType === 'seller') {
+    return handleSellerAgent(input, send);
+  } else {
+    return handleBuyerAgent(input, send);
+  }
+}
+
+/* ================================================================================
+   BUYER AGENT (EXISTING CODE)
+   ================================================================================ */
+
+async function handleBuyerAgent(input, send) {
   const { buyerId, accessToken, message } = input;
   let { sessionId } = input;
 
@@ -217,14 +197,14 @@ export async function handleAgentChat(input, send) {
     let session;
     
     if (sessionId) {
-      session = await sessionManager.getSession(sessionId);
+      session = await buyerSessionManager.getSession(sessionId);
       if (!session) {
-        console.log(`[Agent] Session ${sessionId} not found, creating new`);
-        session = await sessionManager.createSession(buyerId, accessToken);
+        console.log(`[BuyerAgent] Session ${sessionId} not found, creating new`);
+        session = await buyerSessionManager.createSession(buyerId, accessToken);
         sessionId = session.sessionId;
       }
     } else {
-      session = await sessionManager.createSession(buyerId, accessToken);
+      session = await buyerSessionManager.createSession(buyerId, accessToken);
       sessionId = session.sessionId;
     }
 
@@ -232,17 +212,18 @@ export async function handleAgentChat(input, send) {
       type: 'session', 
       sessionId: session.sessionId,
       phase: session.phase,
+      userType: 'buyer',
     });
 
     serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken).catch(console.error);
 
     // Use LLM-based intent detection
-    const intent = await intelligentIntentCheck(message, session);
-    console.log(`[Agent] Phase: ${session.phase}, Intent: ${intent}`);
+    const intent = await intelligentBuyerIntentCheck(message, session);
+    console.log(`[BuyerAgent] Phase: ${session.phase}, Intent: ${intent}`);
 
     switch (intent) {
       case 'restart':
-        await handleRestart(session, send);
+        await handleBuyerRestart(session, send);
         break;
       case 'confirm_and_proceed':
         await handleConfirmAndProceed(session, message, send);
@@ -270,12 +251,103 @@ export async function handleAgentChat(input, send) {
     }
 
   } catch (error) {
-    console.error('[Agent] Error:', error);
+    console.error('[BuyerAgent] Error:', error);
     send({ type: 'error', error: error.message || 'An unexpected error occurred' });
   }
 }
 
-/* -------------------- CONVERSATION HANDLER (UPDATED) -------------------- */
+/* -------------------- BUYER INTENT DETECTION -------------------- */
+
+async function intelligentBuyerIntentCheck(message, session) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const { phase, job, deals } = session;
+  const hasDeals = deals && deals.length > 0;
+  
+  const conversationHistory = await conversationStore.getMessages(session.sessionId);
+  const recentMessages = conversationHistory
+    .slice(-5)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n');
+
+  const jobContext = job ? `
+Current Job:
+- Title: ${job.title}
+- Service: ${job.service_category_id}
+- Budget: $${job.budget.min}-$${job.budget.max}
+- Start: ${job.startDate}
+- End: ${job.endDate}
+- Location: ${job.location || 'Not specified'}
+` : 'No job created yet.';
+
+  const dealsContext = hasDeals ? `
+Available Providers: ${deals.length} providers found
+Top provider: ${deals[0].sellerName} at $${deals[0].quote.price}
+` : 'No providers found yet.';
+
+  const prompt = `
+You are an intent classifier for a conversational service marketplace agent (BUYER side).
+
+Current Phase: ${phase}
+(Phases: conversation = collecting job info, confirmation = reviewing job before search, negotiation = finding providers, refinement = discussing results)
+
+Recent Conversation:
+${recentMessages || 'No previous messages'}
+
+${jobContext}
+
+${dealsContext}
+
+User's Current Message: "${message}"
+
+Classify the user's intent into ONE of these categories:
+
+1. **restart** - User wants to start over, cancel, or create a new/different job
+2. **confirm_and_proceed** - User explicitly confirms to proceed (only in confirmation phase)
+3. **modify_before_confirm** - User wants to change/add details before confirming (in confirmation phase)
+4. **continue_conversation** - User is providing job information or answering questions (in conversation phase)
+5. **refinement_question** - User is asking about job/provider details (in refinement phase)
+6. **select_provider** - User wants to select/book a specific provider (in refinement phase)
+7. **filter_results** - User wants to filter/sort providers (in refinement phase)
+8. **ask_question** - User is asking a general question not related to current phase
+
+Reply ONLY with JSON:
+{
+  "intent": "<one of the 8 intents above>",
+  "confidence": "<high|medium|low>",
+  "reasoning": "<brief explanation>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON. Be accurate in intent classification.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const result = JSON.parse(content);
+
+    console.log(`[BuyerIntent] Detected: ${result.intent} (${result.confidence}) - ${result.reasoning}`);
+    
+    return result.intent;
+  } catch (error) {
+    console.error('[BuyerIntent] LLM classification error:', error.message);
+    
+    if (phase === 'conversation') return 'continue_conversation';
+    if (phase === 'confirmation') return 'confirm_and_proceed';
+    if (phase === 'refinement') return 'refinement_question';
+    
+    return 'continue_conversation';
+  }
+}
+
+/* -------------------- BUYER HANDLERS (EXISTING) -------------------- */
 
 async function handleConversation(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
@@ -303,11 +375,10 @@ async function handleConversation(session, message, send) {
     jobReadiness: result.jobReadiness,
   });
 
-  // Check if moved to confirmation phase
   if (result.phase === 'confirmation') {
-    console.log(`[Agent] Job ready for confirmation`);
+    console.log(`[BuyerAgent] Job ready for confirmation`);
     
-    await sessionManager.updatePhase(sessionId, 'confirmation');
+    await buyerSessionManager.updatePhase(sessionId, 'confirmation');
     
     await conversationStore.appendMessage(sessionId, {
       role: 'system',
@@ -324,12 +395,11 @@ async function handleConversation(session, message, send) {
     send({ type: 'phase', phase: 'confirmation' });
   }
   
-  // Check if job is complete and confirmed
   if (result.phase === 'complete' && result.job) {
-    console.log(`[Agent] Job confirmed, starting negotiation for job ${result.job.id}`);
+    console.log(`[BuyerAgent] Job confirmed, starting negotiation for job ${result.job.id}`);
     
-    await sessionManager.setJob(sessionId, result.job);
-    await sessionManager.updatePhase(sessionId, 'negotiation');
+    await buyerSessionManager.setJob(sessionId, result.job);
+    await buyerSessionManager.updatePhase(sessionId, 'negotiation');
 
     await conversationStore.appendMessage(sessionId, {
       role: 'system',
@@ -352,12 +422,10 @@ async function handleConversation(session, message, send) {
   }
 }
 
-/* -------------------- CONFIRM AND PROCEED HANDLER -------------------- */
-
 async function handleConfirmAndProceed(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
 
-  console.log('[Agent] User confirmed, building job and proceeding to negotiation');
+  console.log('[BuyerAgent] User confirmed, building job and proceeding to negotiation');
 
   send({ type: 'phase', phase: 'confirmation' });
   
@@ -369,8 +437,8 @@ async function handleConfirmAndProceed(session, message, send) {
   });
 
   if (result.phase === 'complete' && result.job) {
-    await sessionManager.setJob(sessionId, result.job);
-    await sessionManager.updatePhase(sessionId, 'negotiation');
+    await buyerSessionManager.setJob(sessionId, result.job);
+    await buyerSessionManager.updatePhase(sessionId, 'negotiation');
 
     send({ 
       type: 'phase_transition', 
@@ -393,14 +461,12 @@ async function handleConfirmAndProceed(session, message, send) {
   }
 }
 
-/* -------------------- MODIFY BEFORE CONFIRM HANDLER -------------------- */
-
 async function handleModifyBeforeConfirm(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
 
-  console.log('[Agent] User wants to modify details before confirming');
+  console.log('[BuyerAgent] User wants to modify details before confirming');
 
-  await sessionManager.updatePhase(sessionId, 'conversation');
+  await buyerSessionManager.updatePhase(sessionId, 'conversation');
 
   send({ 
     type: 'phase_transition', 
@@ -432,7 +498,7 @@ async function handleModifyBeforeConfirm(session, message, send) {
   });
 
   if (result.phase === 'confirmation') {
-    await sessionManager.updatePhase(sessionId, 'confirmation');
+    await buyerSessionManager.updatePhase(sessionId, 'confirmation');
     
     send({ 
       type: 'phase_transition', 
@@ -445,14 +511,12 @@ async function handleModifyBeforeConfirm(session, message, send) {
   }
 }
 
-/* -------------------- NEGOTIATION HANDLER -------------------- */
-
 async function handleNegotiation(session, job, send) {
   const { sessionId, buyerId, accessToken } = session;
 
   send({ type: 'phase', phase: 'negotiation' });
 
-  await sessionManager.setJob(sessionId, job);
+  await buyerSessionManager.setJob(sessionId, job);
 
   const result = await runNegotiationAndMatchStream(
     job,
@@ -467,10 +531,10 @@ async function handleNegotiation(session, job, send) {
   );
 
   if (result?.deals) {
-    await sessionManager.setDeals(sessionId, result.deals);
+    await buyerSessionManager.setDeals(sessionId, result.deals);
   }
 
-  await sessionManager.updatePhase(sessionId, 'refinement');
+  await buyerSessionManager.updatePhase(sessionId, 'refinement');
 
   send({ 
     type: 'phase_transition', 
@@ -499,8 +563,6 @@ async function handleNegotiation(session, job, send) {
 
   send({ type: 'phase', phase: 'refinement' });
 }
-
-/* -------------------- REFINEMENT HANDLER (WITH FULL CONTEXT) -------------------- */
 
 async function handleRefinement(session, message, send) {
   const { deals, job, sessionId } = session;
@@ -586,7 +648,7 @@ Reply ONLY with JSON:
     content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const response = JSON.parse(content);
 
-    console.log(`[Refinement] Response intent: ${response.intent}`);
+    console.log(`[BuyerRefinement] Response intent: ${response.intent}`);
 
     send({
       type: 'message',
@@ -602,7 +664,6 @@ Reply ONLY with JSON:
       content: response.message 
     });
 
-    // Handle additional actions based on intent
     if (response.intent === 'info_request') {
       const lowerMessage = message.toLowerCase();
       
@@ -629,7 +690,7 @@ Reply ONLY with JSON:
     }
 
   } catch (error) {
-    console.error('[Refinement] Error:', error.message);
+    console.error('[BuyerRefinement] Error:', error.message);
     
     const fallbackResponse = job 
       ? `Your job "${job.title}" has a budget of $${job.budget.min}-$${job.budget.max} and is scheduled to start ${job.startDate}. I found ${deals?.length || 0} providers. What would you like to know?`
@@ -642,8 +703,6 @@ Reply ONLY with JSON:
   }
 }
 
-/* -------------------- GENERAL QUESTION HANDLER (NEW) -------------------- */
-
 async function handleGeneralQuestion(session, message, send) {
   const llm = new ChatOpenAI({
     model: 'gpt-4o-mini',
@@ -652,7 +711,7 @@ async function handleGeneralQuestion(session, message, send) {
   });
 
   const prompt = `
-You are a helpful assistant for a service marketplace platform.
+You are a helpful assistant for a service marketplace platform (buyer side).
 
 User's Question: "${message}"
 
@@ -691,7 +750,7 @@ Reply ONLY with JSON:
     });
 
   } catch (error) {
-    console.error('[GeneralQuestion] Error:', error.message);
+    console.error('[BuyerGeneralQuestion] Error:', error.message);
     send({
       type: 'message',
       text: "I'm here to help you find service providers! You can describe what service you need, and I'll guide you through the process.",
@@ -699,9 +758,7 @@ Reply ONLY with JSON:
   }
 }
 
-/* -------------------- RESTART HANDLER -------------------- */
-
-async function handleRestart(session, send) {
+async function handleBuyerRestart(session, send) {
   const { sessionId, buyerId, accessToken } = session;
 
   await conversationStore.cleanup(sessionId);
@@ -715,7 +772,7 @@ async function handleRestart(session, send) {
     updated_at: Date.now(),
   };
   
-  await sessionManager.saveSession(sessionId, newSession);
+  await buyerSessionManager.saveSession(sessionId, newSession);
 
   send({ type: 'phase', phase: 'conversation' });
   send({ 
@@ -740,8 +797,6 @@ async function handleRestart(session, send) {
     jobReadiness: 'incomplete',
   });
 }
-
-/* -------------------- PROVIDER SELECTION HANDLER -------------------- */
 
 async function handleProviderSelection(session, message, send) {
   const { sessionId, buyerId, deals, job } = session;
@@ -800,7 +855,7 @@ async function handleProviderSelection(session, message, send) {
       text: `Excellent choice! I've selected ${selectedDeal.sellerName} for $${selectedDeal.quote.price}. They'll complete the job in ${selectedDeal.quote.days} day(s). You can now proceed to confirm the booking!`,
     });
 
-    await sessionManager.updatePhase(sessionId, 'complete');
+    await buyerSessionManager.updatePhase(sessionId, 'complete');
     send({ type: 'phase', phase: 'complete' });
   } else {
     const providerList = deals.map((d, i) => `${i + 1}. ${d.sellerName} - $${d.quote.price}`).join('\n');
@@ -810,8 +865,6 @@ async function handleProviderSelection(session, message, send) {
     });
   }
 }
-
-/* -------------------- FILTER RESULTS HANDLER -------------------- */
 
 async function handleFilterResults(session, message, send) {
   const { deals } = session;
@@ -870,4 +923,405 @@ async function handleFilterResults(session, message, send) {
   }
 }
 
-export { sessionManager, intelligentIntentCheck, intelligentIntentCheck as quickIntentCheck };
+/* ================================================================================
+   SELLER AGENT (NEW)
+   ================================================================================ */
+
+async function handleSellerAgent(input, send) {
+  const { sellerId, accessToken, message } = input;
+  let { sessionId } = input;
+
+  if (!sellerId || !accessToken) {
+    send({ type: 'error', error: 'Missing sellerId or accessToken' });
+    return;
+  }
+
+  if (!message || typeof message !== 'string') {
+    send({ type: 'error', error: 'Message is required' });
+    return;
+  }
+
+  try {
+    let session;
+    
+    if (sessionId) {
+      session = await sellerSessionManager.getSession(sessionId);
+      if (!session) {
+        console.log(`[SellerAgent] Session ${sessionId} not found, creating new`);
+        session = await sellerSessionManager.createSession(sellerId, accessToken);
+        sessionId = session.sessionId;
+      }
+    } else {
+      session = await sellerSessionManager.createSession(sellerId, accessToken);
+      sessionId = session.sessionId;
+    }
+
+    send({ 
+      type: 'session', 
+      sessionId: session.sessionId,
+      phase: session.phase,
+      userType: 'seller',
+    });
+
+    // Check if profile exists
+    const hasProfile = await SellerProfile.findOne({
+      where: { seller_id: sellerId, active: true }
+    });
+
+    if (!hasProfile && session.phase === 'profile_check') {
+      send({
+        type: 'message',
+        text: "Welcome! Let's create your service provider profile so clients can find you. What services do you offer?",
+      });
+      
+      await sellerSessionManager.updatePhase(sessionId, 'profile_creation');
+      session.phase = 'profile_creation';
+      
+      send({ type: 'phase', phase: 'profile_creation' });
+    }
+
+    // Route based on phase and intent
+    const intent = await intelligentSellerIntent(message, session);
+    console.log(`[SellerAgent] Phase: ${session.phase}, Intent: ${intent}`);
+
+    switch (intent) {
+      case 'create_profile':
+      case 'provide_profile_info':
+        await handleSellerProfileCreation(session, message, send);
+        break;
+      case 'browse_jobs':
+        await handleJobBrowsing(session, message, send);
+        break;
+      case 'bid_on_job':
+        await handleBidding(session, message, send);
+        break;
+      case 'check_dashboard':
+        await handleDashboard(session, send);
+        break;
+      case 'ask_question':
+        await handleSellerQuestion(session, message, send);
+        break;
+      case 'restart':
+        await handleSellerRestart(session, send);
+        break;
+      default:
+        await handleSellerProfileCreation(session, message, send);
+    }
+
+  } catch (error) {
+    console.error('[SellerAgent] Error:', error);
+    send({ type: 'error', error: error.message || 'An unexpected error occurred' });
+  }
+}
+
+/* -------------------- SELLER INTENT DETECTION -------------------- */
+
+async function intelligentSellerIntent(message, session) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const { phase, profile, matchedJobs } = session;
+
+  const prompt = `
+You are an intent classifier for a service provider (seller) agent.
+
+Current Phase: ${phase}
+(Phases: profile_check, profile_creation, job_browsing, bidding)
+
+Has Profile: ${profile ? 'Yes' : 'No'}
+Matched Jobs Available: ${matchedJobs?.length || 0}
+
+User's Message: "${message}"
+
+Classify the intent into ONE of these:
+
+1. **create_profile** - User wants to create their provider profile
+2. **provide_profile_info** - User is providing profile details (services, pricing, availability)
+3. **browse_jobs** - User wants to see available jobs
+4. **bid_on_job** - User wants to bid on a specific job
+5. **check_dashboard** - User wants to see their bids/active jobs
+6. **ask_question** - General question about how it works
+7. **modify_profile** - User wants to change their profile
+8. **restart** - User wants to start over
+
+Reply ONLY with JSON:
+{
+  "intent": "<one of the intents above>",
+  "confidence": "<high|medium|low>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const result = JSON.parse(content);
+
+    console.log(`[SellerIntent] Detected: ${result.intent}`);
+    return result.intent;
+  } catch (error) {
+    console.error('[SellerIntent] Error:', error.message);
+    return phase === 'profile_creation' ? 'provide_profile_info' : 'browse_jobs';
+  }
+}
+
+/* -------------------- SELLER HANDLERS -------------------- */
+
+async function handleSellerProfileCreation(session, message, send) {
+  const { sessionId, sellerId, accessToken } = session;
+
+  send({ type: 'phase', phase: 'profile_creation' });
+
+  const result = await runSellerProfileConversation({
+    sessionId,
+    sellerId,
+    accessToken,
+    message,
+  });
+
+  send({ 
+    type: 'message', 
+    text: result.response,
+    action: result.action,
+  });
+
+  send({ 
+    type: 'profile_collected', 
+    data: result.collected,
+    requiredMissing: result.requiredMissing,
+    optionalMissing: result.optionalMissing,
+    profileReadiness: result.profileReadiness,
+  });
+
+  if (result.phase === 'complete' && result.profile) {
+    await sellerSessionManager.setProfile(sessionId, result.profile);
+    await sellerSessionManager.updatePhase(sessionId, 'job_browsing');
+
+    send({ 
+      type: 'phase_transition', 
+      from: 'profile_creation',
+      to: 'job_browsing',
+      profile: result.profile,
+    });
+
+    send({
+      type: 'message',
+      text: "Excellent! Your profile is now live. Let me find jobs that match your skills...",
+    });
+
+    await handleJobBrowsing(session, "show me jobs", send);
+  }
+}
+
+async function handleJobBrowsing(session, message, send) {
+  const { sessionId, sellerId } = session;
+
+  send({ type: 'phase', phase: 'job_browsing' });
+
+  const result = await findJobsForSeller(sellerId);
+
+  await sellerSessionManager.setMatchedJobs(sessionId, result.jobs);
+
+  if (result.jobs && result.jobs.length > 0) {
+    const topJobs = result.jobs.slice(0, 5);
+    
+    send({
+      type: 'matched_jobs',
+      jobs: topJobs.map(j => ({
+        job_id: j.job_id,
+        title: j.title,
+        budget: j.budget,
+        location: j.location?.address,
+        start_date: j.start_date,
+        matchScore: j.matchScore,
+      })),
+      count: result.jobs.length,
+    });
+
+    const topJob = topJobs[0];
+    send({
+      type: 'message',
+      text: `Great news! I found ${result.jobs.length} jobs that match your profile. The best match is "${topJob.title}" with a budget of $${topJob.budget.min}-$${topJob.budget.max} (Match Score: ${topJob.matchScore}/100). Would you like to bid on this job?`,
+    });
+  } else {
+    send({
+      type: 'message',
+      text: "I couldn't find any jobs matching your profile right now. I'll notify you when new jobs become available!",
+    });
+  }
+}
+
+async function handleBidding(session, message, send) {
+  const { sellerId, matchedJobs } = session;
+
+  if (!matchedJobs || matchedJobs.length === 0) {
+    send({
+      type: 'message',
+      text: "Let me first find some jobs for you...",
+    });
+    await handleJobBrowsing(session, "show jobs", send);
+    return;
+  }
+
+  const lowerMessage = message.toLowerCase();
+  let selectedJob = null;
+
+  if (lowerMessage.includes('first') || lowerMessage.includes('top') || lowerMessage.includes('best')) {
+    selectedJob = matchedJobs[0];
+  }
+
+  if (!selectedJob) {
+    send({
+      type: 'message',
+      text: "Which job would you like to bid on? You can say 'bid on first job' or mention the job title.",
+    });
+    return;
+  }
+
+  send({ type: 'phase', phase: 'bidding' });
+  send({
+    type: 'message',
+    text: `Preparing your bid for "${selectedJob.title}"...`,
+  });
+
+  const result = await submitSellerBid({
+    sellerId,
+    jobId: selectedJob.job_id,
+  });
+
+  if (result.bid) {
+    send({
+      type: 'bid_submitted',
+      bid: {
+        bid_id: result.bid.bid_id,
+        job_id: result.bid.job_id,
+        quoted_price: result.bid.quoted_price,
+        quoted_timeline: result.bid.quoted_timeline,
+        message: result.bid.message,
+      }
+    });
+
+    send({
+      type: 'message',
+      text: `Perfect! I've submitted your bid for $${result.bid.quoted_price} with ${result.bid.quoted_completion_days} days completion time. The buyer will review your bid and get back to you.`,
+    });
+
+    await sellerSessionManager.updatePhase(session.sessionId, 'job_browsing');
+  } else {
+    send({
+      type: 'message',
+      text: `Sorry, I couldn't submit the bid. ${result.error || 'Please try again.'}`,
+    });
+  }
+}
+
+async function handleDashboard(session, send) {
+  const { sellerId } = session;
+
+  const dashboard = await getSellerDashboard(sellerId);
+
+  send({
+    type: 'dashboard',
+    data: {
+      pending_bids: dashboard.stats.pending_bids,
+      active_jobs: dashboard.stats.active_jobs,
+      new_matches: dashboard.stats.new_matches,
+    },
+    activeBids: dashboard.activeBids.slice(0, 5),
+    activeJobs: dashboard.activeJobs.slice(0, 5),
+  });
+
+  send({
+    type: 'message',
+    text: `Here's your dashboard: You have ${dashboard.stats.pending_bids} pending bid(s), ${dashboard.stats.active_jobs} active job(s), and ${dashboard.stats.new_matches} new job match(es). Would you like to see details?`,
+  });
+}
+
+async function handleSellerQuestion(session, message, send) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0.7,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const prompt = `
+You are a helpful assistant for service providers on a marketplace platform.
+
+User's Question: "${message}"
+
+Provide a helpful answer about:
+- How to create a profile
+- How to find jobs
+- How bidding works
+- How payments work
+- Tips for getting more jobs
+
+Keep it brief (2-3 sentences).
+
+Reply ONLY with JSON:
+{
+  "message": "<your helpful response>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const response = JSON.parse(content);
+
+    send({
+      type: 'message',
+      text: response.message,
+    });
+  } catch (error) {
+    send({
+      type: 'message',
+      text: "I'm here to help you find jobs and grow your business! You can create your profile, browse jobs, and submit bids - all through this chat.",
+    });
+  }
+}
+
+async function handleSellerRestart(session, send) {
+  const { sessionId, sellerId, accessToken } = session;
+
+  await sellerProfileStore.cleanup(sessionId);
+
+  const newSession = {
+    sessionId,
+    sellerId,
+    accessToken,
+    phase: 'profile_check',
+    created_at: session.created_at,
+    updated_at: Date.now(),
+  };
+  
+  await sellerSessionManager.saveSession(sessionId, newSession);
+
+  send({ type: 'phase', phase: 'profile_check' });
+  send({ 
+    type: 'message', 
+    text: "No problem, let's start fresh! What would you like to do?",
+  });
+}
+
+/* ================================================================================
+   EXPORTS
+   ================================================================================ */
+
+export { 
+  buyerSessionManager as sessionManager, 
+  intelligentBuyerIntentCheck as intelligentIntentCheck,
+  intelligentBuyerIntentCheck as quickIntentCheck
+};
