@@ -1015,48 +1015,68 @@ async function handleSellerAgent(input, send) {
 }
 
 /* -------------------- SELLER INTENT DETECTION -------------------- */
-
-async function intelligentSellerIntent(message, session) {
+/**
+ * Use LLM to understand which job the user wants to bid on
+ */
+async function intelligentJobSelection(message, matchedJobs, session) {
   const llm = new ChatOpenAI({
     model: 'gpt-4o-mini',
     temperature: 0,
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  const { phase, profile, matchedJobs } = session;
+  // Get recent conversation for context
+  const conversationHistory = await sellerProfileStore.getMessages(session.sessionId);
+  const recentMessages = conversationHistory
+    .slice(-3)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n');
+
+  const jobListForLLM = matchedJobs.map((j, i) => `
+Job ${i + 1}:
+- ID: ${j.job_id}
+- Title: "${j.title}"
+- Description: ${j.description || 'No description'}
+- Budget: $${j.budget.min}-$${j.budget.max}
+- Location: ${j.location?.address || 'Not specified'}
+- Start Date: ${j.start_date}
+- Match Score: ${j.matchScore}/100
+`).join('\n');
 
   const prompt = `
-You are an intent classifier for a service provider (seller) agent.
+You are helping a service provider select which job they want to bid on.
 
-Current Phase: ${phase}
-(Phases: profile_check, profile_creation, job_browsing, bidding)
+Recent Conversation:
+${recentMessages || 'No previous messages'}
 
-Has Profile: ${profile ? 'Yes' : 'No'}
-Matched Jobs Available: ${matchedJobs?.length || 0}
+Available Jobs:
+${jobListForLLM}
 
 User's Message: "${message}"
 
-Classify the intent into ONE of these:
+Task: Determine which job (if any) the user wants to bid on.
 
-1. **create_profile** - User wants to create their provider profile
-2. **provide_profile_info** - User is providing profile details (services, pricing, availability)
-3. **browse_jobs** - User wants to see available jobs
-4. **bid_on_job** - User wants to bid on a specific job
-5. **check_dashboard** - User wants to see their bids/active jobs
-6. **ask_question** - General question about how it works
-7. **modify_profile** - User wants to change their profile
-8. **restart** - User wants to start over
+Rules:
+1. If user says "yes", "sure", "okay", "go ahead" without specifying which job, AND there was a specific job mentioned in the recent conversation, select that job
+2. If user says "first", "top", "best", "1st", "1" → Select Job 1
+3. If user says "second", "2nd", "2" → Select Job 2
+4. If user mentions part of a job title (e.g., "the cleaning one", "kitchen cleaner") → Match to that job
+5. If user asks for more details about a job → DO NOT select, return null
+6. If user's intent is unclear → return null
 
 Reply ONLY with JSON:
 {
-  "intent": "<one of the intents above>",
-  "confidence": "<high|medium|low>"
+  "job_selected": true/false,
+  "job_index": <0-based index number or null>,
+  "job_id": "<job_id or null>",
+  "confidence": "high/medium/low",
+  "reasoning": "<brief explanation of why this job was selected>"
 }
 `;
 
   try {
     const res = await llm.invoke([
-      new SystemMessage('Only output valid JSON.'),
+      new SystemMessage('Only output valid JSON. Be accurate in job matching.'),
       new HumanMessage(prompt),
     ]);
 
@@ -1064,14 +1084,192 @@ Reply ONLY with JSON:
     content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const result = JSON.parse(content);
 
-    console.log(`[SellerIntent] Detected: ${result.intent}`);
-    return result.intent;
+    console.log(`[JobSelection] Selected: ${result.job_selected}, Job: ${result.job_id}, Confidence: ${result.confidence}`);
+    console.log(`[JobSelection] Reasoning: ${result.reasoning}`);
+
+    if (result.job_selected && result.job_index !== null) {
+      return matchedJobs[result.job_index] || null;
+    }
+
+    if (result.job_selected && result.job_id) {
+      return matchedJobs.find(j => j.job_id === result.job_id) || null;
+    }
+
+    return null;
   } catch (error) {
-    console.error('[SellerIntent] Error:', error.message);
-    return phase === 'profile_creation' ? 'provide_profile_info' : 'browse_jobs';
+    console.error('[JobSelection] LLM error:', error.message);
+    
+    // Fallback: Check for very obvious patterns
+    const lowerMessage = message.toLowerCase();
+    if ((lowerMessage.includes('yes') || lowerMessage.includes('first') || lowerMessage === '1') && matchedJobs.length > 0) {
+      console.log('[JobSelection] Fallback: Selecting first job');
+      return matchedJobs[0];
+    }
+    
+    return null;
   }
 }
 
+/**
+ * Use LLM to extract custom bidding details (price, message)
+ */
+async function intelligentBiddingDetails(message, selectedJob, session) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const prompt = `
+You are helping a service provider customize their bid for a job.
+
+Job Details:
+- Title: "${selectedJob.title}"
+- Budget: $${selectedJob.budget.min}-$${selectedJob.budget.max}
+
+User's Message: "${message}"
+
+Task: Extract any custom pricing or special message the user wants to include in their bid.
+
+Rules:
+1. If user mentions a specific price (e.g., "I want to quote $175", "bid $200"), extract it
+2. If user says they want to include a message (e.g., "tell them I have 10 years experience"), extract it
+3. If user just says "yes", "bid on this", "go ahead" → No custom details
+4. Price should be a number, not a range
+
+Examples:
+- "Yes, bid on this" → custom_price: null, custom_message: null
+- "I want to quote $850" → custom_price: 850, custom_message: null
+- "Bid $175 and tell them I'm available immediately" → custom_price: 175, custom_message: "I'm available immediately"
+- "Quote $200" → custom_price: 200, custom_message: null
+
+Reply ONLY with JSON:
+{
+  "has_custom_details": true/false,
+  "custom_price": <number or null>,
+  "custom_message": "<string or null>",
+  "reasoning": "<brief explanation>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON. Extract pricing and messages accurately.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const result = JSON.parse(content);
+
+    console.log(`[BiddingDetails] Custom Price: ${result.custom_price}, Custom Message: ${result.custom_message}`);
+    console.log(`[BiddingDetails] Reasoning: ${result.reasoning}`);
+
+    return {
+      customPrice: result.custom_price,
+      customMessage: result.custom_message,
+    };
+  } catch (error) {
+    console.error('[BiddingDetails] LLM error:', error.message);
+    return {
+      customPrice: null,
+      customMessage: null,
+    };
+  }
+}
+async function intelligentSellerIntent(message, session) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  // Reload session to get latest data
+  const freshSession = await sellerSessionManager.getSession(session.sessionId);
+  const { phase, profile, matchedJobs } = freshSession || session;
+
+  // Get conversation context
+  const conversationHistory = await sellerProfileStore.getMessages(session.sessionId);
+  const recentMessages = conversationHistory
+    .slice(-5)
+    .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+    .join('\n');
+
+  const jobContext = matchedJobs && matchedJobs.length > 0 ? `
+Available Jobs: ${matchedJobs.length} job(s)
+Top Job: "${matchedJobs[0].title}" - Budget: $${matchedJobs[0].budget.min}-$${matchedJobs[0].budget.max}
+` : 'No jobs available yet';
+
+  const prompt = `
+You are an intent classifier for a service provider (seller) agent.
+
+Current Phase: ${phase}
+(Phases: profile_check, profile_creation, job_browsing, bidding)
+
+Recent Conversation:
+${recentMessages || 'No previous messages'}
+
+Has Profile: ${profile ? 'Yes' : 'No'}
+${jobContext}
+
+User's Message: "${message}"
+
+Classify the intent into ONE of these:
+
+1. **create_profile** - User wants to create their provider profile
+2. **provide_profile_info** - User is providing profile details (services, pricing, availability)
+3. **browse_jobs** - User wants to see available jobs or more job details
+4. **bid_on_job** - User wants to bid on a job
+   - Triggers: "yes" (after job offer), "sure", "okay", "bid on...", "I want to bid", mentions job number/title
+   - Context: Should have jobs available
+5. **check_dashboard** - User wants to see their bids/active jobs
+6. **ask_question** - General question about how it works
+7. **modify_profile** - User wants to change their profile
+8. **restart** - User wants to start over
+
+Classification Rules:
+- If recent conversation shows a job was offered and user says "yes", "sure", "okay", "go ahead" → "bid_on_job"
+- If user mentions job number (1st, first, second) or job title → "bid_on_job"
+- If no jobs available yet → NEVER "bid_on_job"
+- If user asks "tell me more about..." or "what is..." → "browse_jobs" (not bidding yet)
+- If phase is "profile_creation" and user is answering questions → "provide_profile_info"
+
+Reply ONLY with JSON:
+{
+  "intent": "<one of the intents above>",
+  "confidence": "<high|medium|low>",
+  "reasoning": "<brief explanation of why this intent was chosen>"
+}
+`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Only output valid JSON. Consider conversation context carefully.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let content = res.content.trim();
+    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    const result = JSON.parse(content);
+
+    console.log(`[SellerIntent] Detected: ${result.intent} (${result.confidence})`);
+    console.log(`[SellerIntent] Reasoning: ${result.reasoning}`);
+    
+    return result.intent;
+  } catch (error) {
+    console.error('[SellerIntent] Error:', error.message);
+    
+    // Fallback logic
+    if (phase === 'profile_creation') return 'provide_profile_info';
+    if (phase === 'job_browsing' && matchedJobs?.length > 0) {
+      const lower = message.toLowerCase();
+      if (lower.includes('yes') || lower.includes('bid') || lower.includes('first')) {
+        return 'bid_on_job';
+      }
+    }
+    return 'browse_jobs';
+  }
+}
 /* -------------------- SELLER HANDLERS -------------------- */
 
 async function handleSellerProfileCreation(session, message, send) {
@@ -1146,9 +1344,16 @@ async function handleJobBrowsing(session, message, send) {
     });
 
     const topJob = topJobs[0];
+    
+    // ✅ Store in conversation history for LLM context
+    await sellerProfileStore.appendMessage(sessionId, {
+      role: 'system',
+      content: `Jobs found: ${result.jobs.length}. Top match: "${topJob.title}" (ID: ${topJob.job_id}) - Budget: $${topJob.budget.min}-$${topJob.budget.max}, Match Score: ${topJob.matchScore}/100`
+    });
+    
     send({
       type: 'message',
-      text: `Great news! I found ${result.jobs.length} jobs that match your profile. The best match is "${topJob.title}" with a budget of $${topJob.budget.min}-$${topJob.budget.max} (Match Score: ${topJob.matchScore}/100). Would you like to bid on this job?`,
+      text: `Great news! I found ${result.jobs.length} job(s) that match your profile. The best match is "${topJob.title}" with a budget of $${topJob.budget.min}-$${topJob.budget.max} (Match Score: ${topJob.matchScore}/100). Would you like to bid on this job?`,
     });
   } else {
     send({
@@ -1159,8 +1364,9 @@ async function handleJobBrowsing(session, message, send) {
 }
 
 async function handleBidding(session, message, send) {
-  const { sellerId, matchedJobs } = session;
+  const { sellerId, matchedJobs, sessionId } = session;
 
+  // Check if jobs are available
   if (!matchedJobs || matchedJobs.length === 0) {
     send({
       type: 'message',
@@ -1170,30 +1376,42 @@ async function handleBidding(session, message, send) {
     return;
   }
 
-  const lowerMessage = message.toLowerCase();
-  let selectedJob = null;
-
-  if (lowerMessage.includes('first') || lowerMessage.includes('top') || lowerMessage.includes('best')) {
-    selectedJob = matchedJobs[0];
-  }
+  // ✅ USE LLM TO UNDERSTAND WHICH JOB USER WANTS
+  const selectedJob = await intelligentJobSelection(message, matchedJobs, session);
 
   if (!selectedJob) {
+    // LLM couldn't determine which job - ask for clarification
+    await sellerSessionManager.updatePhase(sessionId, 'job_browsing');
+    
+    const jobList = matchedJobs.slice(0, 5).map((j, i) => 
+      `${i + 1}. "${j.title}" - Budget: $${j.budget.min}-$${j.budget.max} (Match: ${j.matchScore}/100)`
+    ).join('\n');
+    
     send({
       type: 'message',
-      text: "Which job would you like to bid on? You can say 'bid on first job' or mention the job title.",
+      text: `I have ${matchedJobs.length} job(s) available:\n\n${jobList}\n\nWhich one would you like to bid on?`,
     });
     return;
   }
 
+  // ✅ JOB SELECTED - CHECK IF USER WANTS CUSTOM PRICING
+  const biddingDetails = await intelligentBiddingDetails(message, selectedJob, session);
+
+  // Update phase
+  await sellerSessionManager.updatePhase(sessionId, 'bidding');
+  
   send({ type: 'phase', phase: 'bidding' });
   send({
     type: 'message',
     text: `Preparing your bid for "${selectedJob.title}"...`,
   });
 
+  // Submit bid with custom details if provided
   const result = await submitSellerBid({
     sellerId,
     jobId: selectedJob.job_id,
+    customMessage: biddingDetails.customMessage || null,
+    customPrice: biddingDetails.customPrice || null,
   });
 
   if (result.bid) {
@@ -1210,10 +1428,10 @@ async function handleBidding(session, message, send) {
 
     send({
       type: 'message',
-      text: `Perfect! I've submitted your bid for $${result.bid.quoted_price} with ${result.bid.quoted_completion_days} days completion time. The buyer will review your bid and get back to you.`,
+      text: `Perfect! I've submitted your bid for $${result.bid.quoted_price} with ${result.bid.quoted_completion_days} day(s) completion time. The buyer will review your bid and get back to you.`,
     });
 
-    await sellerSessionManager.updatePhase(session.sessionId, 'job_browsing');
+    await sellerSessionManager.updatePhase(sessionId, 'job_browsing');
   } else {
     send({
       type: 'message',

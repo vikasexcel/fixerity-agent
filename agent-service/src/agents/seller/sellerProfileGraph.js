@@ -145,6 +145,23 @@ const SellerProfileState = Annotation.Root({
   error: Annotation(),
 });
 
+/** Format pricing for display so the model sees both hourly and fixed prices (avoids re-asking). */
+function formatPricingDisplay(pricing) {
+  if (!pricing) return 'not set';
+  const parts = [];
+  if (pricing.hourly_rate_max != null) {
+    parts.push(`$${pricing.hourly_rate_min ?? '?'}-$${pricing.hourly_rate_max}/hr`);
+  }
+  const fp = pricing.fixed_prices && Object.keys(pricing.fixed_prices).length > 0
+    ? pricing.fixed_prices
+    : null;
+  if (fp) {
+    const fixedStr = Object.entries(fp).map(([k, v]) => `${k}: $${v}`).join(', ');
+    parts.push(`Fixed: ${fixedStr}`);
+  }
+  return parts.length ? parts.join('; ') : 'not set';
+}
+
 /* -------------------- INTENT DETECTION NODE -------------------- */
 
 async function detectIntentNode(state) {
@@ -170,7 +187,7 @@ Current collected data:
 - Services: ${state.collected.service_categories.length > 0 ? state.collected.service_categories.join(', ') : 'not set'}
 - Service area: ${state.collected.service_area || 'not set'}
 - Availability: ${state.collected.availability || 'not set'}
-- Pricing: ${state.collected.pricing?.hourly_rate_max ? '$' + state.collected.pricing.hourly_rate_min + '-$' + state.collected.pricing.hourly_rate_max : 'not set'}
+- Pricing: ${formatPricingDisplay(state.collected.pricing)}
 - Experience: ${state.collected.credentials?.years_experience ? state.collected.credentials.years_experience + ' years' : 'not set'}
 - Licensed: ${state.collected.credentials?.licensed ?? 'not set'}
 
@@ -257,10 +274,11 @@ Instructions:
 1. For services: Extract all services they offer (can be multiple). Match to available categories.
 2. For service area: Extract city, neighborhood, or "radius from location"
 3. For availability: Extract days/times (e.g., "evenings 5-9PM", "weekends", "Mon-Fri mornings")
-4. For pricing: Extract hourly rates or fixed prices per service type
+4. For pricing: Extract hourly rates or fixed prices per service type. Use a consistent key for the service (e.g. "house cleaning"). Do NOT return empty "pricing" or "fixed_prices" if the user only confirms existing info (e.g. "fixed price", "that's right")—only add new numbers or leave pricing out of "extracted" to avoid overwriting.
 5. For credentials: Extract experience years, licensed status, insurance, references
-6. For preferences: Extract job size preferences, travel distance, materials, payment methods
+6. For preferences: Extract job size preferences (e.g. "no minimum" or "no" → min_job_size_hours: 0), travel distance, materials, payment methods
 7. For bio: Extract any personal introduction or background story
+8. Set found_new_info to true only when you actually extract NEW data; if the user only confirms or repeats what we already have, set found_new_info to false.
 
 Today's date: ${new Date().toISOString().split('T')[0]}
 
@@ -292,7 +310,7 @@ Reply ONLY with JSON:
       }
     },
     "preferences": {
-      "min_job_size_hours": <number or null>,
+      "min_job_size_hours": <number or null (use 0 for "no minimum")>,
       "max_travel_distance": <number or null>,
       "provides_materials": <true/false/null>,
       "preferred_payment": ["<payment methods>"]
@@ -389,9 +407,13 @@ function updateCollectedNode(state) {
   }
 
   if (extracted.pricing) {
+    const existingFixed = state.collected.pricing?.fixed_prices || {};
+    const newFixed = extracted.pricing.fixed_prices || {};
     updates.pricing = {
       ...state.collected.pricing,
       ...extracted.pricing,
+      // Deep-merge fixed_prices so later messages don't overwrite already extracted prices
+      fixed_prices: { ...existingFixed, ...newFixed },
     };
   }
 
@@ -443,7 +465,7 @@ function checkCompletenessNode(state) {
   if (!collected.bio) {
     optional.push('bio');
   }
-  if (!collected.preferences?.min_job_size_hours) {
+  if (collected.preferences?.min_job_size_hours == null) {
     optional.push('min_job_size');
   }
 
@@ -514,7 +536,7 @@ What we know so far:
 - Services: ${state.collected.service_categories.length > 0 ? state.collected.service_categories.join(', ') : 'not specified yet'}
 - Service area: ${state.collected.service_area?.location || 'not specified yet'}
 - Availability: ${state.collected.availability?.schedule || 'not specified yet'}
-- Pricing: ${state.collected.pricing?.hourly_rate_max ? '$' + (state.collected.pricing.hourly_rate_min || '?') + '-$' + state.collected.pricing.hourly_rate_max + '/hr' : 'not specified yet'}
+- Pricing: ${formatPricingDisplay(state.collected.pricing).replace('not set', 'not specified yet')}
 - Experience: ${state.collected.credentials?.years_experience ? state.collected.credentials.years_experience + ' years' : 'not specified'}
 - Licensed: ${state.collected.credentials?.licensed === true ? 'Yes' : state.collected.credentials?.licensed === false ? 'No' : 'not specified'}
 - Bio: ${state.collected.bio || 'not added'}
@@ -533,6 +555,7 @@ Instructions:
 - Don't be robotic or formal
 - Use contractions (I'm, you're, what's)
 - Only ask ONE question at a time
+- NEVER ask again for something already in "What we know so far" (e.g. if Pricing is set, do not ask about pricing again; if they said no minimum job size, do not ask again). Move to the next missing topic or to confirmation.
 - If profile readiness is 'minimum' or 'complete', summarize their profile and ask if they want to finalize
 
 Reply ONLY with JSON:
@@ -574,9 +597,7 @@ async function confirmationNode(state) {
     services: collected.service_categories.join(', ') || 'Not specified',
     service_area: collected.service_area?.location || 'Not specified',
     availability: collected.availability?.schedule || 'Not specified',
-    pricing: collected.pricing?.hourly_rate_max 
-      ? `$${collected.pricing.hourly_rate_min || '?'}-$${collected.pricing.hourly_rate_max}/hr`
-      : 'Custom pricing',
+    pricing: formatPricingDisplay(collected.pricing).replace('not set', 'Custom pricing'),
     experience: collected.credentials?.years_experience 
       ? `${collected.credentials.years_experience} years` 
       : 'Not specified',
