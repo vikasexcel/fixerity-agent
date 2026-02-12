@@ -8,6 +8,7 @@ export const sequelize = new Sequelize(
   {
     host: "localhost",
     dialect: "mysql",
+    port:3309,
     logging: false, // turn off SQL logs
   }
 );

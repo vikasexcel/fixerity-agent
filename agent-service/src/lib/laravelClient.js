@@ -16,6 +16,7 @@ import { LARAVEL_API_BASE_URL } from '../config/index.js';
  */
 export async function post(path, body, auth = {}) {
   const url = `${LARAVEL_API_BASE_URL}/${path.replace(/^\//, '')}`;
+  console.log(url);
   const useProviderAuth = auth.providerId != null;
   const payload = {
     ...body,

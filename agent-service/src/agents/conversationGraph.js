@@ -86,7 +86,7 @@ class ServiceCategoryManager {
 
   async fetchFromAPI(userId, accessToken) {
     try {
-      const response = await fetch('http://localhost:8000/api/customer/home', {
+      const response = await fetch('http://116.202.210.102:8002/api/customer/home', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -6,6 +6,7 @@ import { JobCard } from '@/components/buyer/job-card';
 import { JobDetailModal, type JobDetailModalMode } from '@/components/buyer/job-detail-modal';
 import { CreateJobModal } from '@/components/buyer/create-job-modal';
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import { listJobs } from '@/lib/jobs-api';
 import type { Job, Deal } from '@/lib/dummy-data';
@@ -54,13 +55,20 @@ export default function BuyerDashboard() {
               <p className="text-muted-foreground text-sm mt-1">Welcome back, {user?.name}</p>
             </div>
             <div className="flex items-center gap-3">
-              <Button
-                variant="outline"
-                onClick={() => router.push('/buyer/unified-chat')}
-                className="border-border"
-              >
-                Chat to find providers
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    onClick={() => router.push('/buyer/unified-chat')}
+                    className="border-border"
+                  >
+                    Chat to find providers
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>Open chat to find and match with providers</p>
+                </TooltipContent>
+              </Tooltip>
               <Button 
                 onClick={() => setShowCreateModal(true)}
                 className="bg-primary hover:bg-primary/90 text-primary-foreground"
