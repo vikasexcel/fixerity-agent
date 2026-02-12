@@ -1,7 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { PORT } from './config/index.js';
-import { redisClient } from './config/redis.js';
 import cors from 'cors';
 import { sequelize } from './db.js';
 import JobMatchQuote from './models/JobMatchQuote.js';
@@ -10,6 +9,7 @@ import { JobListing } from './models/JobListing.js';
 import { SellerBid } from './models/SellerBid.js';
 import memoryClient from './memory/mem0.js';
 import agentRoutes from './routes/agentRoutes.js';
+import { connectDB } from './primsadb.js';
 dotenv.config();
 
 const app = express();
@@ -58,10 +58,8 @@ app.post('/webhook/provider-registered', (req, res) => {
 
 async function startServer() {
   try {
-    if (!redisClient.isOpen) {
-      await redisClient.connect();
-    }
-    console.log('Redis connection established.');
+    await connectDB();
+    console.log('Prisma connection established.');
     await memoryClient.ping();
     console.log('Mem0 connection established.');
     await sequelize.authenticate();

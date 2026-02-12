@@ -3,9 +3,9 @@ import express from 'express';
 import { runNegotiationAndMatchStream, cleanupJobNegotiations } from '../agents/negotiationOrchestrator.js';
 import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
-import { conversationStore } from '../agents/conversationGraph.js';
-import { buyerSessionManager as sessionManager, sellerSessionManager,handleAgentChat } from '../agents/Unifiedagent.js';
-import { sellerProfileStore } from '../agents/seller/sellerProfileGraph.js';
+import { sessionManager, sellerSessionManager, handleAgentChat } from '../graphs/UnifiedAgent.js';
+import { sessionRepository } from '../../prisma/repositories/sessionRepository.js';
+import { messageService } from '../services/index.js';
 
 const router = express.Router();
 
@@ -285,45 +285,32 @@ router.get('/session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
 
-    // Try buyer session first
-    let session = await sessionManager.getSession(sessionId);
-    let userType = 'buyer';
-    let messages = [];
-
-    if (!session) {
-      // Try seller session
-      session = await sellerSessionManager.getSession(sessionId);
-      userType = 'seller';
-      
-      if (!session) {
-        return res.status(404).json({
-          status: 0,
-          message: 'Session not found',
-          sessionId,
-        });
-      }
-      
-      messages = await sellerProfileStore.getMessages(sessionId);
-    } else {
-      messages = await conversationStore.getMessages(sessionId);
+    const dbSession = await sessionRepository.findById(sessionId);
+    if (!dbSession || !dbSession.isActive) {
+      return res.status(404).json({
+        status: 0,
+        message: 'Session not found',
+        sessionId,
+      });
     }
+
+    const state = dbSession.state || {};
+    const messages = await messageService.getConversationHistory(sessionId, { limit: 50, includeSystem: true });
 
     res.json({
       status: 1,
       message: 'Success',
-      userType,
+      userType: dbSession.userType,
       session: {
-        sessionId: session.sessionId,
-        phase: session.phase,
-        userId: session.buyerId || session.sellerId,
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-        // Buyer-specific
-        job: session.job || null,
-        deals: session.deals || [],
-        // Seller-specific
-        profile: session.profile || null,
-        matchedJobs: session.matchedJobs || [],
+        sessionId: dbSession.id,
+        phase: dbSession.phase,
+        userId: dbSession.userId,
+        created_at: dbSession.createdAt,
+        updated_at: dbSession.updatedAt,
+        job: state.job || null,
+        deals: state.deals || [],
+        profile: state.profile || null,
+        matchedJobs: state.matchedJobs || [],
       },
       messages: messages || [],
     });
