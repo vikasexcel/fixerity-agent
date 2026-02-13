@@ -60,18 +60,6 @@ async function startServer() {
   try {
     await connectDB();
     console.log('Prisma connection established.');
-    await memoryClient.ping();
-    console.log('Mem0 connection established.');
-    await sequelize.authenticate();
-    console.log('Database connection established.');
-    await JobMatchQuote.sync();
-    console.log('Table job_match_quotes ready (created if not exist).');
-    await SellerProfile.sync();
-    console.log('Table seller_profiles ready (created if not exist).');
-    await JobListing.sync();
-    console.log('Table job_listings ready (created if not exist).');
-    await SellerBid.sync();
-    console.log('Table seller_bids ready (created if not exist).');
   } catch (err) {
     console.error('Database error:', err.message);
     process.exitCode = 1;

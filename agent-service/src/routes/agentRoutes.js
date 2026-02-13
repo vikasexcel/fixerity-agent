@@ -1,6 +1,5 @@
 
 import express from 'express';
-import { runNegotiationAndMatchStream, cleanupJobNegotiations } from '../agents/negotiationOrchestrator.js';
 import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
 import { sessionManager, sellerSessionManager, handleAgentChat } from '../graphs/UnifiedAgent.js';
@@ -217,7 +216,7 @@ router.post('/chat', async (req, res) => {
   const send = setupSSE(res);
 
   try {
-    const { userType, sessionId, buyerId, sellerId, accessToken, message } = req.body;
+    const { userType, sessionId, buyerId, sellerId, accessToken, message, resume } = req.body;
 
     // Validate userType
     if (!userType || !['buyer', 'seller'].includes(userType)) {
@@ -240,8 +239,15 @@ router.post('/chat', async (req, res) => {
       return;
     }
 
-    if (!message) {
-      send({ type: 'error', error: 'message is required' });
+    const isResume = userType === 'seller' && resume !== undefined && resume !== null;
+    if (!isResume && !message) {
+      send({ type: 'error', error: 'message is required (or send resume for seller after an interrupt)' });
+      res.end();
+      return;
+    }
+
+    if (isResume && !sessionId) {
+      send({ type: 'error', error: 'sessionId is required when sending resume' });
       res.end();
       return;
     }
@@ -251,13 +257,14 @@ router.post('/chat', async (req, res) => {
       userType,
       sessionId,
       accessToken: String(accessToken),
-      message: String(message),
+      message: message != null ? String(message) : undefined,
     };
 
     if (userType === 'buyer') {
       input.buyerId = String(buyerId);
     } else {
       input.sellerId = String(sellerId);
+      if (isResume) input.resume = resume;
     }
 
     // Handle the chat

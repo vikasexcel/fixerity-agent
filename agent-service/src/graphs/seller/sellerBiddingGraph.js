@@ -24,11 +24,11 @@ const SellerBiddingState = Annotation.Root({
 async function loadDataNode(state) {
   try {
     const [job, profile] = await Promise.all([
-      prisma.jobListing.findUnique({ 
-        where: { id: state.jobId } 
+      prisma.jobListing.findUnique({
+        where: { id: state.jobId }
       }),
-      prisma.sellerProfile.findUnique({ 
-        where: { id: state.sellerId, active: true } 
+      prisma.sellerProfile.findUnique({
+        where: { id: state.sellerId, active: true }
       })
     ]);
 
@@ -41,8 +41,8 @@ async function loadDataNode(state) {
     }
 
     console.log(`[SellerBidding] Loaded job ${state.jobId} and profile for seller ${state.sellerId}`);
-    
-    return { 
+
+    return {
       job: {
         job_id: job.id,
         buyer_id: job.buyerId,
@@ -139,16 +139,16 @@ Reply ONLY with JSON:
     const bid = JSON.parse(content);
 
     console.log(`[SellerBidding] Generated bid: $${bid.quoted_price} for ${bid.quoted_completion_days} days`);
-    
+
     return { generatedBid: bid };
   } catch (error) {
     console.error('[SellerBidding] Error generating bid:', error.message);
-    
+
     // Fallback bid
-    const fallbackPrice = userInput.customPrice || 
-                         (job.budget?.max ? job.budget.max * 0.9 : 100);
-    
-    return { 
+    const fallbackPrice = userInput.customPrice ||
+      (job.budget?.max ? job.budget.max * 0.9 : 100);
+
+    return {
       generatedBid: {
         message: `I'd be happy to help with your ${job.title} project. I have ${profile.credentials?.years_experience || 2} years of experience and can complete this efficiently.`,
         quoted_price: fallbackPrice,
@@ -212,8 +212,8 @@ async function submitBidNode(state) {
     });
 
     console.log(`[SellerBidding] Submitted bid ${bidId}`);
-    
-    return { 
+
+    return {
       submittedBid: {
         bid_id: submittedBid.id,
         job_id: submittedBid.jobId,
@@ -231,8 +231,8 @@ async function submitBidNode(state) {
     };
   } catch (error) {
     console.error('[SellerBidding] Error submitting bid:', error.message);
-    return { 
-      error: 'Failed to submit bid' 
+    return {
+      error: 'Failed to submit bid'
     };
   }
 }
@@ -243,7 +243,7 @@ const workflow = new StateGraph(SellerBiddingState)
   .addNode('load_data', loadDataNode)
   .addNode('generate_bid', generateBidNode)
   .addNode('submit_bid', submitBidNode)
-  
+
   .addEdge(START, 'load_data')
   .addEdge('load_data', 'generate_bid')
   .addEdge('generate_bid', 'submit_bid')
@@ -271,4 +271,68 @@ export async function submitSellerBid(input) {
     bid: result.submittedBid || null,
     error: result.error || null,
   };
+}
+
+/**
+ * Generate bid only (no DB write). Used by seller tool for HITL: show quote, interrupt, then submit on resume.
+ */
+export async function generateBidForJob(sellerId, jobId, customMessage = null, customPrice = null) {
+  const state = {
+    sellerId,
+    jobId,
+    userInput: { customMessage, customPrice },
+  };
+  const afterLoad = await loadDataNode(state);
+  if (afterLoad.error) return { error: afterLoad.error };
+  const afterGenerate = await generateBidNode({ ...state, ...afterLoad });
+  return {
+    job: afterLoad.job,
+    sellerProfile: afterLoad.sellerProfile,
+    generatedBid: afterGenerate.generatedBid,
+  };
+}
+
+/**
+ * Create bid in DB from a pre-generated bid. Used after HITL approval.
+ */
+export async function createBidInDb(sellerId, jobId, generatedBid, sellerProfile) {
+  try {
+    const bidId = `bid_${sellerId}_${jobId}_${Date.now()}`;
+    const submittedBid = await prisma.sellerBid.create({
+      data: {
+        id: bidId,
+        jobId,
+        sellerId,
+        quotedPrice: generatedBid.quoted_price,
+        quotedTimeline: generatedBid.quoted_timeline,
+        quotedCompletionDays: generatedBid.quoted_completion_days,
+        paymentTerms: generatedBid.payment_terms,
+        canMeetDates: generatedBid.can_meet_dates,
+        message: generatedBid.message,
+        sellerCredentials: {
+          licensed: sellerProfile?.credentials?.licensed || false,
+          insured: sellerProfile?.credentials?.insured || false,
+          years_experience: sellerProfile?.credentials?.years_experience || 0,
+          references_available: sellerProfile?.credentials?.references_available || false,
+        },
+        status: 'pending',
+      },
+    });
+    await prisma.jobListing.update({
+      where: { id: jobId },
+      data: { numBidsReceived: { increment: 1 } },
+    });
+    await prisma.sellerProfile.update({
+      where: { id: sellerId },
+      data: { totalBidsSubmitted: { increment: 1 } },
+    });
+    return {
+      bid_id: submittedBid.id,
+      quoted_price: Number(submittedBid.quotedPrice),
+      quoted_completion_days: submittedBid.quotedCompletionDays,
+    };
+  } catch (error) {
+    console.error('[SellerBidding] createBidInDb error:', error.message);
+    return { error: error.message };
+  }
 }

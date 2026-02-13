@@ -8,7 +8,7 @@ if (!connectionString) {
     'DATABASE_URL is not set. Add it to .env (e.g. postgresql://postgres:postgres@localhost:5436/agentdb when using docker-compose postgres).'
   );
 }
-
+console.log("++++++++++",connectionString);
 const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
 

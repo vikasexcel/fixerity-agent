@@ -4,6 +4,7 @@ import { runSellerProfileConversation } from './seller/sellerProfileGraph.js';
 import { findJobsForSeller } from './seller/jobMatchingGraph.js';
 import { submitSellerBid } from './seller/sellerBiddingGraph.js';
 import { getSellerDashboard } from './seller/sellerOrchestrator.js';
+import { invokeSellerAgent, resumeSellerAgent } from './seller/sellerAgentGraph.js';
 import { sessionService, messageService } from '../services/index.js';
 import { sessionRepository } from '../../prisma/repositories/sessionRepository.js';
 import { prisma } from '../primsadb.js';
@@ -362,68 +363,71 @@ async function handleFilterResults(session, message, send) {
   }
 }
 
-/* ---------- SELLER AGENT ---------- */
+/* ---------- SELLER AGENT (Tool-calling + HITL) ---------- */
 
 async function handleSellerAgent(input, send) {
-  const { sellerId, accessToken, message } = input;
+  const { sellerId, accessToken, message, resume } = input;
   let { sessionId } = input;
   if (!sellerId || !accessToken) {
     send({ type: 'error', error: 'Missing sellerId or accessToken' });
     return;
   }
-  if (!message || typeof message !== 'string') {
-    send({ type: 'error', error: 'Message is required' });
-    return;
-  }
+  const sellerIdStr = String(sellerId);
   try {
     let dbSession;
     if (sessionId) {
       dbSession = await sessionRepository.findById(sessionId);
       if (!dbSession || !dbSession.isActive) {
-        const { session } = await sessionService.getOrCreateSession({ userId: sellerId, userType: 'seller', accessToken });
+        const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken });
         dbSession = session;
         sessionId = dbSession.id;
       } else {
         sessionId = dbSession.id;
       }
     } else {
-      const { session } = await sessionService.getOrCreateSession({ userId: sellerId, userType: 'seller', accessToken });
+      const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken });
       dbSession = session;
       sessionId = dbSession.id;
     }
-    const session = buildSellerSessionFromDb(dbSession);
-    send({ type: 'session', sessionId: session.sessionId, phase: session.phase, userType: 'seller' });
-    const sellerIdStr = String(sellerId);
-    const hasProfile = await prisma.sellerProfile.findFirst({ where: { id: sellerIdStr, active: true } });
-    if (!hasProfile && session.phase === 'profile_check') {
-      await sessionService.updatePhase(sessionId, 'profile_creation');
-      session.phase = 'profile_creation';
-      send({ type: 'phase', phase: 'profile_creation' });
+    const config = { configurable: { thread_id: sessionId, sellerId: sellerIdStr } };
+    send({ type: 'session', sessionId, phase: dbSession.phase || 'conversation', userType: 'seller' });
+
+    if (resume !== undefined && resume !== null) {
+      const result = await resumeSellerAgent(config, resume);
+      if (result && result.__interrupt__) {
+        send({ type: 'interrupt', value: result.__interrupt__ });
+        return;
+      }
+      const lastMsg = result?.messages?.[result.messages.length - 1];
+      const text = lastMsg?.content && typeof lastMsg.content === 'string' ? lastMsg.content : (lastMsg?.content?.[0]?.text ?? 'Done.');
+      send({ type: 'message', text });
+      if (lastMsg && lastMsg.getType?.() === 'ai') {
+        await messageService.addAssistantMessage(sessionId, text).catch(() => {});
+      }
+      return;
     }
-    const intent = await intelligentSellerIntent(message, session);
-    console.log(`[SellerAgent] Phase: ${session.phase}, Intent: ${intent}`);
-    switch (intent) {
-      case 'create_profile':
-      case 'provide_profile_info':
-        await handleSellerProfileCreation(session, message, send);
-        break;
-      case 'browse_jobs':
-        await handleJobBrowsing(session, message, send);
-        break;
-      case 'bid_on_job':
-        await handleBidding(session, message, send);
-        break;
-      case 'check_dashboard':
-        await handleDashboard(session, send);
-        break;
-      case 'ask_question':
-        await handleSellerQuestion(session, message, send);
-        break;
-      case 'restart':
-        await handleSellerRestart(session, send);
-        break;
-      default:
-        await handleSellerProfileCreation(session, message, send);
+
+    if (!message || typeof message !== 'string') {
+      send({ type: 'error', error: 'Message is required' });
+      return;
+    }
+    await messageService.addUserMessage(sessionId, message).catch(() => {});
+
+    const result = await invokeSellerAgent(
+      { sellerId: sellerIdStr, sessionId, newMessage: message },
+      config
+    );
+
+    if (result && result.__interrupt__) {
+      send({ type: 'interrupt', value: result.__interrupt__ });
+      return;
+    }
+
+    const lastMsg = result?.messages?.[result.messages.length - 1];
+    const text = lastMsg?.content && typeof lastMsg.content === 'string' ? lastMsg.content : (lastMsg?.content?.[0]?.text ?? "I'm here to help. What would you like to do?");
+    send({ type: 'message', text });
+    if (lastMsg && lastMsg.getType?.() === 'ai') {
+      await messageService.addAssistantMessage(sessionId, text).catch(() => {});
     }
   } catch (error) {
     console.error('[SellerAgent] Error:', error);
