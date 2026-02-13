@@ -1,5 +1,20 @@
 import { negotiationRepository } from "../../prisma/repositories/negotiationRepository.js";
 
+/** Remove function values so state is JSON-serializable for DB (e.g. streamCallback). */
+function omitFunctions(obj) {
+  if (obj === null) return null;
+  if (typeof obj === 'function') return undefined;
+  if (Array.isArray(obj)) return obj.map(omitFunctions);
+  if (typeof obj !== 'object') return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'function') continue;
+    const next = omitFunctions(v);
+    if (next !== undefined) out[k] = next;
+  }
+  return out;
+}
+
 export const negotiationService = {
   /**
    * Start negotiation between buyer and provider
@@ -16,17 +31,19 @@ export const negotiationService = {
       };
     }
 
-    // Create new negotiation
+    // Build state for DB: omit non-serializable fields (e.g. streamCallback)
+    const serializableState = omitFunctions({
+      round: 0,
+      maxRounds: initialState.maxRounds || 1,
+      deadline_ts: initialState.deadline_ts || Date.now() + 3600000, // 1 hour default
+      ...initialState,
+    });
+
     const negotiation = await negotiationRepository.create({
       jobId,
       providerId,
       buyerId,
-      state: {
-        round: 0,
-        maxRounds: initialState.maxRounds || 1,
-        deadline_ts: initialState.deadline_ts || Date.now() + 3600000, // 1 hour default
-        ...initialState,
-      },
+      state: serializableState,
     });
 
     console.log(`[NegotiationService] Started negotiation ${negotiation.id} for job ${jobId}`);
@@ -62,10 +79,10 @@ export const negotiationService = {
       throw new Error(`Negotiation ${negotiationId} not found`);
     }
 
-    const newState = {
+    const newState = omitFunctions({
       ...negotiation.state,
       ...stateUpdates,
-    };
+    });
 
     await negotiationRepository.update(negotiationId, { state: newState });
 

@@ -5,6 +5,10 @@ export const memoryService = {
    * Store buyer's negotiation pattern
    */
   async storeBuyerNegotiation({ buyerId, jobId, negotiationData }) {
+    if (!negotiationData || typeof negotiationData !== 'object') {
+      console.warn('[MemoryService] storeBuyerNegotiation skipped: negotiationData required');
+      return null;
+    }
     const { job, quote, providerId, outcome } = negotiationData;
 
     const content = `Buyer posted ${job.title} job with budget $${job.budget?.min || '?'}-$${job.budget?.max || '?'}. Provider ${providerId} quoted $${quote?.price || '?'} for ${quote?.days || '?'} days. Outcome: ${outcome}.`;
@@ -40,6 +44,10 @@ export const memoryService = {
    * Store provider's negotiation pattern
    */
   async storeProviderNegotiation({ providerId, jobId, negotiationData }) {
+    if (!negotiationData || typeof negotiationData !== 'object') {
+      console.warn('[MemoryService] storeProviderNegotiation skipped: negotiationData required');
+      return null;
+    }
     const { job, quote, buyerId, outcome } = negotiationData;
 
     const content = `Provider quoted $${quote?.price || '?'} for ${job.title}. Job budget was $${job.budget?.max || '?'}. Timeline: ${job.startDate} to ${job.endDate}. Outcome: ${outcome}.`;

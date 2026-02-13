@@ -1,45 +1,22 @@
 import { runMatching } from './negotiationGraph.js';
+import { runProviderMatching } from './providerMatchingGraph.js';
 import { negotiationService, memoryService, cacheService } from '../../services/index.js';
 import { NEGOTIATION_TIME_SECONDS } from '../../config/index.js';
 
 /* ================================================================================
-   NEGOTIATION ORCHESTRATOR - Using Prisma Services
+   NEGOTIATION ORCHESTRATOR - Using Prisma Services (SellerProfile + LLM tools)
    ================================================================================ */
 
-/* -------------------- PROVIDER TOOLS -------------------- */
+/* -------------------- PROVIDER DETAILS (for cache display name fallback) -------------------- */
 
 async function fetchProviderBasicDetails(providerId) {
-  // This would call your actual API
-  // For now, return mock data
+  // Provider list comes from SellerProfile via runProviderMatching; no external API.
+  // Return minimal display info; cache may be populated from provider object in the loop.
   return {
     provider_id: providerId,
-    first_name: 'John',
-    last_name: 'Doe',
+    first_name: 'Provider',
+    last_name: providerId?.slice(0, 8) ?? '',
   };
-}
-
-async function fetchProvidersByCategory(accessToken, serviceCategoryId) {
-  try {
-    const response = await fetch('http://116.202.210.102:8002/api/provider/category', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        access_token: accessToken,
-        service_category_id: serviceCategoryId,
-      })
-    });
-
-    const data = await response.json();
-    
-    if (data.status === 1 && data.providers) {
-      return { providers: data.providers, error: null };
-    }
-    
-    return { providers: [], error: 'No providers found' };
-  } catch (error) {
-    console.error('[FetchProviders] Error:', error.message);
-    return { providers: [], error: error.message };
-  }
 }
 
 /* -------------------- HELPERS -------------------- */
@@ -185,11 +162,16 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     endDate: job.endDate,
     priorities: job.priorities,
     service_category_id,
+    service_category_name: job.service_category_name ?? null,
   };
 
-  const { providers, error } = await fetchProvidersByCategory(buyerAccessToken, service_category_id ?? 0);
+  const { providers, error } = await runProviderMatching({ ...job, service_category_name: job.service_category_name || service_category_name });
   if (error || !providers?.length) {
-    return { deals: [], reply: 'No providers found for this service.' };
+    return { deals: [], reply: error || 'No providers found for this service.' };
+  }
+
+  if (typeof options.streamCallback === 'function') {
+    options.streamCallback({ type: 'providers_fetched', count: providers.length });
   }
 
   // Smart filter providers using memory
@@ -254,12 +236,16 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
       
       // Store rejection in memory
       if (useMemory && buyerId) {
-        await memoryService.storeBuyerNegotiation(buyerId, job.id, {
-          job: jobSnippet,
-          quote: outcome.quote,
-          providerId: String(providerId),
-          conversation: outcome.transcript,
-          outcome: 'rejected_must_have'
+        await memoryService.storeBuyerNegotiation({
+          buyerId,
+          jobId: job.id,
+          negotiationData: {
+            job: jobSnippet,
+            quote: outcome.quote,
+            providerId: String(providerId),
+            conversation: outcome.transcript,
+            outcome: 'rejected_must_have'
+          }
         });
       }
       
@@ -275,19 +261,27 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
 
     // Store successful quote in memory
     if (useMemory && buyerId) {
-      await memoryService.storeBuyerNegotiation(buyerId, job.id, {
-        job: jobSnippet,
-        quote: outcome.quote,
-        providerId: String(providerId),
-        conversation: outcome.transcript,
-        outcome: 'presented'
+      await memoryService.storeBuyerNegotiation({
+        buyerId,
+        jobId: job.id,
+        negotiationData: {
+          job: jobSnippet,
+          quote: outcome.quote,
+          providerId: String(providerId),
+          conversation: outcome.transcript,
+          outcome: 'presented'
+        }
       });
 
-      await memoryService.storeProviderNegotiation(String(providerId), job.id, {
-        job: jobSnippet,
-        quote: outcome.quote,
-        buyerId: buyerId,
-        outcome: 'quoted'
+      await memoryService.storeProviderNegotiation({
+        providerId: String(providerId),
+        jobId: job.id,
+        negotiationData: {
+          job: jobSnippet,
+          quote: outcome.quote,
+          buyerId: buyerId,
+          outcome: 'quoted'
+        }
       });
     }
   }
