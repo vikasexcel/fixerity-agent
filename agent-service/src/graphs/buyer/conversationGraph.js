@@ -1,7 +1,7 @@
 import { Annotation, StateGraph, START, END } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { OPENAI_API_KEY } from '../../config/index.js';
+import { OPENAI_API_KEY, LARAVEL_API_BASE_URL } from '../../config/index.js';
 import { MemorySaver } from '@langchain/langgraph';
 import { sessionService, messageService, cacheService } from '../../services/index.js';
 import prisma from '../../prisma/client.js';
@@ -15,7 +15,7 @@ import prisma from '../../prisma/client.js';
 class ServiceCategoryManager {
   async fetchFromAPI(userId, accessToken) {
     try {
-      const response = await fetch('http://116.202.210.102:8002/api/customer/home', {
+      const response = await fetch(`${LARAVEL_API_BASE_URL}/customer/home`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -36,10 +36,51 @@ class ServiceCategoryManager {
     }
   }
 
+  /**
+   * Fetch service categories for sellers/providers (on-demand/get-service-list).
+   * Returns same shape as customer API: { service_category_id, service_category_name }.
+   */
+  async fetchProviderFromAPI(providerId, accessToken) {
+    try {
+      const response = await fetch(`${LARAVEL_API_BASE_URL}/on-demand/get-service-list`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider_id: providerId,
+          access_token: accessToken,
+        })
+      });
+
+      const data = await response.json();
+      if (data.status === 1 && data.service_category_list) {
+        return data.service_category_list.map((s) => ({
+          service_category_id: s.service_cat_id ?? s.service_category_id,
+          service_category_name: s.service_cat_name ?? s.service_category_name,
+        }));
+      }
+      return null;
+    } catch (error) {
+      console.error('[ServiceCategory] Provider API fetch error:', error.message);
+      return null;
+    }
+  }
+
   async getCategoriesOrFetch(userId, accessToken) {
     return await cacheService.getServiceCategories(
       async () => await this.fetchFromAPI(userId, accessToken),
       accessToken
+    );
+  }
+
+  /**
+   * Get provider/seller service categories (for seller profile flow).
+   * Uses on-demand/get-service-list and caches under service_categories:provider.
+   */
+  async getProviderCategoriesOrFetch(providerId, accessToken) {
+    return await cacheService.getOrFetch(
+      'service_categories:provider',
+      async () => await this.fetchProviderFromAPI(providerId, accessToken),
+      86400
     );
   }
 
@@ -241,17 +282,6 @@ async function extractInfoNode(state) {
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  // Always fetch categories from the service categories API so the LLM can match the user request correctly
-  const categories = await serviceCategoryManager.getCategoriesOrFetch(
-    state.buyerId,
-    state.accessToken
-  );
-  if (!categories || categories.length === 0) {
-    console.warn('[Extraction] No service categories from API; matching will be skipped until categories are available.');
-  }
-
-  const categoryList = categories?.map(c => `${c.service_category_id}: ${c.service_category_name}`).join(', ') || 'None available';
-
   const prompt = `
 You are an information extractor for a service marketplace.
 
@@ -260,12 +290,10 @@ User message: "${state.currentMessage}"
 Currently collected:
 ${JSON.stringify(state.collected, null, 2)}
 
-Available service categories (id: name): ${categoryList}
-
-Extract ANY new information from the user's message. Be thorough but accurate.
+Extract ANY new information from the user's message. Do NOT use any external category list—use only what the user explicitly said or implied.
 
 Instructions:
-1. For service type: Choose the category that best matches the user's request from the list above (use the exact category name for service_category_name)
+1. For service type: Extract the type of service they need from their words (e.g. "cleaning", "home cleaning", "plumbing", "deep clean"). Use a clear, normalised phrase as service_category_name. If they confirm or correct (e.g. "yes", "actually I need X"), use that.
 2. For title: Extract if user mentions a specific job title
 3. For description: Extract any detailed description of the work needed
 4. For budget: Extract numbers mentioned (e.g., "around 200" → max: 200, "100-200" → min: 100, max: 200)
@@ -278,7 +306,7 @@ Today's date: ${new Date().toISOString().split('T')[0]}
 Reply ONLY with JSON:
 {
   "extracted": {
-    "service_category_name": "<matched category name or null>",
+    "service_category_name": "<service they need, e.g. home cleaning, plumbing, or null>",
     "title": "<job title if mentioned or null>",
     "description": "<any description details or null>",
     "budget": {
@@ -312,25 +340,11 @@ Reply ONLY with JSON:
     const extraction = JSON.parse(content);
 
     console.log(`[Extraction] Found new info: ${extraction.found_new_info}`);
-
-    if (extraction.extracted.service_category_name && categories) {
-      const matchResult = await serviceCategoryManager.findCategory(
-        extraction.extracted.service_category_name,
-        categories,
-        llm
-      );
-      
-      if (matchResult?.matched && matchResult.category_id) {
-        extraction.extracted.service_category_id = matchResult.category_id;
-        extraction.extracted.service_category_name = matchResult.category_name;
-        console.log(`[Extraction] Matched category: ${matchResult.category_name} (ID: ${matchResult.category_id})`);
-      }
+    if (extraction.extracted.service_category_name) {
+      console.log(`[Extraction] Service from conversation: ${extraction.extracted.service_category_name}`);
     }
 
-    return { 
-      extraction,
-      serviceCategories: categories,
-    };
+    return { extraction };
   } catch (error) {
     console.error('[Extraction] Error:', error.message);
     return { 
@@ -353,11 +367,8 @@ function updateCollectedNode(state) {
   const extracted = state.extraction.extracted;
   const updates = {};
 
-  if (extracted.service_category_id) {
-    updates.service_category_id = extracted.service_category_id;
-  }
   if (extracted.service_category_name) {
-    updates.service_category_name = extracted.service_category_name;
+    updates.service_category_name = extracted.service_category_name.trim();
   }
   if (extracted.title) {
     updates.title = extracted.title;
@@ -405,8 +416,8 @@ function checkCompletenessNode(state) {
   const required = [];
   const optional = [];
 
-  // REQUIRED FIELDS
-  if (!collected.service_category_id) {
+  // REQUIRED FIELDS (service is explicit from conversation, no API)
+  if (!collected.service_category_name) {
     required.push('service_category');
   }
   if (!collected.budget?.max) {
@@ -478,7 +489,7 @@ async function generateResponseNode(state) {
   } else if (state.jobReadiness === 'minimum' || state.jobReadiness === 'complete') {
     responseGoal = 'Present a summary of what will be searched and ask if they want to add more details or proceed now';
   } else if (state.requiredMissing.includes('service_category')) {
-    responseGoal = 'Ask what type of service they need (be helpful, suggest categories if they seem unsure)';
+    responseGoal = 'Ask what type of service they need. If they already mentioned something, confirm: "Is this the service you need? If different, tell me."';
   } else if (state.requiredMissing.includes('budget_max')) {
     responseGoal = 'Ask about their budget for this service';
   } else if (state.requiredMissing.includes('start_date')) {
@@ -488,9 +499,6 @@ async function generateResponseNode(state) {
   } else {
     responseGoal = 'Ask if they have any other details to add';
   }
-
-  const availableCategories = state.serviceCategories?.slice(0, 10)
-    .map(c => c.service_category_name).join(', ') || '';
 
   const prompt = `
 You are a friendly assistant helping someone find a service provider.
@@ -515,7 +523,7 @@ Optional fields missing: ${state.optionalMissing.join(', ') || 'none'}
 
 Your goal: ${responseGoal}
 
-Some available services: ${availableCategories}...
+${state.collected.service_category_name ? `Current service they said: ${state.collected.service_category_name}. When confirming, ask: "Is this the service you need? If different, tell me."` : ''}
 
 Instructions:
 - Be conversational and friendly (like texting a helpful friend)
@@ -653,9 +661,10 @@ async function buildJobNode(state) {
   const payload = {
     id: jobId,
     buyerId: state.buyerId,
-    serviceCategoryId: collected.service_category_id,
-    title: collected.title || `${collected.service_category_name} Service`,
-    description: collected.description || `Looking for ${collected.service_category_name} service`,
+    serviceCategoryId: collected.service_category_id ?? null,
+    serviceCategoryName: collected.service_category_name || null,
+    title: collected.title || `${collected.service_category_name || 'Service'} request`,
+    description: collected.description || (collected.service_category_name ? `Looking for ${collected.service_category_name}` : 'Service request'),
     budget: { min: budgetMin, max: budgetMax },
     startDate: collected.startDate || 'ASAP',
     endDate: collected.endDate || 'flexible',
@@ -676,6 +685,7 @@ async function buildJobNode(state) {
       title: created.title,
       description: created.description,
       service_category_id: created.serviceCategoryId,
+      service_category_name: created.serviceCategoryName,
       budget: created.budget,
       startDate: created.startDate,
       endDate: created.endDate,
@@ -828,7 +838,6 @@ export async function runConversation(input) {
     collected: result.collected,
     requiredMissing: result.requiredMissing,
     optionalMissing: result.optionalMissing,
-    serviceCategories: result.serviceCategories,
     jobReadiness: result.jobReadiness,
     job: result.job,
   });

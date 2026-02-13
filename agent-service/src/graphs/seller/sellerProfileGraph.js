@@ -3,8 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../../config/index.js';
 import { MemorySaver } from '@langchain/langgraph';
-import { sessionService, messageService, cacheService } from '../../services/index.js';
-import { serviceCategoryManager } from '../buyer/conversationGraph.js';
+import { sessionService, messageService } from '../../services/index.js';
 import prisma from '../../prisma/client.js';
 
 /* ================================================================================
@@ -186,17 +185,6 @@ async function extractInfoNode(state) {
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  // Always fetch categories from the service categories API so the LLM can match the user request correctly
-  const categories = await serviceCategoryManager.getCategoriesOrFetch(
-    state.sellerId,
-    state.accessToken
-  );
-  if (!categories || categories.length === 0) {
-    console.warn('[SellerExtraction] No service categories from API; matching will be skipped until categories are available.');
-  }
-
-  const categoryList = categories?.map(c => `${c.service_category_id}: ${c.service_category_name}`).join(', ') || 'None available';
-
   const prompt = `
 You are an information extractor for a service provider profile creation.
 
@@ -205,12 +193,11 @@ User message: "${state.currentMessage}"
 Currently collected:
 ${JSON.stringify(state.collected, null, 2)}
 
-Available service categories (id: name): ${categoryList}
-
 Extract ANY new information from the user's message about their service provider profile.
+Do NOT fetch or assume categories from any list—use only what the user explicitly said or implied.
 
 Instructions:
-1. For services: Extract all services they offer (can be multiple). Choose only from the available categories list above (use exact category names in service_categories array).
+1. For services: Extract all services they offer from their words (can be multiple). Examples: "my service is home cleaning" → service_categories: ["home cleaning"]; "I do cleaning" → ["cleaning"]; "deep cleaning and carpet" → ["deep cleaning", "carpet"]. Always return an array of strings. Use clear normalised names (e.g. "home cleaning", "plumbing"). If they confirm or correct (e.g. "yes", "also add X"), update accordingly.
 2. For service area: Extract city, neighborhood, or "radius from location"
 3. For availability: Extract days/times (e.g., "evenings 5-9PM", "weekends", "Mon-Fri mornings")
 4. For pricing: Extract hourly rates or fixed prices per service type. Use a consistent key for the service (e.g. "house cleaning"). Do NOT return empty "pricing" or "fixed_prices" if the user only confirms existing info (e.g. "fixed price", "that's right")—only add new numbers or leave pricing out of "extracted" to avoid overwriting.
@@ -224,7 +211,7 @@ Today's date: ${new Date().toISOString().split('T')[0]}
 Reply ONLY with JSON:
 {
   "extracted": {
-    "service_categories": ["<matched category names>"],
+    "service_categories": ["<service name 1>", "<service name 2>"],
     "service_area": {
       "location": "<city/neighborhood or null>",
       "radius_miles": <number or null>
@@ -272,29 +259,12 @@ Reply ONLY with JSON:
     const extraction = JSON.parse(content);
 
     console.log(`[SellerExtraction] Found new info: ${extraction.found_new_info}`);
-
-    // Match service categories
-    if (extraction.extracted.service_categories && extraction.extracted.service_categories.length > 0 && categories) {
-      const matchedIds = [];
-      for (const serviceName of extraction.extracted.service_categories) {
-        const matchResult = await serviceCategoryManager.findCategory(
-          serviceName,
-          categories,
-          llm
-        );
-        
-        if (matchResult?.matched && matchResult.category_id) {
-          matchedIds.push(matchResult.category_id);
-          console.log(`[SellerExtraction] Matched: ${matchResult.category_name} (ID: ${matchResult.category_id})`);
-        }
-      }
-      extraction.extracted.service_category_ids = matchedIds;
+    if (extraction.extracted.service_categories?.length) {
+      console.log(`[SellerExtraction] Services from conversation: ${extraction.extracted.service_categories.join(', ')}`);
     }
+    console.log('[SellerExtraction] Agent extracted values:', JSON.stringify(extraction.extracted, null, 2));
 
-    return { 
-      extraction,
-      serviceCategories: categories,
-    };
+    return { extraction };
   } catch (error) {
     console.error('[SellerExtraction] Error:', error.message);
     return { 
@@ -317,10 +287,17 @@ function updateCollectedNode(state) {
   const extracted = state.extraction.extracted;
   const updates = {};
 
-  if (extracted.service_category_ids && extracted.service_category_ids.length > 0) {
+  const rawServices = extracted.service_categories;
+  const serviceList = Array.isArray(rawServices)
+    ? rawServices
+    : typeof rawServices === 'string' && rawServices.trim()
+      ? [rawServices.trim()]
+      : [];
+  if (serviceList.length > 0) {
+    const names = serviceList.map(s => (typeof s === 'string' ? s.trim() : String(s))).filter(Boolean);
     updates.service_categories = [...new Set([
-      ...state.collected.service_categories,
-      ...extracted.service_category_ids
+      ...(state.collected.service_categories || []),
+      ...names
     ])];
   }
 
@@ -366,7 +343,110 @@ function updateCollectedNode(state) {
     updates.bio = extracted.bio;
   }
 
+  console.log('[SellerCollected] Updates applied to collected state:', JSON.stringify(updates, null, 2));
   return { collected: updates };
+}
+
+/* -------------------- SYNC PROFILE TO DB NODE -------------------- */
+/** Persist collected data (especially service_category_names) to DB so the column is never empty once user has said their services. */
+async function syncProfileToDbNode(state) {
+  const collected = state.collected;
+  const sellerId = state.sellerId;
+
+  if (!collected.service_categories?.length) {
+    console.log('[SyncProfile] Skip: no service_categories in collected', {
+      sellerId,
+      hasServiceCategories: false,
+      collectedKeys: Object.keys(collected).filter((k) => collected[k] != null),
+    });
+    return {};
+  }
+
+  console.log('[SyncProfile] Starting sync to DB', {
+    sellerId,
+    service_category_names: collected.service_categories,
+    service_area: collected.service_area?.location ?? null,
+    has_availability: !!collected.availability?.schedule,
+    has_pricing: !!(collected.pricing?.hourly_rate_max || Object.keys(collected.pricing?.fixed_prices || {}).length),
+  });
+  console.log('[SyncProfile] Full collected payload being written to seller_profile:', JSON.stringify({
+    service_categories: collected.service_categories,
+    service_area: collected.service_area,
+    availability: collected.availability,
+    credentials: collected.credentials,
+    pricing: collected.pricing,
+    preferences: collected.preferences,
+    bio: collected.bio ? `${collected.bio.slice(0, 100)}${collected.bio.length > 100 ? '...' : ''}` : null,
+  }, null, 2));
+
+  try {
+    let score = 0;
+    if (collected.service_categories.length > 0) score += 20;
+    if (collected.service_area?.location) score += 15;
+    if (collected.availability?.schedule) score += 15;
+    if (collected.pricing?.hourly_rate_max || Object.keys(collected.pricing?.fixed_prices || {}).length > 0) score += 15;
+    if (collected.credentials?.years_experience) score += 10;
+    if (collected.credentials?.licensed !== null) score += 5;
+    if (collected.credentials?.references_available) score += 5;
+    if (collected.bio) score += 10;
+    if (collected.preferences?.min_job_size_hours != null) score += 5;
+
+    const existing = await prisma.sellerProfile.findUnique({
+      where: { id: sellerId },
+      select: { id: true, serviceCategoryNames: true },
+    });
+
+    const result = await prisma.sellerProfile.upsert({
+      where: { id: sellerId },
+      create: {
+        id: sellerId,
+        serviceCategoryNames: collected.service_categories,
+        serviceArea: collected.service_area,
+        availability: collected.availability,
+        credentials: collected.credentials,
+        pricing: collected.pricing,
+        preferences: collected.preferences,
+        bio: collected.bio,
+        profileCompletenessScore: score,
+        active: true,
+      },
+      update: {
+        serviceCategoryNames: collected.service_categories,
+        serviceArea: collected.service_area,
+        availability: collected.availability,
+        credentials: collected.credentials,
+        pricing: collected.pricing,
+        preferences: collected.preferences,
+        bio: collected.bio,
+        profileCompletenessScore: score,
+      },
+    });
+
+    console.log('[SyncProfile] Success', {
+      sellerId,
+      action: existing ? 'update' : 'create',
+      service_category_names: result.serviceCategoryNames,
+      profile_completeness_score: result.profileCompletenessScore,
+      previous_services: existing?.serviceCategoryNames ?? [],
+    });
+    console.log('[SyncProfile] DB row after upsert:', JSON.stringify({
+      serviceCategoryNames: result.serviceCategoryNames,
+      serviceArea: result.serviceArea,
+      availability: result.availability,
+      credentials: result.credentials,
+      pricing: result.pricing,
+      preferences: result.preferences,
+      bio: result.bio ? `${String(result.bio).slice(0, 80)}...` : null,
+      profileCompletenessScore: result.profileCompletenessScore,
+    }, null, 2));
+  } catch (err) {
+    console.error('[SyncProfile] Error', {
+      sellerId,
+      message: err.message,
+      stack: err.stack,
+    });
+  }
+  return {};
 }
 
 /* -------------------- CHECK COMPLETENESS NODE (LLM-based, dynamic) -------------------- */
@@ -473,14 +553,16 @@ async function generateResponseNode(state) {
 
   let responseGoal = '';
   
-  if (state.intent?.intent === 'cancel') {
+  if (state.error) {
+    responseGoal = `Politely explain: ${state.error} Then ask for the missing information.`;
+  } else if (state.intent?.intent === 'cancel') {
     responseGoal = 'Acknowledge cancellation and offer to start fresh';
   } else if (state.intent?.intent === 'ask_question') {
     responseGoal = 'Answer their question helpfully';
   } else if (state.profileReadiness === 'minimum' || state.profileReadiness === 'complete') {
     responseGoal = 'Present a summary of their profile and ask if they want to add more details or finalize';
   } else if (state.requiredMissing.includes('service_categories')) {
-    responseGoal = 'Ask what services they offer';
+    responseGoal = 'Ask what services they offer. If they already mentioned something, confirm: "Is this the service you want to offer? If you offer another one, tell me your services."';
   } else if (state.requiredMissing.includes('service_area')) {
     responseGoal = 'Ask what area they serve';
   } else if (state.requiredMissing.includes('availability')) {
@@ -490,9 +572,6 @@ async function generateResponseNode(state) {
   } else {
     responseGoal = 'Ask if they have any other details to add';
   }
-
-  const availableCategories = state.serviceCategories?.slice(0, 10)
-    .map(c => c.service_category_name).join(', ') || '';
 
   const prompt = `
 You are a friendly assistant helping a service provider create their profile.
@@ -517,7 +596,7 @@ Optional fields missing: ${state.optionalMissing.join(', ') || 'none'}
 
 Your goal: ${responseGoal}
 
-Some available services: ${availableCategories}...
+${state.collected.service_categories?.length ? `Current services they said: ${state.collected.service_categories.join(', ')}. When confirming, ask: "Is this the service you want to offer? If you offer another one, provide your services."` : ''}
 
 Instructions:
 - Be conversational and friendly (like helping a friend)
@@ -722,6 +801,16 @@ async function buildProfileNode(state) {
   const collected = state.collected;
   
   try {
+    // Do not persist profile with empty service_categories
+    if (!collected.service_categories?.length) {
+      console.warn('[BuildProfile] Skipping save: service_categories is empty');
+      return {
+        error: 'Please specify at least one service you offer before we save your profile.',
+        phase: 'collection',
+        requiredMissing: ['service_categories', ...(state.requiredMissing || [])].filter((v, i, a) => a.indexOf(v) === i),
+      };
+    }
+
     // Calculate completeness score
     let score = 0;
     if (collected.service_categories.length > 0) score += 20;
@@ -734,12 +823,23 @@ async function buildProfileNode(state) {
     if (collected.bio) score += 10;
     if (collected.preferences?.min_job_size_hours != null) score += 5;
 
-    // Create or update profile in database
+    console.log('[BuildProfile] Collected values being written to seller_profile:', JSON.stringify({
+      service_categories: collected.service_categories,
+      service_area: collected.service_area,
+      availability: collected.availability,
+      credentials: collected.credentials,
+      pricing: collected.pricing,
+      preferences: collected.preferences,
+      bio: collected.bio ? `${collected.bio.slice(0, 100)}${collected.bio.length > 100 ? '...' : ''}` : null,
+      score,
+    }, null, 2));
+
+    // Create or update profile in database (service categories stored as explicit names)
     const profile = await prisma.sellerProfile.upsert({
       where: { id: state.sellerId },
       create: {
         id: state.sellerId,
-        serviceCategories: collected.service_categories,
+        serviceCategoryNames: collected.service_categories,
         serviceArea: collected.service_area,
         availability: collected.availability,
         credentials: collected.credentials,
@@ -750,7 +850,7 @@ async function buildProfileNode(state) {
         active: true,
       },
       update: {
-        serviceCategories: collected.service_categories,
+        serviceCategoryNames: collected.service_categories,
         serviceArea: collected.service_area,
         availability: collected.availability,
         credentials: collected.credentials,
@@ -763,11 +863,22 @@ async function buildProfileNode(state) {
     });
 
     console.log(`[BuildProfile] Upserted profile for seller ${state.sellerId}`);
-    
+    console.log('[BuildProfile] DB profile after upsert:', JSON.stringify({
+      seller_id: profile.id,
+      serviceCategoryNames: profile.serviceCategoryNames,
+      serviceArea: profile.serviceArea,
+      availability: profile.availability,
+      credentials: profile.credentials,
+      pricing: profile.pricing,
+      preferences: profile.preferences,
+      bio: profile.bio ? `${String(profile.bio).slice(0, 80)}...` : null,
+      profileCompletenessScore: profile.profileCompletenessScore,
+    }, null, 2));
+
     return { 
       profile: {
         seller_id: profile.id,
-        service_categories: profile.serviceCategories,
+        service_category_names: profile.serviceCategoryNames,
         service_area: profile.serviceArea,
         availability: profile.availability,
         credentials: profile.credentials,
@@ -828,6 +939,7 @@ const workflow = new StateGraph(SellerProfileState)
   .addNode('detect_intent', detectIntentNode)
   .addNode('extract_info', extractInfoNode)
   .addNode('update_collected', updateCollectedNode)
+  .addNode('sync_profile_to_db', syncProfileToDbNode)
   .addNode('check_completeness', checkCompletenessNode)
   .addNode('generate_response', generateResponseNode)
   .addNode('profile_guidance', profileGuidanceNode)
@@ -843,7 +955,8 @@ const workflow = new StateGraph(SellerProfileState)
   })
   
   .addEdge('extract_info', 'update_collected')
-  .addEdge('update_collected', 'check_completeness')
+  .addEdge('update_collected', 'sync_profile_to_db')
+  .addEdge('sync_profile_to_db', 'check_completeness')
   
   .addConditionalEdges('check_completeness', routeAfterCompleteness, {
     'profile_guidance': 'profile_guidance',
@@ -938,7 +1051,6 @@ export async function runSellerProfileConversation(input) {
     collected: result.collected,
     requiredMissing: result.requiredMissing,
     optionalMissing: result.optionalMissing,
-    serviceCategories: result.serviceCategories,
     profileReadiness: result.profileReadiness,
     profile: result.profile,
   });

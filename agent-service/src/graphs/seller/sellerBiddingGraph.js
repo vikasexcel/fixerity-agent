@@ -58,7 +58,7 @@ async function loadDataNode(state) {
       },
       sellerProfile: {
         seller_id: profile.id,
-        service_categories: profile.serviceCategories,
+        service_category_names: profile.serviceCategoryNames ?? [],
         credentials: profile.credentials,
         pricing: profile.pricing,
         availability: profile.availability,

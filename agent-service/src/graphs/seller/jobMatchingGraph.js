@@ -37,7 +37,7 @@ async function loadSellerProfileNode(state) {
     return { 
       sellerProfile: {
         seller_id: profile.id,
-        service_categories: profile.serviceCategories,
+        service_category_names: profile.serviceCategoryNames ?? [],
         service_area: profile.serviceArea,
         availability: profile.availability,
         credentials: profile.credentials,
@@ -58,42 +58,44 @@ async function loadSellerProfileNode(state) {
 
 /* -------------------- FIND MATCHING JOBS NODE -------------------- */
 
+/** Match job service name to seller's service names (explicit names, no API IDs). */
+function jobMatchesSellerServices(jobServiceName, sellerServiceNames) {
+  if (!jobServiceName || !sellerServiceNames?.length) return false;
+  const jobNorm = jobServiceName.trim().toLowerCase();
+  if (!jobNorm) return false;
+  return sellerServiceNames.some((name) => {
+    const n = (name || '').trim().toLowerCase();
+    if (!n) return false;
+    return n === jobNorm || n.includes(jobNorm) || jobNorm.includes(n);
+  });
+}
+
 async function findMatchingJobsNode(state) {
   const profile = state.sellerProfile;
-  
-  if (!profile || !profile.service_categories || profile.service_categories.length === 0) {
+  const sellerNames = profile?.service_category_names ?? [];
+
+  if (!profile || sellerNames.length === 0) {
     return { matchedJobs: [] };
   }
 
   try {
-    // Build where clause
-    const whereClause = {
-      status: 'open',
-      serviceCategoryId: {
-        in: profile.service_categories
-      }
-    };
-
-    // Optional: Filter by budget if seller has pricing
-    if (profile.pricing?.hourly_rate_min) {
-      // Only show jobs where max budget >= seller's minimum rate
-      // Note: We need to use raw query for JSON field filtering
-    }
-
-    // Fetch matching jobs
     const jobs = await prisma.jobListing.findMany({
-      where: whereClause,
+      where: { status: 'open' },
       orderBy: { createdAt: 'desc' },
-      take: 50,
+      take: 100,
     });
 
-    console.log(`[JobMatching] Found ${jobs.length} potential matches`);
-    
-    // Convert to plain objects
-    const matchedJobs = jobs.map(j => ({
+    const matched = jobs.filter((j) =>
+      jobMatchesSellerServices(j.serviceCategoryName ?? '', sellerNames)
+    ).slice(0, 50);
+
+    console.log(`[JobMatching] Found ${matched.length} potential matches (of ${jobs.length} open jobs)`);
+
+    const matchedJobs = matched.map((j) => ({
       job_id: j.id,
       buyer_id: j.buyerId,
       service_category_id: j.serviceCategoryId,
+      service_category_name: j.serviceCategoryName,
       title: j.title,
       description: j.description,
       budget: j.budget,
@@ -105,13 +107,11 @@ async function findMatchingJobsNode(state) {
       num_bids_received: j.numBidsReceived,
       created_at: j.createdAt,
     }));
-    
-    return { 
-      matchedJobs 
-    };
+
+    return { matchedJobs };
   } catch (error) {
     console.error('[JobMatching] Error finding jobs:', error.message);
-    return { 
+    return {
       matchedJobs: [],
       error: 'Failed to find matching jobs',
     };

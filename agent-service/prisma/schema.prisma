@@ -24,7 +24,8 @@ model User {
 model JobListing {
   id                   String    @id @default(uuid()) @map("job_id")
   buyerId              String    @map("buyer_id")
-  serviceCategoryId    Int       @map("service_category_id")
+  serviceCategoryId    Int?      @map("service_category_id")
+  serviceCategoryName  String?   @map("service_category_name")
   title                String
   description          String?
   budget               Json      // { min: 100, max: 200 }
@@ -46,7 +47,7 @@ model JobListing {
 
 model SellerProfile {
   id                       String   @id @default(uuid()) @map("seller_id")
-  serviceCategories        Int[]    @map("service_categories")
+  serviceCategoryNames     String[] @default([]) @map("service_category_names")
   serviceArea              Json?    @map("service_area")
   availability             Json?
   credentials              Json?
@@ -105,7 +106,7 @@ model ConversationSession {
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
   messages        ConversationMessage[]
-  
+
   @@index([userId, userType])
   @@index([userId, isActive])
   @@map("conversation_sessions")

@@ -1,4 +1,4 @@
-import { runConversation, serviceCategoryManager } from './buyer/conversationGraph.js';
+import { runConversation } from './buyer/conversationGraph.js';
 import { runNegotiationAndMatchStream, updateNegotiationOutcome } from './buyer/negotiationOrchestrator.js';
 import { runSellerProfileConversation } from './seller/sellerProfileGraph.js';
 import { findJobsForSeller } from './seller/jobMatchingGraph.js';
@@ -111,7 +111,6 @@ async function handleBuyerAgent(input, send) {
     }
     const session = buildBuyerSessionFromDb(dbSession);
     send({ type: 'session', sessionId: session.sessionId, phase: session.phase, userType: 'buyer' });
-    serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken).catch(console.error);
     const intent = await intelligentBuyerIntentCheck(message, session);
     console.log(`[BuyerAgent] Phase: ${session.phase}, Intent: ${intent}`);
     switch (intent) {

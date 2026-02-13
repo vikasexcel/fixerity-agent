@@ -154,9 +154,10 @@ async function enhanceJobPriorities(job, buyerId) {
 /* -------------------- MAIN ORCHESTRATOR -------------------- */
 
 export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) {
-  const service_category_id = Number(job?.service_category_id);
-  if (!service_category_id) {
-    return { deals: [], reply: 'Job must have service_category_id.' };
+  const service_category_id = job?.service_category_id != null ? Number(job.service_category_id) : null;
+  const service_category_name = job?.service_category_name || null;
+  if (!service_category_id && !service_category_name) {
+    return { deals: [], reply: 'Job must have a service (category name or ID).' };
   }
 
   const buyerId = job.buyer_id || options.buyerId;
@@ -186,9 +187,9 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     service_category_id,
   };
 
-  const { providers, error } = await fetchProvidersByCategory(buyerAccessToken, service_category_id);
+  const { providers, error } = await fetchProvidersByCategory(buyerAccessToken, service_category_id ?? 0);
   if (error || !providers?.length) {
-    return { deals: [], reply: 'No providers found.' };
+    return { deals: [], reply: 'No providers found for this service.' };
   }
 
   // Smart filter providers using memory

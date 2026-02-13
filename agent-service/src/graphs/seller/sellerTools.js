@@ -19,15 +19,30 @@ const bidIdSchema = z.string().describe('Bid ID.');
 
 export const getSellerProfileTool = tool(
   async ({ sellerId }) => {
+    console.log('[get_seller_profile] Tool called with sellerId:', sellerId);
     const profile = await prisma.sellerProfile.findFirst({
       where: { id: sellerId, active: true },
     });
-    if (!profile) return JSON.stringify({ found: false, message: 'No active profile found. Create one first.' });
+    if (!profile) {
+      console.log('[get_seller_profile] No active profile found for sellerId:', sellerId);
+      return JSON.stringify({ found: false, message: 'No active profile found. Create one first.' });
+    }
+    console.log('[get_seller_profile] Returning profile from DB:', JSON.stringify({
+      seller_id: profile.id,
+      serviceCategoryNames: profile.serviceCategoryNames,
+      service_area: profile.serviceArea,
+      availability: profile.availability,
+      credentials: profile.credentials,
+      pricing: profile.pricing,
+      preferences: profile.preferences,
+      bio: profile.bio ? `${String(profile.bio).slice(0, 80)}...` : null,
+      profileCompletenessScore: profile.profileCompletenessScore,
+    }, null, 2));
     return JSON.stringify({
       found: true,
       profile: {
         seller_id: profile.id,
-        service_categories: profile.serviceCategories,
+        service_category_names: profile.serviceCategoryNames ?? [],
         service_area: profile.serviceArea,
         availability: profile.availability,
         credentials: profile.credentials,
@@ -57,8 +72,32 @@ function parseOptionalJson(value) {
   }
 }
 
+function parseServiceCategoryNames(value) {
+  if (value == null || value === '') return undefined;
+  if (Array.isArray(value)) return value.every((x) => typeof x === 'string') ? value : value.map(String);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map((x) => (typeof x === 'string' ? x : String(x))) : undefined;
+    } catch {
+      return [value.trim()].filter(Boolean);
+    }
+  }
+  return undefined;
+}
+
 export const updateSellerProfileTool = tool(
-  async ({ sellerId, pricing, availability, bio, service_area, credentials, preferences }) => {
+  async ({ sellerId, pricing, availability, bio, service_area, service_category_names, credentials, preferences }) => {
+    console.log('[update_seller_profile] Tool called with raw args:', {
+      sellerId,
+      pricing: typeof pricing === 'string' ? pricing.slice(0, 200) : pricing,
+      availability: typeof availability === 'string' ? availability.slice(0, 200) : availability,
+      bio: bio != null ? `${String(bio).slice(0, 100)}${String(bio).length > 100 ? '...' : ''}` : null,
+      service_area: typeof service_area === 'string' ? service_area.slice(0, 200) : service_area,
+      service_category_names,
+      credentials: typeof credentials === 'string' ? credentials.slice(0, 200) : credentials,
+      preferences: typeof preferences === 'string' ? preferences.slice(0, 200) : preferences,
+    });
     const updateData = {};
     const pricingObj = parseOptionalJson(pricing);
     if (pricingObj != null) updateData.pricing = pricingObj;
@@ -67,36 +106,52 @@ export const updateSellerProfileTool = tool(
     if (bio != null && bio !== '') updateData.bio = String(bio);
     const serviceAreaObj = parseOptionalJson(service_area);
     if (serviceAreaObj != null) updateData.serviceArea = serviceAreaObj;
+    const serviceNames = parseServiceCategoryNames(service_category_names);
+    if (serviceNames != null) updateData.serviceCategoryNames = serviceNames;
     const credentialsObj = parseOptionalJson(credentials);
     if (credentialsObj != null) updateData.credentials = credentialsObj;
     const preferencesObj = parseOptionalJson(preferences);
     if (preferencesObj != null) updateData.preferences = preferencesObj;
 
     if (Object.keys(updateData).length === 0) {
+      console.log('[update_seller_profile] No valid fields to update, skipping.');
       return JSON.stringify({ success: false, message: 'No valid fields to update.' });
     }
+
+    console.log('[update_seller_profile] Parsed updateData being written to seller_profile:', JSON.stringify(updateData, null, 2));
 
     const profile = await prisma.sellerProfile.upsert({
       where: { id: sellerId },
       create: {
         id: sellerId,
         active: true,
-        serviceCategories: updateData.serviceCategories ?? [],
+        serviceCategoryNames: updateData.serviceCategoryNames ?? [],
         ...updateData,
       },
       update: updateData,
     });
+    console.log('[update_seller_profile] Upsert success. Profile after update:', JSON.stringify({
+      seller_id: profile.id,
+      serviceCategoryNames: profile.serviceCategoryNames,
+      serviceArea: profile.serviceArea,
+      availability: profile.availability,
+      credentials: profile.credentials,
+      pricing: profile.pricing,
+      preferences: profile.preferences,
+      bio: profile.bio ? `${String(profile.bio).slice(0, 80)}...` : null,
+    }, null, 2));
     return JSON.stringify({ success: true, message: 'Profile updated.', seller_id: profile.id });
   },
   {
     name: 'update_seller_profile',
-    description: 'Update the seller profile (partial update). Pass only the fields to change (pricing, availability, bio, service_area, credentials, preferences).',
+    description: 'Update the seller profile (partial update). Pass only the fields to change (pricing, availability, bio, service_area, service_category_names, credentials, preferences).',
     schema: z.object({
       sellerId: sellerIdSchema,
       pricing: z.string().optional().describe('JSON string for pricing object, e.g. {"hourly_rate_min":50,"hourly_rate_max":100}'),
       availability: z.string().optional().describe('JSON string for availability object'),
       bio: z.string().optional(),
       service_area: z.string().optional().describe('JSON string for service area object'),
+      service_category_names: z.string().optional().describe('JSON array of service names, e.g. ["home cleaning", "deep cleaning"]'),
       credentials: z.string().optional().describe('JSON string for credentials object'),
       preferences: z.string().optional().describe('JSON string for preferences object'),
     }),
