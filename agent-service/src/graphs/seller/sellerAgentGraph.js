@@ -13,24 +13,38 @@ import { sellerTools } from './sellerTools.js';
 
 const checkpointer = new MemorySaver();
 
-function buildSystemPrompt(sellerId) {
-  return `You are a helpful assistant for service providers (sellers) on a marketplace platform.
+function buildSystemPrompt(sellerId, profileSessionScoped = false) {
+  let base = `You are a helpful assistant for service providers (sellers) on a marketplace platform.
 Your capabilities: view and update seller profile, browse matched jobs, get job details, list and manage bids, submit bids, withdraw bids, and view the dashboard.
 
-Important: The current seller's ID is "${sellerId}". When calling any tool that requires sellerId, always use this exact value: "${sellerId}".
+Important: The current seller's ID is "${sellerId}". When calling any tool that requires sellerId, always use this exact value: "${sellerId}".`;
+
+  if (profileSessionScoped) {
+    base += `
+
+CRITICAL - This chat has its own session-scoped profile. Do NOT call get_seller_profile.
+- Treat this as if no profile exists in the database for this conversation.
+- Do NOT show or summarize any existing profile from the database.
+- Guide them through creating a NEW profile by collecting: services offered, location/service area, availability, pricing, credentials (license, references).
+- Be conversational and ask one thing at a time. Use update_seller_profile to save once you have collected enough info.`;
+  }
+
+  base += `
 
 Use the provided tools to fulfill the user's requests. Be concise and friendly. After using a tool, summarize the result for the user in a natural way.`;
+  return base;
 }
 
 async function agentNode(state, config) {
   const sellerId = config?.configurable?.sellerId;
+  const profileSessionScoped = config?.configurable?.profileSessionScoped === true;
   const llm = new ChatOpenAI({
     model: 'gpt-4o-mini',
     temperature: 0.3,
     openAIApiKey: OPENAI_API_KEY,
   });
   const llmWithTools = llm.bindTools(sellerTools);
-  const systemPrompt = buildSystemPrompt(sellerId || '');
+  const systemPrompt = buildSystemPrompt(sellerId || '', profileSessionScoped);
   const messages = [new SystemMessage(systemPrompt), ...state.messages];
   const response = await llmWithTools.invoke(messages);
   return { messages: [response] };

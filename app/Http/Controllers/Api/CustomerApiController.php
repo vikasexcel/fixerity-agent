@@ -137,6 +137,15 @@ class CustomerApiController extends Controller
             ->groupBy('other_service_sub_category.service_cat_id')
             ->orderBy('service_category.display_order', 'asc')->get();
 
+        // Fallback: if no "other" services (e.g. house cleaning), return main service_category list so agents/UI get categories (e.g. id 19)
+        if ($services->isEmpty()) {
+            $services = ServiceCategory::query()->select('service_category.id as service_category_id',
+                'service_category.'.$lang_prefix . 'name as service_category_name',
+                DB::raw("(CASE WHEN service_category.icon_name != '' THEN (concat('$service_category_icon_url','/',service_category.icon_name,'?v=0.3')) ELSE '' END) as service_category_icon"))
+                ->where('service_category.status', 1)
+                ->orderBy('service_category.display_order', 'asc')->get();
+        }
+
 //        return $services->count();
 //        $homepage_slider = HomePageBanner::query()->select('home_page_banner.service_id as service_category_id',
 //            'service_category.'.$lang_prefix . 'name as service_category_name',

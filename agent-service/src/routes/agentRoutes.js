@@ -216,7 +216,7 @@ router.post('/chat', async (req, res) => {
   const send = setupSSE(res);
 
   try {
-    const { userType, sessionId, buyerId, sellerId, accessToken, message, resume } = req.body;
+    const { userType, sessionId, buyerId, sellerId, accessToken, message, resume, forceNewSession } = req.body;
 
     // Validate userType
     if (!userType || !['buyer', 'seller'].includes(userType)) {
@@ -256,6 +256,7 @@ router.post('/chat', async (req, res) => {
     const input = {
       userType,
       sessionId,
+      forceNewSession: forceNewSession === true || forceNewSession === 'true',
       accessToken: String(accessToken),
       message: message != null ? String(message) : undefined,
     };

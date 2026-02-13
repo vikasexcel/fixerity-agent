@@ -4,29 +4,35 @@ import { messageRepository } from "../../prisma/repositories/messageRepository.j
 export const sessionService = {
   /**
    * Create or resume session for user
-   * - If active session exists, return it
-   * - Otherwise, create new session
+   * - If forceNew is true: always create new session (for explicit "new chat")
+   * - If active session exists and forceNew is false: return it
+   * - Otherwise: create new session
    */
-  async getOrCreateSession({ userId, userType, accessToken }) {
-    // Check for existing active session
-    const existingSession = await sessionRepository.findMostRecentActive(userId, userType);
-
-    if (existingSession) {
-      console.log(`[SessionService] Resuming session ${existingSession.id} for ${userType} ${userId}`);
-      return {
-        session: existingSession,
-        isNew: false,
-        resumedFrom: existingSession.phase,
-      };
+  async getOrCreateSession({ userId, userType, accessToken, forceNew = false }) {
+    // When user explicitly starts a new chat, always create
+    if (!forceNew) {
+      const existingSession = await sessionRepository.findMostRecentActive(userId, userType);
+      if (existingSession) {
+        console.log(`[SessionService] Resuming session ${existingSession.id} for ${userType} ${userId}`);
+        return {
+          session: existingSession,
+          isNew: false,
+          resumedFrom: existingSession.phase,
+        };
+      }
     }
 
     // Create new session
+    const initialState = this._getInitialState(userType);
+    if (forceNew && userType === 'seller') {
+      initialState.profileSessionScoped = true;
+    }
     const newSession = await sessionRepository.create({
       userId,
       userType,
       accessToken,
       phase: userType === 'buyer' ? 'conversation' : 'profile_check',
-      state: this._getInitialState(userType),
+      state: initialState,
     });
 
     console.log(`[SessionService] Created new session ${newSession.id} for ${userType} ${userId}`);

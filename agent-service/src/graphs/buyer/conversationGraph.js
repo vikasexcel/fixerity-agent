@@ -241,15 +241,16 @@ async function extractInfoNode(state) {
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  let categories = state.serviceCategories;
+  // Always fetch categories from the service categories API so the LLM can match the user request correctly
+  const categories = await serviceCategoryManager.getCategoriesOrFetch(
+    state.buyerId,
+    state.accessToken
+  );
   if (!categories || categories.length === 0) {
-    categories = await serviceCategoryManager.getCategoriesOrFetch(
-      state.buyerId,
-      state.accessToken
-    );
+    console.warn('[Extraction] No service categories from API; matching will be skipped until categories are available.');
   }
 
-  const categoryList = categories?.map(c => c.service_category_name).join(', ') || 'Loading...';
+  const categoryList = categories?.map(c => `${c.service_category_id}: ${c.service_category_name}`).join(', ') || 'None available';
 
   const prompt = `
 You are an information extractor for a service marketplace.
@@ -259,12 +260,12 @@ User message: "${state.currentMessage}"
 Currently collected:
 ${JSON.stringify(state.collected, null, 2)}
 
-Available service categories: ${categoryList}
+Available service categories (id: name): ${categoryList}
 
 Extract ANY new information from the user's message. Be thorough but accurate.
 
 Instructions:
-1. For service type: Match to one of the available categories if possible
+1. For service type: Choose the category that best matches the user's request from the list above (use the exact category name for service_category_name)
 2. For title: Extract if user mentions a specific job title
 3. For description: Extract any detailed description of the work needed
 4. For budget: Extract numbers mentioned (e.g., "around 200" → max: 200, "100-200" → min: 100, max: 200)

@@ -83,7 +83,7 @@ export async function handleAgentChat(input, send) {
 /* ---------- BUYER AGENT ---------- */
 
 async function handleBuyerAgent(input, send) {
-  const { buyerId, accessToken, message } = input;
+  const { buyerId, accessToken, message, forceNewSession } = input;
   let { sessionId } = input;
   if (!buyerId || !accessToken) {
     send({ type: 'error', error: 'Missing buyerId or accessToken' });
@@ -98,14 +98,14 @@ async function handleBuyerAgent(input, send) {
     if (sessionId) {
       dbSession = await sessionRepository.findById(sessionId);
       if (!dbSession || !dbSession.isActive) {
-        const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken });
+        const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken, forceNew: !!forceNewSession });
         dbSession = session;
         sessionId = dbSession.id;
       } else {
         sessionId = dbSession.id;
       }
     } else {
-      const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken });
+      const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken, forceNew: !!forceNewSession });
       dbSession = session;
       sessionId = dbSession.id;
     }
@@ -366,7 +366,7 @@ async function handleFilterResults(session, message, send) {
 /* ---------- SELLER AGENT (Tool-calling + HITL) ---------- */
 
 async function handleSellerAgent(input, send) {
-  const { sellerId, accessToken, message, resume } = input;
+  const { sellerId, accessToken, message, resume, forceNewSession } = input;
   let { sessionId } = input;
   if (!sellerId || !accessToken) {
     send({ type: 'error', error: 'Missing sellerId or accessToken' });
@@ -378,18 +378,19 @@ async function handleSellerAgent(input, send) {
     if (sessionId) {
       dbSession = await sessionRepository.findById(sessionId);
       if (!dbSession || !dbSession.isActive) {
-        const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken });
+        const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
         dbSession = session;
         sessionId = dbSession.id;
       } else {
         sessionId = dbSession.id;
       }
     } else {
-      const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken });
+      const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
       dbSession = session;
       sessionId = dbSession.id;
     }
-    const config = { configurable: { thread_id: sessionId, sellerId: sellerIdStr } };
+    const profileSessionScoped = !!(forceNewSession || dbSession?.state?.profileSessionScoped);
+    const config = { configurable: { thread_id: sessionId, sellerId: sellerIdStr, profileSessionScoped } };
     send({ type: 'session', sessionId, phase: dbSession.phase || 'conversation', userType: 'seller' });
 
     if (resume !== undefined && resume !== null) {

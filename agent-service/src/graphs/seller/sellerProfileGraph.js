@@ -129,14 +129,15 @@ Current collected data:
 - Licensed: ${state.collected.credentials?.licensed ?? 'not set'}
 
 Classify the intent as ONE of:
-1. "create_profile" - User wants to create a service provider profile
-2. "provide_info" - User is answering a question / providing profile details
-3. "ask_question" - User is asking about something
-4. "modify_info" - User wants to change previously provided information
-5. "confirm" - User is confirming/agreeing to finalize profile
-6. "add_more_info" - User wants to add more details before finalizing
-7. "cancel" - User wants to cancel or start over
-8. "other" - Doesn't fit any category
+1. "request_profile_guidance" - User explicitly asks for HELP creating a profile, what to include, or how to get found online (e.g. "help me create my profile so people can find me", "can you help me create my profile", "how do I make my profile good", "what should I put in my profile"). PREFER this over "create_profile" when they ask for help or guidance.
+2. "create_profile" - User wants to create a service provider profile (but is not explicitly asking for guidance or "how to get found")
+3. "provide_info" - User is answering a question / providing profile details
+4. "ask_question" - User is asking about something
+5. "modify_info" - User wants to change previously provided information
+6. "confirm" - User is confirming/agreeing to finalize profile
+7. "add_more_info" - User wants to add more details before finalizing
+8. "cancel" - User wants to cancel or start over
+9. "other" - Doesn't fit any category
 
 Reply ONLY with JSON:
 {
@@ -185,15 +186,16 @@ async function extractInfoNode(state) {
     openAIApiKey: OPENAI_API_KEY,
   });
 
-  let categories = state.serviceCategories;
+  // Always fetch categories from the service categories API so the LLM can match the user request correctly
+  const categories = await serviceCategoryManager.getCategoriesOrFetch(
+    state.sellerId,
+    state.accessToken
+  );
   if (!categories || categories.length === 0) {
-    categories = await serviceCategoryManager.getCategoriesOrFetch(
-      state.sellerId,
-      state.accessToken
-    );
+    console.warn('[SellerExtraction] No service categories from API; matching will be skipped until categories are available.');
   }
 
-  const categoryList = categories?.map(c => c.service_category_name).join(', ') || 'Loading...';
+  const categoryList = categories?.map(c => `${c.service_category_id}: ${c.service_category_name}`).join(', ') || 'None available';
 
   const prompt = `
 You are an information extractor for a service provider profile creation.
@@ -203,12 +205,12 @@ User message: "${state.currentMessage}"
 Currently collected:
 ${JSON.stringify(state.collected, null, 2)}
 
-Available service categories: ${categoryList}
+Available service categories (id: name): ${categoryList}
 
 Extract ANY new information from the user's message about their service provider profile.
 
 Instructions:
-1. For services: Extract all services they offer (can be multiple). Match to available categories.
+1. For services: Extract all services they offer (can be multiple). Choose only from the available categories list above (use exact category names in service_categories array).
 2. For service area: Extract city, neighborhood, or "radius from location"
 3. For availability: Extract days/times (e.g., "evenings 5-9PM", "weekends", "Mon-Fri mornings")
 4. For pricing: Extract hourly rates or fixed prices per service type. Use a consistent key for the service (e.g. "house cleaning"). Do NOT return empty "pricing" or "fixed_prices" if the user only confirms existing info (e.g. "fixed price", "that's right")—only add new numbers or leave pricing out of "extracted" to avoid overwriting.
@@ -520,6 +522,7 @@ Some available services: ${availableCategories}...
 Instructions:
 - Be conversational and friendly (like helping a friend)
 - Keep responses SHORT (2-3 sentences max)
+${state.collected.credentials?.licensed === false && state.collected.credentials?.references_available === true ? '- If relevant, briefly reassure that many clients value references and a clear profile.' : ''}
 - Don't be robotic or formal
 - Use contractions (I'm, you're, what's)
 - Only ask ONE question at a time
@@ -553,6 +556,85 @@ Reply ONLY with JSON:
         message: "I'd love to help you create your service provider profile! What services do you offer?",
         action: 'asking_services'
       } 
+    };
+  }
+}
+
+/* -------------------- PROFILE GUIDANCE NODE -------------------- */
+
+const FOLLOW_UP_BY_FIELD = {
+  service_categories: 'What services do you offer?',
+  service_area: 'What area do you serve?',
+  availability: 'When are you available (days and times)?',
+  pricing: "What's your rate or pricing?",
+};
+
+async function profileGuidanceNode(state) {
+  const llm = new ChatOpenAI({
+    model: 'gpt-4o-mini',
+    temperature: 0.6,
+    openAIApiKey: OPENAI_API_KEY,
+  });
+
+  const collected = state.collected;
+  const requiredMissing = state.requiredMissing || [];
+  const firstMissing = requiredMissing[0];
+  const followUpQuestion = firstMissing ? (FOLLOW_UP_BY_FIELD[firstMissing] || `What ${firstMissing.replace(/_/g, ' ')}?`) : 'Would you like to add anything else, or shall we finalize your profile?';
+
+  const servicesList = collected.service_categories?.length > 0 ? collected.service_categories.join(', ') : null;
+  const availabilityText = collected.availability?.schedule || null;
+
+  const prompt = `You are a friendly assistant helping a service provider create a profile so they can get found by clients online.
+
+The user said: "${state.currentMessage}"
+
+What we already know about them:
+- Services: ${servicesList || 'not specified yet'}
+- Availability: ${availabilityText || 'not specified yet'}
+- Licensed: ${collected.credentials?.licensed === true ? 'Yes' : collected.credentials?.licensed === false ? 'No' : 'not specified'}
+- References available: ${collected.credentials?.references_available === true ? 'Yes' : 'not specified'}
+
+Write ONE combined message (plain text, use newlines and simple bullets) that includes the following IN ORDER:
+
+1. **Reassurance** (if they have no license but have references): In 1-2 sentences, say that many people hire based on trust and references; good references and a clear profile can get them clients. If they didn't mention license/references, skip or keep this very brief.
+
+2. **What their profile should include**: A short list: clear headline, short intro, services offered, availability, trust signals, location, contact method.
+
+3. **Ready-to-use example profile**: A copy-pasteable block with a headline, a short intro (use [Your Name] and [city] as placeholders), bullet lists for services and availability, a trust line (e.g. references available, punctual), and a closing line. Personalize the example using what they said: if they mentioned house cleaning, use "House Cleaning" or "Evening & Weekend House Cleaning"; if they said evenings/weekends, show "Weekday evenings" and "Weekends" in availability; if they have references, include "References available."
+
+4. **Tips to get found online**: 1-3 short tips (e.g. be specific, use clear keywords, keep availability clear).
+
+5. **Why specificity matters**: One sentence: being specific (headline, services, area, availability) helps our system match them to the right clients.
+
+6. **Follow-up**: End with exactly this line (use this wording): "To build your profile with me, ${followUpQuestion}"
+
+Do NOT wrap the message in JSON or markdown code blocks. Output only the raw message the user will see, with newlines and bullets as needed.`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Output only the plain-text message for the user. No JSON, no code fences.'),
+      new HumanMessage(prompt),
+    ]);
+
+    let message = (res.content && typeof res.content === 'string') ? res.content.trim() : '';
+    message = message.replace(/^```[\w]*\n?/g, '').replace(/\n?```$/g, '');
+    if (!message) throw new Error('Empty guidance response');
+
+    console.log('[SellerProfileGuidance] Generated guidance response');
+    return {
+      response: {
+        message,
+        action: 'profile_guidance',
+      },
+    };
+  } catch (error) {
+    console.error('[SellerProfileGuidance] Error:', error.message);
+    const fallback = `I'd love to help you create a great profile. The more specific you are about your services, area, and availability, the better we can match you with clients. To build your profile with me, ${followUpQuestion}`;
+    return {
+      response: {
+        message: fallback,
+        action: 'profile_guidance',
+      },
     };
   }
 }
@@ -731,10 +813,12 @@ function routeAfterIntent(state) {
 }
 
 function routeAfterCompleteness(state) {
+  if (state.intent?.intent === 'request_profile_guidance') {
+    return 'profile_guidance';
+  }
   if (state.profileReadiness === 'minimum' || state.profileReadiness === 'complete') {
     return 'confirmation';
   }
-  
   return 'generate_response';
 }
 
@@ -746,6 +830,7 @@ const workflow = new StateGraph(SellerProfileState)
   .addNode('update_collected', updateCollectedNode)
   .addNode('check_completeness', checkCompletenessNode)
   .addNode('generate_response', generateResponseNode)
+  .addNode('profile_guidance', profileGuidanceNode)
   .addNode('confirmation', confirmationNode)
   .addNode('build_profile', buildProfileNode)
   
@@ -761,10 +846,12 @@ const workflow = new StateGraph(SellerProfileState)
   .addEdge('update_collected', 'check_completeness')
   
   .addConditionalEdges('check_completeness', routeAfterCompleteness, {
+    'profile_guidance': 'profile_guidance',
     'confirmation': 'confirmation',
     'generate_response': 'generate_response',
   })
   
+  .addEdge('profile_guidance', END)
   .addEdge('confirmation', 'generate_response')
   .addEdge('build_profile', 'generate_response')
   .addEdge('generate_response', END);

@@ -191,6 +191,7 @@ export async function unifiedAgentChatStream(
   message: string,
   callbacks: {
     sessionId?: string | null;
+    forceNewSession?: boolean;
     onEvent: (event: UnifiedChatStreamEvent) => void;
     signal?: AbortSignal;
   }
@@ -208,6 +209,7 @@ export async function unifiedAgentChatStream(
     body.sellerId = userId;
   }
   if (callbacks.sessionId) body.sessionId = callbacks.sessionId;
+  if (callbacks.forceNewSession) body.forceNewSession = 'true';
 
   const res = await fetch(url, {
     method: 'POST',
