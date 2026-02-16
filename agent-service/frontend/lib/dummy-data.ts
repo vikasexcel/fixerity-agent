@@ -84,6 +84,8 @@ export interface Deal {
   };
   /** Provider's AI response message (stored from negotiate-and-match). */
   negotiationMessage?: string;
+  /** Rank from seller match API (1 = best match). */
+  rank?: number;
 }
 
 // Dummy Users

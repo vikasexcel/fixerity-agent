@@ -120,9 +120,14 @@ export function ServiceAgentRunner({ serviceCategoryId, subCategoryId, onClose }
           {!loading && !error && deals.length > 0 && (
             <div className="space-y-4">
               <div className="flex items-center justify-between mb-4">
-                <p className="text-sm text-muted-foreground">
-                  Found {deals.length} matching {deals.length === 1 ? 'job' : 'jobs'}
-                </p>
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    Top {deals.length} matching {deals.length === 1 ? 'job' : 'jobs'} (rank order)
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Full job details below; best match first.
+                  </p>
+                </div>
                 <Button onClick={runAgent} variant="outline" size="sm">
                   Refresh
                 </Button>

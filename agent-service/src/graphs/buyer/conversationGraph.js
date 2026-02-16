@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY, LARAVEL_API_BASE_URL } from '../../config/index.js';
 import { MemorySaver } from '@langchain/langgraph';
-import { sessionService, messageService, cacheService } from '../../services/index.js';
+import { sessionService, messageService, cacheService, getCustomerUserDetails, upsertJobEmbedding } from '../../services/index.js';
 import prisma from '../../prisma/client.js';
 
 /* ================================================================================
@@ -658,9 +658,16 @@ async function buildJobNode(state) {
   const budgetMax = collected.budget?.max;
   const budgetMin = collected.budget?.min ?? (budgetMax != null ? Math.floor(budgetMax * 0.5) : 100);
 
+  // Fetch buyer contact details once (cached per buyer_id)
+  const buyerDetails = await getCustomerUserDetails(state.buyerId);
+
   const payload = {
     id: jobId,
     buyerId: state.buyerId,
+    firstName: buyerDetails?.firstName ?? null,
+    lastName: buyerDetails?.lastName ?? null,
+    email: buyerDetails?.email ?? null,
+    contactNumber: buyerDetails?.contactNumber ?? null,
     serviceCategoryId: collected.service_category_id ?? null,
     serviceCategoryName: collected.service_category_name || null,
     title: collected.title || `${collected.service_category_name || 'Service'} request`,
@@ -695,6 +702,12 @@ async function buildJobNode(state) {
     };
 
     console.log(`[BuildJob] Created job: ${jobId}`);
+
+    // Generate and store embedding for this job (async, non-blocking)
+    upsertJobEmbedding(created.id, created).catch((err) => {
+      console.error('[BuildJob] Job embedding failed:', err.message);
+    });
+
     return { job, phase: 'complete' };
   } catch (error) {
     console.error('[BuildJob] JobListing.create failed:', error.message);

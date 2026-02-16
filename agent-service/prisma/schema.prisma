@@ -24,6 +24,10 @@ model User {
 model JobListing {
   id                   String    @id @default(uuid()) @map("job_id")
   buyerId              String    @map("buyer_id")
+  firstName            String?   @map("first_name")
+  lastName             String?   @map("last_name")
+  email                String?   @map("email")
+  contactNumber        String?   @map("contact_number")
   serviceCategoryId    Int?      @map("service_category_id")
   serviceCategoryName  String?   @map("service_category_name")
   title                String
@@ -41,6 +45,7 @@ model JobListing {
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
   bids                 SellerBid[]
+  embeddings           JobsEmbedding[]
 
   @@map("job_listings")
 }
@@ -214,4 +219,17 @@ model SellerEmbedding {
 
   @@index([sellerId])
   @@map("seller_embeddings")
+}
+
+model JobsEmbedding {
+  id             String   @id @default(uuid()) @map("embedding_id")
+  jobId          String   @map("job_id")
+  embedding      Unsupported("vector(1536)")
+  searchableText String   @map("searchable_text")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  job            JobListing @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@map("job_embeddings")
 }

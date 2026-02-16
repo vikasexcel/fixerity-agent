@@ -4,4 +4,7 @@ export { cacheService } from './cacheService.js';
 export { negotiationService } from './negotiationService.js';
 export { memoryService } from './memoryService.js';
 export { getProviderBasicDetails } from './providerDetailsService.js';
-export { rerankCandidatesForJob } from './rerankService.js';
+export { getCustomerUserDetails } from './customerUserDetailsService.js';
+export { upsertJobEmbedding, searchJobsByQuery } from './jobEmbeddingService.js';
+export { rerankCandidatesForJob, rerankJobsForSeller } from './rerankService.js';
+export { buildOptimizedQueryForSellerProfile } from './sellerQueryService.js';

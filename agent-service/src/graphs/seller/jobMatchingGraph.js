@@ -1,8 +1,12 @@
 import { Annotation, StateGraph, START, END } from '@langchain/langgraph';
 import prisma from '../../prisma/client.js';
+import { buildOptimizedQueryForSellerProfile } from '../../services/sellerQueryService.js';
+import { searchJobsByQuery } from '../../services/jobEmbeddingService.js';
+import { rerankJobsForSeller } from '../../services/rerankService.js';
 
 /* ================================================================================
    JOB MATCHING GRAPH - Find Jobs That Match Seller Profile
+   Flow: profile -> LLM query -> JobsEmbedding search -> rerank with LLM -> top 10 full job details
    ================================================================================ */
 
 const JobMatchingState = Annotation.Root({
@@ -28,7 +32,7 @@ async function loadSellerProfileNode(state) {
 
     const profile = profiles[0];
     if (!profile) {
-      return { 
+      return {
         error: 'No active profile found. Please create a profile first.',
         matchedJobs: [],
       };
@@ -39,8 +43,8 @@ async function loadSellerProfileNode(state) {
       : (profile.serviceCategoryNames ?? []);
 
     console.log(`[JobMatching] Loaded ${profiles.length} profile(s) for seller ${state.sellerId}`);
-    
-    return { 
+
+    return {
       sellerProfile: {
         seller_id: profile.id,
         service_category_names: allServiceNames,
@@ -51,69 +55,96 @@ async function loadSellerProfileNode(state) {
         preferences: profile.preferences,
         bio: profile.bio,
         profile_completeness_score: profile.profileCompletenessScore,
-      }
+      },
     };
   } catch (error) {
     console.error('[JobMatching] Error loading profile:', error.message);
-    return { 
+    return {
       error: 'Failed to load profile',
       matchedJobs: [],
     };
   }
 }
 
-/* -------------------- FIND MATCHING JOBS NODE -------------------- */
+/* -------------------- FIND MATCHING JOBS NODE (semantic search via JobsEmbedding) -------------------- */
 
-/** Match job service name to seller's service names (explicit names, no API IDs). */
-function jobMatchesSellerServices(jobServiceName, sellerServiceNames) {
-  if (!jobServiceName || !sellerServiceNames?.length) return false;
-  const jobNorm = jobServiceName.trim().toLowerCase();
-  if (!jobNorm) return false;
-  return sellerServiceNames.some((name) => {
-    const n = (name || '').trim().toLowerCase();
-    if (!n) return false;
-    return n === jobNorm || n.includes(jobNorm) || jobNorm.includes(n);
-  });
+function jobToMatchShape(j) {
+  const budget = j.budget && typeof j.budget === 'object' ? j.budget : { min: null, max: null };
+  return {
+    job_id: j.id,
+    buyer_id: j.buyerId,
+    service_category_id: j.serviceCategoryId,
+    service_category_name: j.serviceCategoryName,
+    title: j.title,
+    description: j.description,
+    budget,
+    start_date: j.startDate,
+    end_date: j.endDate,
+    location: j.location,
+    priorities: j.priorities,
+    status: j.status,
+    num_bids_received: j.numBidsReceived,
+    created_at: j.createdAt,
+    specific_requirements: j.specificRequirements,
+  };
 }
 
 async function findMatchingJobsNode(state) {
   const profile = state.sellerProfile;
-  const sellerNames = profile?.service_category_names ?? [];
 
-  if (!profile || sellerNames.length === 0) {
+  if (!profile) {
     return { matchedJobs: [] };
   }
 
   try {
+    // 1) Build search query from seller profile (LLM)
+    const query = await buildOptimizedQueryForSellerProfile(profile);
+    if (!query || !String(query).trim()) {
+      console.log('[JobMatching] Empty query, skipping search');
+      return { matchedJobs: [] };
+    }
+
+    // 2) Semantic search on JobsEmbedding (open jobs only)
+    const searchLimit = 40;
+    const embeddingResults = await searchJobsByQuery(query, searchLimit);
+    if (!embeddingResults || embeddingResults.length === 0) {
+      console.log('[JobMatching] No jobs from embedding search');
+      return { matchedJobs: [] };
+    }
+
+    const jobIds = embeddingResults.map((r) => r.job_id).filter(Boolean);
+    if (jobIds.length === 0) return { matchedJobs: [] };
+
+    // 3) Rerank with LLM -> top 10 job_ids
+    const candidates = embeddingResults.map((r) => ({
+      job_id: r.job_id,
+      searchable_text: r.searchable_text,
+    }));
+    const rankedJobIds = await rerankJobsForSeller(profile, candidates, 10);
+
+    if (!rankedJobIds || rankedJobIds.length === 0) {
+      return { matchedJobs: [] };
+    }
+
+    // 4) Fetch full job details for ranked IDs (preserve order)
     const jobs = await prisma.jobListing.findMany({
-      where: { status: 'open' },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
+      where: { id: { in: rankedJobIds }, status: 'open' },
+    });
+    const byId = new Map(jobs.map((j) => [j.id, j]));
+    const ordered = rankedJobIds.map((id) => byId.get(id)).filter(Boolean);
+
+    // 5) Build matchedJobs with rank and matchScore (100 for #1, decreasing)
+    const matchedJobs = ordered.map((j, index) => {
+      const rank = index + 1;
+      const matchScore = Math.max(10, 100 - (rank - 1) * 8); // 100, 92, 84, ...
+      return {
+        ...jobToMatchShape(j),
+        rank,
+        matchScore,
+      };
     });
 
-    const matched = jobs.filter((j) =>
-      jobMatchesSellerServices(j.serviceCategoryName ?? '', sellerNames)
-    ).slice(0, 50);
-
-    console.log(`[JobMatching] Found ${matched.length} potential matches (of ${jobs.length} open jobs)`);
-
-    const matchedJobs = matched.map((j) => ({
-      job_id: j.id,
-      buyer_id: j.buyerId,
-      service_category_id: j.serviceCategoryId,
-      service_category_name: j.serviceCategoryName,
-      title: j.title,
-      description: j.description,
-      budget: j.budget,
-      start_date: j.startDate,
-      end_date: j.endDate,
-      location: j.location,
-      priorities: j.priorities,
-      status: j.status,
-      num_bids_received: j.numBidsReceived,
-      created_at: j.createdAt,
-    }));
-
+    console.log(`[JobMatching] Semantic search + rerank: ${embeddingResults.length} candidates -> top ${matchedJobs.length} jobs`);
     return { matchedJobs };
   } catch (error) {
     console.error('[JobMatching] Error finding jobs:', error.message);
@@ -124,72 +155,15 @@ async function findMatchingJobsNode(state) {
   }
 }
 
-/* -------------------- RANK JOBS NODE -------------------- */
+/* -------------------- RANK JOBS NODE (pass-through; ranking done in find node) -------------------- */
 
 async function rankJobsNode(state) {
-  const profile = state.sellerProfile;
   const jobs = state.matchedJobs;
-
   if (!jobs || jobs.length === 0) {
     return { rankedJobs: [] };
   }
-
-  // Score each job
-  const scoredJobs = jobs.map(job => {
-    let score = 0;
-
-    // Service category match (base score)
-    score += 20;
-
-    // Budget compatibility
-    if (job.budget?.max && profile.pricing?.hourly_rate_max) {
-      const budgetRatio = job.budget.max / profile.pricing.hourly_rate_max;
-      if (budgetRatio >= 1) {
-        score += 20; // Budget is within seller's range
-      } else if (budgetRatio >= 0.8) {
-        score += 10; // Close to range
-      }
-    } else {
-      score += 10; // No pricing conflict
-    }
-
-    // Location match (if available)
-    if (profile.service_area?.location && job.location?.address) {
-      // Simplified: check if strings match
-      // TODO: Implement proper geolocation distance calculation
-      if (job.location.address.toLowerCase().includes(profile.service_area.location.toLowerCase())) {
-        score += 15;
-      }
-    } else {
-      score += 5; // Partial score if no location data
-    }
-
-    // Urgency bonus (newer jobs)
-    const ageInDays = (Date.now() - new Date(job.created_at).getTime()) / (1000 * 60 * 60 * 24);
-    if (ageInDays < 1) score += 15;
-    else if (ageInDays < 3) score += 10;
-    else if (ageInDays < 7) score += 5;
-
-    // Availability match (simplified)
-    if (profile.availability?.weekday_evenings && job.start_date?.includes('evening')) {
-      score += 10;
-    }
-    if (profile.availability?.weekends && (job.start_date?.includes('saturday') || job.start_date?.includes('sunday'))) {
-      score += 10;
-    }
-
-    return {
-      ...job,
-      matchScore: Math.min(score, 100), // Cap at 100
-    };
-  });
-
-  // Sort by score descending
-  const ranked = scoredJobs.sort((a, b) => b.matchScore - a.matchScore);
-
-  console.log(`[JobMatching] Ranked ${ranked.length} jobs`);
-  
-  return { rankedJobs: ranked.slice(0, 20) }; // Top 20
+  // Already ranked by rerankJobsForSeller; return top 10 as rankedJobs
+  return { rankedJobs: jobs.slice(0, 10) };
 }
 
 /* -------------------- GRAPH DEFINITION -------------------- */

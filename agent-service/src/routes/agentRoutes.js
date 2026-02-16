@@ -4,6 +4,7 @@ import { redisClient } from '../config/redis.js';
 import memoryClient from '../memory/mem0.js';
 import { sessionManager, sellerSessionManager, handleAgentChat } from '../graphs/UnifiedAgent.js';
 import { runNegotiationAndMatchStream } from '../graphs/buyer/negotiationOrchestrator.js';
+import { findJobsForSeller } from '../graphs/seller/jobMatchingGraph.js';
 import { sessionRepository } from '../../prisma/repositories/sessionRepository.js';
 import { messageService } from '../services/index.js';
 
@@ -68,6 +69,72 @@ router.post('/buyer/negotiate-and-match-stream', async (req, res) => {
     send({ type: 'done', deals: [], error: message });
   } finally {
     res.end();
+  }
+});
+
+/* -------------------- SELLER MATCH (jobs for seller) -------------------- */
+
+/**
+ * POST /agent/seller/match
+ * Body: provider_id, access_token, optional service_category_id, sub_category_id, agent_config
+ * Returns: { deals } - each deal has id, jobId, matchScore, matchReasons, rank, job (full job details)
+ */
+router.post('/seller/match', async (req, res) => {
+  const { provider_id: providerId, access_token: accessToken, service_category_id: serviceCategoryId, sub_category_id: subCategoryId, agent_config: agentConfig } = req.body ?? {};
+
+  if (providerId == null || typeof accessToken !== 'string' || !accessToken.trim()) {
+    return res.status(400).json({ error: 'Missing or invalid provider_id or access_token.' });
+  }
+
+  try {
+    const filters = {};
+    if (serviceCategoryId != null) filters.service_category_id = serviceCategoryId;
+    if (subCategoryId != null) filters.sub_category_id = subCategoryId;
+    if (agentConfig != null) filters.agent_config = agentConfig;
+
+    const result = await findJobsForSeller(String(providerId), filters);
+
+    if (result.error) {
+      return res.status(400).json({ error: result.error, deals: [] });
+    }
+
+    const rankedJobs = result.jobs || [];
+    const deals = rankedJobs.map((r, index) => {
+      const rank = r.rank ?? index + 1;
+      const job = {
+        id: r.job_id,
+        buyerId: r.buyer_id,
+        title: r.title,
+        description: r.description ?? '',
+        budget: r.budget && typeof r.budget === 'object' ? r.budget : { min: 0, max: 0 },
+        startDate: r.start_date ?? '',
+        endDate: r.end_date ?? '',
+        priorities: Array.isArray(r.priorities) ? r.priorities : (r.priorities ? [r.priorities] : []),
+        createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+        status: r.status ?? 'open',
+        service_category_id: r.service_category_id,
+        service_category_name: r.service_category_name,
+        location: r.location,
+        specificRequirements: r.specific_requirements,
+        numBidsReceived: r.num_bids_received ?? 0,
+      };
+      return {
+        id: `deal_${r.job_id}_${rank}`,
+        jobId: r.job_id,
+        sellerId: String(providerId),
+        matchScore: r.matchScore ?? Math.max(10, 100 - (rank - 1) * 8),
+        matchReasons: [`Rank #${rank} match for your profile`, `Match score: ${r.matchScore ?? 0}%`],
+        status: 'proposed',
+        createdAt: new Date().toISOString(),
+        job,
+        rank,
+      };
+    });
+
+    res.json({ deals });
+  } catch (err) {
+    console.error('[seller/match] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Seller match failed', deals: [] });
   }
 });
 
