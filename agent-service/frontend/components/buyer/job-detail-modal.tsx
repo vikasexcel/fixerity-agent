@@ -202,11 +202,26 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
                     </div>
                   )}
 
-                  {(deal.negotiationMessage != null || deal.quote?.paymentSchedule != null || deal.quote?.licensed != null || deal.quote?.referencesAvailable != null) && (
+                  {(deal.sellerEmail != null || deal.sellerContactNumber != null || deal.quote?.paymentSchedule != null || deal.quote?.licensed != null || deal.quote?.referencesAvailable != null) && (
                     <div className="mb-3 rounded-md bg-muted/50 p-3 text-sm">
-                      <p className="text-xs font-semibold text-muted-foreground mb-1">Provider&apos;s response</p>
-                      {deal.negotiationMessage && (
-                        <p className="text-foreground mb-2">{deal.negotiationMessage}</p>
+                      {(deal.sellerEmail != null || deal.sellerContactNumber != null) && (
+                        <>
+                          <p className="text-xs font-semibold text-muted-foreground mb-1">Provider details</p>
+                          <div className="space-y-1 mb-2">
+                            {deal.sellerEmail && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Email:</span>{' '}
+                                <a href={`mailto:${deal.sellerEmail}`} className="text-primary hover:underline">{deal.sellerEmail}</a>
+                              </p>
+                            )}
+                            {deal.sellerContactNumber && (
+                              <p className="text-foreground">
+                                <span className="text-muted-foreground">Contact:</span>{' '}
+                                <a href={`tel:${deal.sellerContactNumber}`} className="text-primary hover:underline">{deal.sellerContactNumber}</a>
+                              </p>
+                            )}
+                          </div>
+                        </>
                       )}
                       <ul className="space-y-0.5 text-muted-foreground list-none pl-0">
                         {deal.quote?.paymentSchedule != null && (

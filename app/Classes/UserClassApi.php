@@ -117,14 +117,18 @@ class UserClassApi
         }
 
         if ($user_details['currency'] != Null) {
-            $user_currency = WorldCurrency::query()->where('symbol', $user_details['currency'])->first();
+            // Frontend sends currency_code (USD, EUR, etc.); legacy clients may send symbol ($, €)
+            $user_currency = WorldCurrency::query()->where('currency_code', $user_details['currency'])->first();
+            if ($user_currency == Null) {
+                $user_currency = WorldCurrency::query()->where('symbol', $user_details['currency'])->first();
+            }
             if ($user_currency == Null) {
                 $user_currency = WorldCurrency::query()->where('default_currency', 1)->first();
             }
         } else {
             $user_currency = WorldCurrency::query()->where('default_currency', 1)->first();
         }
-        $currency_code = $user_currency->currency_code;
+        $currency_code = $user_currency != Null ? $user_currency->currency_code : ($user_details['currency'] ?? 'USD');
 
         return response()->json([
             'status' => 1,

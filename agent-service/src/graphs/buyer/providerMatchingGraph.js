@@ -5,9 +5,13 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../../config/index.js';
 import prisma from '../../prisma/client.js';
 import { buyerTools } from './buyerTools.js';
+import { buildOptimizedQueryForJob } from '../../services/jobQueryService.js';
+import { searchSellersByQuery } from '../../services/sellerEmbeddingService.js';
+import { rerankCandidatesForJob } from '../../services/rerankService.js';
 
 /* ================================================================================
-   PROVIDER MATCHING GRAPH - LLM uses tools to get sellers from SellerProfile and rank them
+   PROVIDER MATCHING - Semantic pipeline: query -> top 40 -> rerank 15 -> final LLM rank.
+   Fallback: when semantic search returns 0, use tool-based graph (list_seller_profiles_for_job).
    ================================================================================ */
 
 const MATCH_SYSTEM_PROMPT = `You are matching a buyer's job to the best available service providers (sellers).
@@ -96,7 +100,14 @@ function parseRankedSellerIds(messages) {
   const last = aiMessages[aiMessages.length - 1];
   const content = last?.content;
   if (typeof content !== 'string') return null;
-  // Try ```json ... ``` block first
+  return parseRankedSellerIdsFromContent(content);
+}
+
+/**
+ * Parse ranked_seller_ids from a string (LLM content).
+ */
+function parseRankedSellerIdsFromContent(content) {
+  if (typeof content !== 'string') return null;
   const jsonBlock = content.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)?.[1];
   const str = jsonBlock ?? content;
   try {
@@ -117,8 +128,79 @@ function parseRankedSellerIds(messages) {
   return null;
 }
 
+const FINAL_RANK_SYSTEM = `You are selecting the most accurate service providers (sellers) for a buyer's job. You will receive the job details and a short list of candidate providers with their profile summary. Return the seller IDs in order of best match (most accurate first). Output ONLY a JSON object with this exact key: "ranked_seller_ids" (array of seller_id strings). No other text.`;
+
 /**
- * Run the matching graph and return providers in the shape expected by the orchestrator.
+ * Final LLM: given job + list of candidates (seller_id + searchable_text), return ranked_seller_ids (most accurate first).
+ * @param {object} job - Job summary
+ * @param {Array<{ seller_id: string, searchable_text: string }>} candidates - Up to 15 candidates with summaries
+ * @returns {Promise<string[]>}
+ */
+async function finalRankProvidersForJob(job, candidates) {
+  if (!candidates || candidates.length === 0) return [];
+  const candidateSet = new Set(candidates.map((c) => c.seller_id).filter(Boolean));
+  if (candidateSet.size === 0) return [];
+
+  console.log('\n  [Final LLM] Input: job + ' + candidates.length + ' candidates (seller_id + searchable_text snippet each).');
+
+  if (!OPENAI_API_KEY || !OPENAI_API_KEY.trim()) {
+    return candidates.map((c) => c.seller_id);
+  }
+  const jobSummary = [
+    job?.title && `Title: ${job.title}`,
+    job?.description && `Description: ${job.description}`,
+    job?.service_category_name && `Service: ${job.service_category_name}`,
+    job?.budget && typeof job.budget === 'object' && `Budget: $${job.budget.min ?? '?'}-$${job.budget.max ?? '?'}`,
+    job?.priorities && `Priorities: ${typeof job.priorities === 'string' ? job.priorities : JSON.stringify(job.priorities)}`,
+  ].filter(Boolean).join('\n');
+  const candidateList = candidates.map((c, i) => `${i + 1}. seller_id: ${c.seller_id} | ${(c.searchable_text || '').slice(0, 400)}`).join('\n');
+  const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.2, openAIApiKey: OPENAI_API_KEY });
+  const response = await llm.invoke([
+    new SystemMessage(FINAL_RANK_SYSTEM),
+    new HumanMessage(`Job:\n${jobSummary}\n\nCandidates:\n${candidateList}\n\nReturn JSON: {"ranked_seller_ids": ["id1", "id2", ...]} with the most accurate providers first.`),
+  ]);
+  const content = response?.content;
+  const ranked = parseRankedSellerIdsFromContent(typeof content === 'string' ? content : '');
+  const valid = ranked && ranked.length > 0 ? ranked.filter((id) => candidateSet.has(id)) : [];
+  const result = valid.length ? valid : candidates.map((c) => c.seller_id);
+  console.log('  [Final LLM] Output: ' + result.length + ' ranked seller IDs (most accurate first).\n');
+  return result;
+}
+
+/**
+ * Run fallback matching (tool-based graph) when semantic search returns no sellers.
+ */
+async function runFallbackProviderMatching(job) {
+  const userMessage = buildUserMessage(job);
+  const initialState = { messages: [new HumanMessage(userMessage)] };
+  const finalState = await graph.invoke(initialState);
+  const messages = finalState?.messages ?? [];
+  let rankedIds = parseRankedSellerIds(messages);
+  if (!rankedIds || rankedIds.length === 0) {
+    const toolMessages = messages.filter((m) => m.tool_calls?.length || m.name);
+    for (const m of toolMessages) {
+      if (m.content && typeof m.content === 'string') {
+        try {
+          const data = JSON.parse(m.content);
+          const sellers = data?.sellers ?? data?.results;
+          if (Array.isArray(sellers) && sellers.length > 0) {
+            rankedIds = sellers.map((s) => s.seller_id ?? s.id).filter(Boolean);
+            console.log('[ProviderMatching] Fallback: using tool result order for', rankedIds.length, 'sellers');
+            break;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  return rankedIds || [];
+}
+
+/**
+ * Run the matching pipeline and return providers in the shape expected by the orchestrator.
+ * Pipeline: build query -> semantic search top 40 -> rerank to 15 -> final LLM rank.
+ * Fallback: when semantic search returns 0, use tool-based graph (list_seller_profiles_for_job).
  * @param {object} job - Job with id, title, service_category_name, budget, dates, priorities, etc.
  * @returns {{ providers: Array, error?: string }}
  */
@@ -128,35 +210,51 @@ export async function runProviderMatching(job) {
     return { providers: [], error: 'Job must have service_category_name for matching.' };
   }
 
-  const userMessage = buildUserMessage(job);
-  const initialState = { messages: [new HumanMessage(userMessage)] };
+  const LOG_HEADER = '[ProviderMatching]';
 
   try {
-    const finalState = await graph.invoke(initialState);
-    const messages = finalState?.messages ?? [];
-    let rankedIds = parseRankedSellerIds(messages);
+    console.log('\n' + '#'.repeat(60));
+    console.log(LOG_HEADER + ' Pipeline start (job id: ' + (job?.id ?? '—') + ')');
+    console.log('#'.repeat(60) + '\n');
 
-    // Fallback: use order from first list_seller_profiles_for_job tool result
-    if (!rankedIds || rankedIds.length === 0) {
-      const toolMessages = messages.filter((m) => m.tool_calls?.length || m.name);
-      for (const m of toolMessages) {
-        if (m.content && typeof m.content === 'string') {
-          try {
-            const data = JSON.parse(m.content);
-            const sellers = data?.sellers ?? data?.results;
-            if (Array.isArray(sellers) && sellers.length > 0) {
-              rankedIds = sellers.map((s) => s.seller_id ?? s.id).filter(Boolean);
-              console.log('[ProviderMatching] Fallback: using tool result order for', rankedIds.length, 'sellers');
-              break;
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
+    // Step A: build optimized retrieval query from job (logged in jobQueryService)
+    const query = await buildOptimizedQueryForJob(job);
+    console.log(LOG_HEADER + ' Step A done. Query length: ' + (query?.length ?? 0) + ' chars\n');
+
+    // Step 2: semantic search over seller embeddings -> top 40 (logged in sellerEmbeddingService)
+    const top40 = await searchSellersByQuery(query, 40);
+    console.log(LOG_HEADER + ' Step 2 done. Semantic search returned ' + top40.length + ' sellers (top 40)\n');
+
+    let rankedIds;
+    if (top40.length === 0) {
+      console.log(LOG_HEADER + ' Semantic search returned 0; using fallback (list_seller_profiles_for_job).\n');
+      rankedIds = await runFallbackProviderMatching(job);
+      console.log(LOG_HEADER + ' Fallback returned ' + (rankedIds?.length ?? 0) + ' seller IDs\n');
+    } else {
+      // Step 3: rerank 40 -> top 15 (logged in rerankService)
+      const top15Ids = await rerankCandidatesForJob(job, top40, 15);
+      console.log(LOG_HEADER + ' Step 3 done. Reranked to top ' + top15Ids.length + ' seller IDs\n');
+
+      const top15Candidates = top15Ids
+        .map((id) => top40.find((c) => c.seller_id === id))
+        .filter(Boolean);
+
+      // Step 4: final LLM -> most accurate providers (ranked list)
+      rankedIds = await finalRankProvidersForJob(job, top15Candidates);
+
+      console.log('\n' + '='.repeat(60));
+      console.log(LOG_HEADER + ' Step 4 — Final ranked providers (most accurate first)');
+      console.log('='.repeat(60));
+      console.log('\n  Ranked seller IDs (full list):');
+      console.log('  ' + '-'.repeat(56));
+      (rankedIds || []).forEach((id, i) => console.log('  [' + (i + 1) + '] ' + id));
+      console.log('  ' + '-'.repeat(56));
+      console.log('  Total: ' + (rankedIds?.length ?? 0) + ' providers');
+      console.log('='.repeat(60) + '\n');
     }
 
     if (!rankedIds || rankedIds.length === 0) {
+      console.log(LOG_HEADER + ' No providers to return.\n');
       return { providers: [] };
     }
 
@@ -169,7 +267,8 @@ export async function runProviderMatching(job) {
       .filter(Boolean)
       .map((p) => sellerProfileToProvider(p));
 
-    console.log('[ProviderMatching] Returning', providers.length, 'providers');
+    console.log(LOG_HEADER + ' Pipeline complete. Returning ' + providers.length + ' providers.');
+    console.log('#'.repeat(60) + '\n');
     return { providers };
   } catch (error) {
     console.error('[ProviderMatching] Error:', error.message);

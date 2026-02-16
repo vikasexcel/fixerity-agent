@@ -301,7 +301,7 @@ async function handleRefinement(session, message, send) {
     if (response.intent === 'info_request') {
       const lowerMessage = message.toLowerCase();
       if (lowerMessage.includes('all providers') || lowerMessage.includes('all details') || lowerMessage.includes('show all') || lowerMessage.includes('complete details')) {
-        send({ type: 'deals_detail', deals: deals?.map(d => ({ id: d.id, name: d.sellerName, price: d.quote.price, days: d.quote.days, paymentSchedule: d.quote.paymentSchedule, licensed: d.quote.licensed, referencesAvailable: d.quote.referencesAvailable, can_meet_dates: d.quote.can_meet_dates, matchScore: d.matchScore, message: d.negotiationMessage })) || [] });
+        send({ type: 'deals_detail', deals: deals?.map(d => ({ id: d.id, sellerId: d.sellerId, name: d.sellerName, email: d.sellerEmail, contactNumber: d.sellerContactNumber, price: d.quote.price, days: d.quote.days, paymentSchedule: d.quote.paymentSchedule, licensed: d.quote.licensed, referencesAvailable: d.quote.referencesAvailable, can_meet_dates: d.quote.can_meet_dates, matchScore: d.matchScore })) || [] });
       }
     }
   } catch (error) {

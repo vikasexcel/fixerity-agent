@@ -18,13 +18,15 @@ const JobMatchingState = Annotation.Root({
 
 async function loadSellerProfileNode(state) {
   try {
-    const profile = await prisma.sellerProfile.findUnique({
-      where: { 
-        id: state.sellerId,
-        active: true,
-      }
+    const providerId = parseInt(String(state.sellerId), 10);
+    const profiles = await prisma.sellerProfile.findMany({
+      where: !isNaN(providerId)
+        ? { providerId, active: true }
+        : { id: state.sellerId, active: true },
+      orderBy: { updatedAt: 'desc' },
     });
 
+    const profile = profiles[0];
     if (!profile) {
       return { 
         error: 'No active profile found. Please create a profile first.',
@@ -32,12 +34,16 @@ async function loadSellerProfileNode(state) {
       };
     }
 
-    console.log(`[JobMatching] Loaded profile for seller ${state.sellerId}`);
+    const allServiceNames = profiles.length > 1
+      ? [...new Set(profiles.flatMap((p) => p.serviceCategoryNames ?? []))]
+      : (profile.serviceCategoryNames ?? []);
+
+    console.log(`[JobMatching] Loaded ${profiles.length} profile(s) for seller ${state.sellerId}`);
     
     return { 
       sellerProfile: {
         seller_id: profile.id,
-        service_category_names: profile.serviceCategoryNames ?? [],
+        service_category_names: allServiceNames,
         service_area: profile.serviceArea,
         availability: profile.availability,
         credentials: profile.credentials,

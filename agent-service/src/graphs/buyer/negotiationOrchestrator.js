@@ -1,6 +1,7 @@
 import { runMatching } from './negotiationGraph.js';
 import { runProviderMatching } from './providerMatchingGraph.js';
-import { negotiationService, memoryService, cacheService } from '../../services/index.js';
+import { negotiationService, memoryService, cacheService, getProviderBasicDetails } from '../../services/index.js';
+import prisma from '../../prisma/client.js';
 import { NEGOTIATION_TIME_SECONDS } from '../../config/index.js';
 
 /* ================================================================================
@@ -9,13 +10,42 @@ import { NEGOTIATION_TIME_SECONDS } from '../../config/index.js';
 
 /* -------------------- PROVIDER DETAILS (for cache display name fallback) -------------------- */
 
-async function fetchProviderBasicDetails(providerId) {
-  // Provider list comes from SellerProfile via runProviderMatching; no external API.
-  // Return minimal display info; cache may be populated from provider object in the loop.
+async function fetchProviderBasicDetails(providerOrProfileId) {
+  // providerOrProfileId may be profile id (UUID) from ranked sellers or provider id (numeric) from external API
+  const numeric = parseInt(String(providerOrProfileId), 10);
+  if (isNaN(numeric)) {
+    // It's a SellerProfile id (UUID) – get name, email, contact from our DB
+    const profile = await prisma.sellerProfile.findUnique({
+      where: { id: providerOrProfileId },
+      select: { id: true, providerId: true, firstName: true, lastName: true, email: true, contactNumber: true },
+    });
+    if (profile) {
+      return {
+        provider_id: profile.providerId,
+        first_name: profile.firstName ?? 'Provider',
+        last_name: profile.lastName ?? profile.id?.toString().slice(0, 8) ?? '',
+        email: profile.email ?? null,
+        contact_number: profile.contactNumber ?? null,
+        gender: null,
+      };
+    }
+    return {
+      provider_id: providerOrProfileId,
+      first_name: 'Provider',
+      last_name: providerOrProfileId?.toString().slice(0, 8) ?? '',
+      email: null,
+      contact_number: null,
+      gender: null,
+    };
+  }
+  const details = await getProviderBasicDetails(numeric);
   return {
-    provider_id: providerId,
-    first_name: 'Provider',
-    last_name: providerId?.slice(0, 8) ?? '',
+    provider_id: numeric,
+    first_name: details?.firstName ?? 'Provider',
+    last_name: details?.lastName ?? String(numeric).slice(0, 8) ?? '',
+    email: details?.email ?? null,
+    contact_number: details?.contactNumber ?? null,
+    gender: details?.gender ?? null,
   };
 }
 
@@ -215,14 +245,16 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
       ? outcome.transcript.filter((m) => m.role === 'seller').pop()?.message
       : null;
 
-    // Get provider details from cache
+    // Get provider details from SellerProfile first (provider is from sellerProfileToProvider with profile spread)
+    const sellerNameFromProfile = [provider.firstName, provider.lastName].filter(Boolean).join(' ').trim();
     const basic = await cacheService.getProviderBasic(
       providerId,
       async (id) => await fetchProviderBasicDetails(id)
     );
-    
     const sellerNameFromBasic = basic ? [basic.first_name, basic.last_name].filter(Boolean).join(' ').trim() : null;
-    const sellerName = sellerNameFromBasic ?? provider?.name ?? provider?.first_name ?? 'Provider';
+    const sellerName = sellerNameFromProfile || sellerNameFromBasic || provider?.name || provider?.firstName || 'Provider';
+    const sellerEmail = provider.email ?? basic?.email ?? null;
+    const sellerContactNumber = provider.contactNumber ?? basic?.contact_number ?? null;
 
     // Score immediately
     const scored = await scoreProvider({
@@ -231,6 +263,8 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
       quote: outcome.quote,
       negotiationMessage: lastSellerMessage ?? null,
       sellerName,
+      sellerEmail,
+      sellerContactNumber,
     }, job);
 
     if (scored.failedMustHave) {
@@ -312,6 +346,8 @@ async function scoreProvider(result, job) {
       id: `deal_${job.id}_${r.providerId}_${Date.now()}`,
       sellerId: r.providerId,
       sellerName: r.sellerName,
+      sellerEmail: r.sellerEmail ?? null,
+      sellerContactNumber: r.sellerContactNumber ?? null,
       quote: r.quote,
       matchScore: 0,
       negotiationMessage: r.negotiationMessage ?? null,
@@ -335,6 +371,8 @@ async function scoreProvider(result, job) {
     id: `deal_${job.id}_${r.providerId}_${Date.now()}`,
     sellerId: r.providerId,
     sellerName: r.sellerName,
+    sellerEmail: r.sellerEmail ?? null,
+    sellerContactNumber: r.sellerContactNumber ?? null,
     quote: r.quote,
     matchScore,
     negotiationMessage: r.negotiationMessage ?? null,

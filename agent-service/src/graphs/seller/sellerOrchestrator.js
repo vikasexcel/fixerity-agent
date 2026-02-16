@@ -9,12 +9,17 @@ import prisma from '../../prisma/client.js';
 
 export async function getSellerDashboard(sellerId) {
   try {
-    // Get active bids
+    const providerId = parseInt(String(sellerId), 10);
+    const profileIds = !isNaN(providerId)
+      ? (await prisma.sellerProfile.findMany({
+          where: { providerId },
+          select: { id: true },
+        })).map((p) => p.id)
+      : [sellerId];
+
+    // Get active bids (all profiles for this provider)
     const activeBids = await prisma.sellerBid.findMany({
-      where: { 
-        sellerId: sellerId, 
-        status: 'pending' 
-      },
+      where: profileIds.length > 0 ? { sellerId: { in: profileIds }, status: 'pending' } : { id: 'impossible' },
       include: { 
         job: true 
       },
@@ -24,10 +29,7 @@ export async function getSellerDashboard(sellerId) {
 
     // Get accepted bids (active jobs)
     const activeJobs = await prisma.sellerBid.findMany({
-      where: { 
-        sellerId: sellerId, 
-        status: 'accepted' 
-      },
+      where: profileIds.length > 0 ? { sellerId: { in: profileIds }, status: 'accepted' } : { id: 'impossible' },
       include: { 
         job: true 
       },
@@ -155,7 +157,14 @@ export async function withdrawBid(bidId, sellerId) {
       return { success: false, error: 'Bid not found' };
     }
 
-    if (bid.sellerId !== sellerId) {
+    const providerId = parseInt(String(sellerId), 10);
+    const profileIds = !isNaN(providerId)
+      ? (await prisma.sellerProfile.findMany({
+          where: { providerId },
+          select: { id: true },
+        })).map((p) => p.id)
+      : [sellerId];
+    if (!profileIds.includes(bid.sellerId)) {
       return { success: false, error: 'Unauthorized' };
     }
 

@@ -46,7 +46,13 @@ model JobListing {
 }
 
 model SellerProfile {
-  id                       String   @id @default(uuid()) @map("seller_id")
+  id                       String   @id @default(uuid()) @map("seller_id")  // Profile UUID - SellerBid references this
+  providerId               Int      @map("provider_id")  // External provider ID - one provider can have multiple profiles
+  firstName                String?  @map("first_name")   // From provider-basic-details API
+  lastName                 String?  @map("last_name")
+  email                    String?  @map("email")
+  gender                   Int?     @map("gender")       // 1=male, 2=female, etc from API
+  contactNumber            String?  @map("contact_number")
   serviceCategoryNames     String[] @default([]) @map("service_category_names")
   serviceArea              Json?    @map("service_area")
   availability             Json?
@@ -58,11 +64,14 @@ model SellerProfile {
   active                   Boolean  @default(true)
   totalBidsSubmitted       Int      @default(0) @map("total_bids_submitted")
   totalBidsAccepted        Int      @default(0) @map("total_bids_accepted")
+  embeddingDone            Boolean  @default(false) @map("embedding_done")
   createdAt                DateTime @default(now()) @map("created_at")
   updatedAt                DateTime @updatedAt @map("updated_at")
 
   bids                     SellerBid[]
+  embeddings               SellerEmbedding[]
 
+  @@index([providerId])
   @@map("seller_profiles")
 }
 
@@ -191,4 +200,18 @@ model CacheEntry {
   @@index([key])
   @@index([expiresAt])
   @@map("cache_entries")
+}
+
+
+model SellerEmbedding {
+  id          String   @id @default(uuid())
+  sellerId    String   @map("seller_id")
+  embedding   Unsupported("vector(1536)") 
+  searchableText String @map("searchable_text")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  seller      SellerProfile @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@index([sellerId])
+  @@map("seller_embeddings")
 }

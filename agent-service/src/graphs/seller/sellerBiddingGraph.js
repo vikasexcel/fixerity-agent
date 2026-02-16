@@ -23,14 +23,17 @@ const SellerBiddingState = Annotation.Root({
 
 async function loadDataNode(state) {
   try {
-    const [job, profile] = await Promise.all([
-      prisma.jobListing.findUnique({
-        where: { id: state.jobId }
+    const providerId = parseInt(String(state.sellerId), 10);
+    const [job, profileList] = await Promise.all([
+      prisma.jobListing.findUnique({ where: { id: state.jobId } }),
+      prisma.sellerProfile.findMany({
+        where: !isNaN(providerId)
+          ? { providerId, active: true }
+          : { id: state.sellerId, active: true },
+        orderBy: { updatedAt: 'desc' },
       }),
-      prisma.sellerProfile.findUnique({
-        where: { id: state.sellerId, active: true }
-      })
     ]);
+    const profile = profileList[0];
 
     if (!job) {
       return { error: 'Job not found' };
@@ -40,7 +43,7 @@ async function loadDataNode(state) {
       return { error: 'Seller profile not found' };
     }
 
-    console.log(`[SellerBidding] Loaded job ${state.jobId} and profile for seller ${state.sellerId}`);
+    console.log(`[SellerBidding] Loaded job ${state.jobId} and profile ${profile.id} for seller ${state.sellerId}`);
 
     return {
       job: {
@@ -166,15 +169,16 @@ Reply ONLY with JSON:
 async function submitBidNode(state) {
   const bid = state.generatedBid;
   const profile = state.sellerProfile;
+  const profileId = profile?.seller_id ?? state.sellerId;
 
   try {
-    const bidId = `bid_${state.sellerId}_${state.jobId}_${Date.now()}`;
+    const bidId = `bid_${profileId}_${state.jobId}_${Date.now()}`;
 
     const submittedBid = await prisma.sellerBid.create({
       data: {
         id: bidId,
         jobId: state.jobId,
-        sellerId: state.sellerId,
+        sellerId: profileId,
         quotedPrice: bid.quoted_price,
         quotedTimeline: bid.quoted_timeline,
         quotedCompletionDays: bid.quoted_completion_days,
@@ -203,7 +207,7 @@ async function submitBidNode(state) {
 
     // Update seller profile bid count
     await prisma.sellerProfile.update({
-      where: { id: state.sellerId },
+      where: { id: profileId },
       data: {
         totalBidsSubmitted: {
           increment: 1,
@@ -294,15 +298,17 @@ export async function generateBidForJob(sellerId, jobId, customMessage = null, c
 
 /**
  * Create bid in DB from a pre-generated bid. Used after HITL approval.
+ * Uses profile id (sellerProfile.seller_id) for the bid; sellerId may be provider id.
  */
 export async function createBidInDb(sellerId, jobId, generatedBid, sellerProfile) {
+  const profileId = sellerProfile?.seller_id ?? sellerId;
   try {
-    const bidId = `bid_${sellerId}_${jobId}_${Date.now()}`;
+    const bidId = `bid_${profileId}_${jobId}_${Date.now()}`;
     const submittedBid = await prisma.sellerBid.create({
       data: {
         id: bidId,
         jobId,
-        sellerId,
+        sellerId: profileId,
         quotedPrice: generatedBid.quoted_price,
         quotedTimeline: generatedBid.quoted_timeline,
         quotedCompletionDays: generatedBid.quoted_completion_days,
@@ -323,7 +329,7 @@ export async function createBidInDb(sellerId, jobId, generatedBid, sellerProfile
       data: { numBidsReceived: { increment: 1 } },
     });
     await prisma.sellerProfile.update({
-      where: { id: sellerId },
+      where: { id: profileId },
       data: { totalBidsSubmitted: { increment: 1 } },
     });
     return {

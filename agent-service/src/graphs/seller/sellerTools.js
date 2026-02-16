@@ -2,8 +2,10 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { interrupt } from '@langchain/langgraph';
 import prisma from '../../prisma/client.js';
+import { upsertSellerEmbedding } from '../../services/sellerEmbeddingService.js';
 import { findJobsForSeller } from './jobMatchingGraph.js';
 import { getSellerDashboard, withdrawBid as orchestratorWithdrawBid } from './sellerOrchestrator.js';
+import { getProviderBasicDetails } from '../../services/providerDetailsService.js';
 import { generateBidForJob, createBidInDb } from './sellerBiddingGraph.js';
 
 /* ================================================================================
@@ -20,8 +22,12 @@ const bidIdSchema = z.string().describe('Bid ID.');
 export const getSellerProfileTool = tool(
   async ({ sellerId }) => {
     console.log('[get_seller_profile] Tool called with sellerId:', sellerId);
+    const providerId = parseInt(String(sellerId), 10);
     const profile = await prisma.sellerProfile.findFirst({
-      where: { id: sellerId, active: true },
+      where: !isNaN(providerId)
+        ? { providerId, active: true }
+        : { id: sellerId, active: true },
+      orderBy: { updatedAt: 'desc' },
     });
     if (!profile) {
       console.log('[get_seller_profile] No active profile found for sellerId:', sellerId);
@@ -87,7 +93,7 @@ function parseServiceCategoryNames(value) {
 }
 
 export const updateSellerProfileTool = tool(
-  async ({ sellerId, pricing, availability, bio, service_area, service_category_names, credentials, preferences }) => {
+  async ({ sellerId, pricing, availability, bio, service_area, service_category_names, credentials, preferences, createNew }) => {
     console.log('[update_seller_profile] Tool called with raw args:', {
       sellerId,
       pricing: typeof pricing === 'string' ? pricing.slice(0, 200) : pricing,
@@ -120,16 +126,42 @@ export const updateSellerProfileTool = tool(
 
     console.log('[update_seller_profile] Parsed updateData being written to seller_profile:', JSON.stringify(updateData, null, 2));
 
-    const profile = await prisma.sellerProfile.upsert({
-      where: { id: sellerId },
-      create: {
-        id: sellerId,
-        active: true,
-        serviceCategoryNames: updateData.serviceCategoryNames ?? [],
-        ...updateData,
-      },
-      update: updateData,
-    });
+    const providerId = parseInt(String(sellerId), 10);
+    const wantNewRow = createNew === true || createNew === 'true';
+    const existing = wantNewRow
+      ? null
+      : !isNaN(providerId)
+        ? await prisma.sellerProfile.findFirst({ where: { providerId }, orderBy: { updatedAt: 'desc' } })
+        : await prisma.sellerProfile.findUnique({ where: { id: sellerId } });
+
+    let profile;
+    if (existing) {
+      profile = await prisma.sellerProfile.update({
+        where: { id: existing.id },
+        data: { ...updateData, embeddingDone: false },
+      });
+      await upsertSellerEmbedding(profile.id, profile);
+    } else if (!isNaN(providerId)) {
+      const providerDetails = await getProviderBasicDetails(providerId);
+      const { randomUUID } = await import('crypto');
+      profile = await prisma.sellerProfile.create({
+        data: {
+          id: randomUUID(),
+          providerId,
+          firstName: providerDetails?.firstName ?? null,
+          lastName: providerDetails?.lastName ?? null,
+          email: providerDetails?.email ?? null,
+          gender: providerDetails?.gender ?? null,
+          contactNumber: providerDetails?.contactNumber ?? null,
+          active: true,
+          serviceCategoryNames: updateData.serviceCategoryNames ?? [],
+          ...updateData,
+        },
+      });
+      await upsertSellerEmbedding(profile.id, profile);
+    } else {
+      return JSON.stringify({ success: false, message: 'Profile not found.' });
+    }
     console.log('[update_seller_profile] Upsert success. Profile after update:', JSON.stringify({
       seller_id: profile.id,
       serviceCategoryNames: profile.serviceCategoryNames,
@@ -144,7 +176,7 @@ export const updateSellerProfileTool = tool(
   },
   {
     name: 'update_seller_profile',
-    description: 'Update the seller profile (partial update). Pass only the fields to change (pricing, availability, bio, service_area, service_category_names, credentials, preferences).',
+    description: 'Update the seller profile (partial update). Pass only the fields to change. Use createNew: true when the seller wants to add another profile (one provider can have multiple profiles).',
     schema: z.object({
       sellerId: sellerIdSchema,
       pricing: z.string().optional().describe('JSON string for pricing object, e.g. {"hourly_rate_min":50,"hourly_rate_max":100}'),
@@ -154,6 +186,7 @@ export const updateSellerProfileTool = tool(
       service_category_names: z.string().optional().describe('JSON array of service names, e.g. ["home cleaning", "deep cleaning"]'),
       credentials: z.string().optional().describe('JSON string for credentials object'),
       preferences: z.string().optional().describe('JSON string for preferences object'),
+      createNew: z.boolean().optional().describe('If true, create a new profile row for this provider instead of updating an existing one (one provider can have multiple profiles).'),
     }),
   }
 );
@@ -206,10 +239,17 @@ export const getJobDetailsTool = tool(
 
 export const listMyBidsTool = tool(
   async ({ sellerId, status }) => {
-    const where = { sellerId };
-    if (status && ['pending', 'accepted', 'withdrawn', 'rejected'].includes(status)) {
-      where.status = status;
-    }
+    const providerId = parseInt(String(sellerId), 10);
+    const profileIds = !isNaN(providerId)
+      ? (await prisma.sellerProfile.findMany({
+          where: { providerId },
+          select: { id: true },
+        })).map((p) => p.id)
+      : [sellerId];
+    const where = {
+      sellerId: { in: profileIds.length > 0 ? profileIds : ['__none__'] },
+      ...(status && ['pending', 'accepted', 'withdrawn', 'rejected'].includes(status) ? { status } : {}),
+    };
     const bids = await prisma.sellerBid.findMany({
       where,
       include: { job: true },

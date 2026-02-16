@@ -1,19 +1,19 @@
 services:
   postgres:
-    image: postgres:16
-    container_name: fixerity-agent-db
+    image: pgvector/pgvector:pg16
+    container_name: fixerity-agent-db-vector
     restart: unless-stopped
 
     environment:
       POSTGRES_USER: fixerity
       POSTGRES_PASSWORD: fixerity123
-      POSTGRES_DB: fixerity_agent_db
+      POSTGRES_DB: fixerity_agent_db_vector
 
     ports:
       - "5437:5432"
 
     volumes:
-      - fixerity-agent-db-data:/var/lib/postgresql/data
+      - fixerity-agent-db-vector-data:/var/lib/postgresql/data
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fixerity"]
@@ -22,4 +22,4 @@ services:
       retries: 5
 
 volumes:
-  fixerity-agent-db-data:
+  fixerity-agent-db-vector-data:

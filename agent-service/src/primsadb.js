@@ -1,14 +1,18 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { PrismaClient } from '@prisma/client';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__dirname, '..', '.env') });
 import { PrismaPg } from '@prisma/adapter-pg';
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error(
-    'DATABASE_URL is not set. Add it to .env (e.g. postgresql://postgres:postgres@localhost:5436/agentdb when using docker-compose postgres).'
+    'DATABASE_URL is not set. Set it in .env (e.g. postgresql://user:pass@localhost:5437/fixerity_agent_db_vector when using docker-compose postgres).'
   );
 }
-console.log("++++++++++",connectionString);
 const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
 

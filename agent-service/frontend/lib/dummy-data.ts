@@ -69,6 +69,10 @@ export interface Deal {
   negotiationStatus?: 'accepted' | 'timeout';
   /** Name from API when sellerAgent is not populated. */
   sellerName?: string;
+  /** Provider email from SellerProfile (for contact). */
+  sellerEmail?: string | null;
+  /** Provider contact number from SellerProfile (for contact). */
+  sellerContactNumber?: string | null;
   /** Quote from API (e.g. price, days, paymentSchedule, licensed, referencesAvailable). */
   quote?: {
     price?: number;

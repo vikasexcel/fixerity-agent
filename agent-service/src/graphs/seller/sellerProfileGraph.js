@@ -5,6 +5,9 @@ import { OPENAI_API_KEY } from '../../config/index.js';
 import { MemorySaver } from '@langchain/langgraph';
 import { sessionService, messageService } from '../../services/index.js';
 import prisma from '../../prisma/client.js';
+import { getProviderBasicDetails } from '../../services/providerDetailsService.js';
+import { upsertSellerEmbedding } from '../../services/sellerEmbeddingService.js';
+import { randomUUID } from 'crypto';
 
 /* ================================================================================
    SELLER PROFILE GRAPH - Profile Creation Through Natural Conversation
@@ -352,6 +355,8 @@ function updateCollectedNode(state) {
 async function syncProfileToDbNode(state) {
   const collected = state.collected;
   const sellerId = state.sellerId;
+  const providerId = parseInt(String(sellerId), 10);
+  const existingProfileId = collected.profileId;
 
   if (!collected.service_categories?.length) {
     console.log('[SyncProfile] Skip: no service_categories in collected', {
@@ -364,6 +369,8 @@ async function syncProfileToDbNode(state) {
 
   console.log('[SyncProfile] Starting sync to DB', {
     sellerId,
+    providerId,
+    existingProfileId: existingProfileId || 'none',
     service_category_names: collected.service_categories,
     service_area: collected.service_area?.location ?? null,
     has_availability: !!collected.availability?.schedule,
@@ -391,54 +398,52 @@ async function syncProfileToDbNode(state) {
     if (collected.bio) score += 10;
     if (collected.preferences?.min_job_size_hours != null) score += 5;
 
-    const existing = await prisma.sellerProfile.findUnique({
-      where: { id: sellerId },
-      select: { id: true, serviceCategoryNames: true },
-    });
+    const profileData = {
+      serviceCategoryNames: collected.service_categories,
+      serviceArea: collected.service_area,
+      availability: collected.availability,
+      credentials: collected.credentials,
+      pricing: collected.pricing,
+      preferences: collected.preferences,
+      bio: collected.bio,
+      profileCompletenessScore: score,
+    };
 
-    const result = await prisma.sellerProfile.upsert({
-      where: { id: sellerId },
-      create: {
-        id: sellerId,
-        serviceCategoryNames: collected.service_categories,
-        serviceArea: collected.service_area,
-        availability: collected.availability,
-        credentials: collected.credentials,
-        pricing: collected.pricing,
-        preferences: collected.preferences,
-        bio: collected.bio,
-        profileCompletenessScore: score,
-        active: true,
-      },
-      update: {
-        serviceCategoryNames: collected.service_categories,
-        serviceArea: collected.service_area,
-        availability: collected.availability,
-        credentials: collected.credentials,
-        pricing: collected.pricing,
-        preferences: collected.preferences,
-        bio: collected.bio,
-        profileCompletenessScore: score,
-      },
-    });
+    let result;
+    if (existingProfileId) {
+      const existing = await prisma.sellerProfile.findUnique({ where: { id: existingProfileId }, select: { id: true } });
+      if (existing) {
+        result = await prisma.sellerProfile.update({
+          where: { id: existingProfileId },
+          data: { ...profileData, active: true, embeddingDone: false },
+        });
+        console.log('[SyncProfile] Success (update)', { profileId: result.id });
+        await upsertSellerEmbedding(result.id, result);
+      }
+    }
 
-    console.log('[SyncProfile] Success', {
-      sellerId,
-      action: existing ? 'update' : 'create',
-      service_category_names: result.serviceCategoryNames,
-      profile_completeness_score: result.profileCompletenessScore,
-      previous_services: existing?.serviceCategoryNames ?? [],
-    });
-    console.log('[SyncProfile] DB row after upsert:', JSON.stringify({
-      serviceCategoryNames: result.serviceCategoryNames,
-      serviceArea: result.serviceArea,
-      availability: result.availability,
-      credentials: result.credentials,
-      pricing: result.pricing,
-      preferences: result.preferences,
-      bio: result.bio ? `${String(result.bio).slice(0, 80)}...` : null,
-      profileCompletenessScore: result.profileCompletenessScore,
-    }, null, 2));
+    if (!result) {
+      const providerDetails = await getProviderBasicDetails(providerId);
+      const newId = randomUUID();
+      result = await prisma.sellerProfile.create({
+        data: {
+          id: newId,
+          providerId,
+          firstName: providerDetails?.firstName ?? null,
+          lastName: providerDetails?.lastName ?? null,
+          email: providerDetails?.email ?? null,
+          gender: providerDetails?.gender ?? null,
+          contactNumber: providerDetails?.contactNumber ?? null,
+          ...profileData,
+          active: true,
+        },
+      });
+      console.log('[SyncProfile] Success (create)', { profileId: result.id, providerId, providerDetails: !!providerDetails });
+      await upsertSellerEmbedding(result.id, result);
+      return { collected: { ...collected, profileId: result.id } };
+    }
+
+    return {};
   } catch (err) {
     console.error('[SyncProfile] Error', {
       sellerId,
@@ -823,6 +828,9 @@ async function buildProfileNode(state) {
     if (collected.bio) score += 10;
     if (collected.preferences?.min_job_size_hours != null) score += 5;
 
+    const providerId = parseInt(String(state.sellerId), 10);
+    const existingProfileId = collected.profileId;
+
     console.log('[BuildProfile] Collected values being written to seller_profile:', JSON.stringify({
       service_categories: collected.service_categories,
       service_area: collected.service_area,
@@ -834,35 +842,55 @@ async function buildProfileNode(state) {
       score,
     }, null, 2));
 
-    // Create or update profile in database (service categories stored as explicit names)
-    const profile = await prisma.sellerProfile.upsert({
-      where: { id: state.sellerId },
-      create: {
-        id: state.sellerId,
-        serviceCategoryNames: collected.service_categories,
-        serviceArea: collected.service_area,
-        availability: collected.availability,
-        credentials: collected.credentials,
-        pricing: collected.pricing,
-        preferences: collected.preferences,
-        bio: collected.bio,
-        profileCompletenessScore: score,
-        active: true,
-      },
-      update: {
-        serviceCategoryNames: collected.service_categories,
-        serviceArea: collected.service_area,
-        availability: collected.availability,
-        credentials: collected.credentials,
-        pricing: collected.pricing,
-        preferences: collected.preferences,
-        bio: collected.bio,
-        profileCompletenessScore: score,
-        active: true,
-      },
-    });
+    let profile;
+    if (existingProfileId) {
+      const existing = await prisma.sellerProfile.findUnique({ where: { id: existingProfileId } });
+      if (existing) {
+        profile = await prisma.sellerProfile.update({
+          where: { id: existingProfileId },
+          data: {
+            serviceCategoryNames: collected.service_categories,
+            serviceArea: collected.service_area,
+            availability: collected.availability,
+            credentials: collected.credentials,
+            pricing: collected.pricing,
+            preferences: collected.preferences,
+            bio: collected.bio,
+            profileCompletenessScore: score,
+            active: true,
+            embeddingDone: false,
+          },
+        });
+        console.log(`[BuildProfile] Updated profile ${profile.id} for provider ${providerId}`);
+        await upsertSellerEmbedding(profile.id, profile);
+      }
+    }
 
-    console.log(`[BuildProfile] Upserted profile for seller ${state.sellerId}`);
+    if (!profile) {
+      const providerDetails = await getProviderBasicDetails(providerId);
+      profile = await prisma.sellerProfile.create({
+        data: {
+          id: randomUUID(),
+          providerId,
+          firstName: providerDetails?.firstName ?? null,
+          lastName: providerDetails?.lastName ?? null,
+          email: providerDetails?.email ?? null,
+          gender: providerDetails?.gender ?? null,
+          contactNumber: providerDetails?.contactNumber ?? null,
+          serviceCategoryNames: collected.service_categories,
+          serviceArea: collected.service_area,
+          availability: collected.availability,
+          credentials: collected.credentials,
+          pricing: collected.pricing,
+          preferences: collected.preferences,
+          bio: collected.bio,
+          profileCompletenessScore: score,
+          active: true,
+        },
+      });
+      console.log(`[BuildProfile] Created profile ${profile.id} for provider ${providerId} (provider details: ${!!providerDetails})`);
+      await upsertSellerEmbedding(profile.id, profile);
+    }
     console.log('[BuildProfile] DB profile after upsert:', JSON.stringify({
       seller_id: profile.id,
       serviceCategoryNames: profile.serviceCategoryNames,
@@ -987,6 +1015,38 @@ export async function runSellerProfileConversation(input) {
     timestamp: m.createdAt,
   }));
 
+  const baseCollected = sessionData.state?.collected || {
+    profileId: null,
+    service_categories: [],
+    service_area: null,
+    availability: null,
+    credentials: {
+      licensed: null,
+      insured: null,
+      years_experience: null,
+      references_available: null,
+      certifications: [],
+    },
+    pricing: {
+      hourly_rate_min: null,
+      hourly_rate_max: null,
+      fixed_prices: {},
+    },
+    preferences: {
+      min_job_size_hours: null,
+      max_travel_distance: null,
+      provides_materials: null,
+      preferred_payment: [],
+    },
+    bio: null,
+  };
+  // When entering profile creation from another phase (e.g. job_browsing), treat as new profile flow:
+  // clear profileId so we create a new row instead of updating an existing one (one provider can have multiple profiles).
+  const isEnteringProfileCreation = sessionData.phase !== 'profile_creation';
+  const collected = isEnteringProfileCreation
+    ? { ...baseCollected, profileId: null }
+    : baseCollected;
+
   const initialState = {
     sessionId,
     sellerId,
@@ -994,30 +1054,7 @@ export async function runSellerProfileConversation(input) {
     phase: sessionData.phase || 'collection',
     currentMessage: message,
     messages: messages,
-    collected: sessionData.state?.collected || {
-      service_categories: [],
-      service_area: null,
-      availability: null,
-      credentials: {
-        licensed: null,
-        insured: null,
-        years_experience: null,
-        references_available: null,
-        certifications: [],
-      },
-      pricing: {
-        hourly_rate_min: null,
-        hourly_rate_max: null,
-        fixed_prices: {},
-      },
-      preferences: {
-        min_job_size_hours: null,
-        max_travel_distance: null,
-        provides_materials: null,
-        preferred_payment: [],
-      },
-      bio: null,
-    },
+    collected,
     requiredMissing: sessionData.state?.requiredMissing || ['service_categories', 'service_area', 'availability', 'pricing'],
     optionalMissing: sessionData.state?.optionalMissing || ['years_experience', 'licensed', 'references', 'bio', 'min_job_size'],
     serviceCategories: sessionData.state?.serviceCategories || null,

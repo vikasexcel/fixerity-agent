@@ -23,11 +23,13 @@ export function ProviderMatchCard({
   const [showDetails, setShowDetails] = useState(false);
 
   const quote = deal.quote;
-  const sellerName = deal.sellerName || `Provider ${rank}`;
-  
-  // Extract rating from the deal if available (you might need to adjust based on your actual data structure)
+  const sellerName = (deal.sellerName ?? (deal as any).name)?.trim() || `Provider ${rank}`;
+
   const rating = (deal as any).provider?.average_rating || 4.5;
   const jobsCompleted = (deal as any).provider?.total_completed_order || 0;
+  const sellerEmail = deal.sellerEmail ?? (deal as any).email ?? null;
+  const sellerContactNumber = deal.sellerContactNumber ?? (deal as any).contactNumber ?? null;
+  const hasContactDetails = !!sellerEmail || !!sellerContactNumber;
 
   return (
     <div className="bg-card border border-border rounded-lg overflow-hidden hover:shadow-md transition-shadow">
@@ -174,13 +176,28 @@ export function ProviderMatchCard({
               </div>
             )}
 
-            {/* Negotiation Message */}
-            {deal.negotiationMessage && (
+            {/* Provider contact details (email, contact number) */}
+            {hasContactDetails && (
               <div className="mt-3 pt-3 border-t border-border/30">
-                <p className="text-xs text-muted-foreground mb-1">Provider's message:</p>
-                <p className="text-sm text-foreground italic leading-relaxed">
-                  &quot;{deal.negotiationMessage}&quot;
-                </p>
+                <p className="text-xs text-muted-foreground mb-2">Provider details</p>
+                <div className="space-y-1.5 text-sm text-foreground">
+                  {sellerEmail && (
+                    <div>
+                      <span className="text-muted-foreground">Email:</span>{' '}
+                      <a href={`mailto:${sellerEmail}`} className="text-primary hover:underline">
+                        {sellerEmail}
+                      </a>
+                    </div>
+                  )}
+                  {sellerContactNumber && (
+                    <div>
+                      <span className="text-muted-foreground">Contact:</span>{' '}
+                      <a href={`tel:${sellerContactNumber}`} className="text-primary hover:underline">
+                        {sellerContactNumber}
+                      </a>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
