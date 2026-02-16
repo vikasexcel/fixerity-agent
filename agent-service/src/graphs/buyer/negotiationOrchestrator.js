@@ -163,6 +163,8 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
     priorities: job.priorities,
     service_category_id,
     service_category_name: job.service_category_name ?? null,
+    description: job.description ?? null,
+    location: job.location ?? null,
   };
 
   const { providers, error } = await runProviderMatching({ ...job, service_category_name: job.service_category_name || service_category_name });

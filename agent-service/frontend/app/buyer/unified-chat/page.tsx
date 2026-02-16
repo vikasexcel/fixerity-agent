@@ -300,11 +300,13 @@ export default function UnifiedChatPage() {
 
         <div className="space-y-4 pb-4">
           {messages.map((m, i) => {
+            const safeContent = (c: unknown): string =>
+              typeof c === 'string' ? c : c !== null && typeof c === 'object' ? JSON.stringify(c, null, 2) : String(c ?? '');
             if (m.type === 'user') {
               return (
                 <div key={i} className="flex justify-end">
                   <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm">{m.content}</p>
+                    <p className="text-sm">{safeContent(m.content)}</p>
                   </div>
                 </div>
               );
@@ -313,7 +315,7 @@ export default function UnifiedChatPage() {
               return (
                 <div key={i} className="flex justify-start">
                   <div className="bg-secondary/50 rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm text-foreground whitespace-pre-wrap">{m.content}</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">{safeContent(m.content)}</p>
                   </div>
                 </div>
               );
@@ -322,7 +324,7 @@ export default function UnifiedChatPage() {
               return (
                 <div key={i} className="flex justify-start">
                   <div className="bg-destructive/10 text-destructive rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm">{m.content}</p>
+                    <p className="text-sm">{safeContent(m.content)}</p>
                   </div>
                 </div>
               );

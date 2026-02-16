@@ -160,22 +160,40 @@ Current Phase: ${phase}
 (Phases: conversation = collecting job info, confirmation = reviewing job before search, negotiation = finding providers, refinement = discussing results)
 Recent Conversation:\n${recentMessages || 'No previous messages'}\n${jobContext}\n${dealsContext}
 User's Current Message: "${message}"
+
 Classify the user's intent into ONE of these categories:
-1. **restart** - User wants to start over, cancel, or create a new/different job
-2. **confirm_and_proceed** - User explicitly confirms to proceed (only in confirmation phase)
-3. **modify_before_confirm** - User wants to change/add details before confirming (in confirmation phase)
-4. **continue_conversation** - User is providing job information or answering questions (in conversation phase)
-5. **refinement_question** - User is asking about job/provider details (in refinement phase)
-6. **select_provider** - User wants to select/book a specific provider (in refinement phase)
-7. **filter_results** - User wants to filter/sort providers (in refinement phase)
-8. **ask_question** - User is asking a general question not related to current phase
+
+1. **restart** - ONLY when the user EXPLICITLY wants to cancel, stop, or abandon the current flow. Examples: "never mind", "cancel", "start over", "let's do something else", "forget it", "I want to start fresh". Do NOT use restart when the user is describing what they need (e.g. a detailed job description). Describing a new job = continue_conversation.
+
+2. **confirm_and_proceed** - User explicitly confirms to proceed (only in confirmation phase). E.g. "yes", "looks good", "find providers", "proceed".
+
+3. **modify_before_confirm** - User wants to change or add details before confirming (in confirmation phase).
+
+4. **continue_conversation** - User is providing job information, answering questions, OR giving a full description of what they need. Use this when: the user describes a service with details (scope, budget, dates, address); the first message is a long description of their request; they are answering "what service", "what budget", etc. Example: "I need a full roof replacement. Here are the details: 2-story house, ~2000 sq ft, full tear-off, budget $15000, by end of March, address 123 Main St" -> continue_conversation.
+
+5. **refinement_question** - User is asking about job/provider details (in refinement phase).
+
+6. **select_provider** - User wants to select/book a specific provider (in refinement phase).
+
+7. **filter_results** - User wants to filter/sort providers (in refinement phase).
+
+8. **ask_question** - User is asking a general question not related to current phase.
+
 Reply ONLY with JSON:\n{ "intent": "<one of the 8 intents above>", "confidence": "<high|medium|low>", "reasoning": "<brief explanation>" }`;
   try {
     const res = await llm.invoke([new SystemMessage('Only output valid JSON. Be accurate in intent classification.'), new HumanMessage(prompt)]);
     let content = res.content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const result = JSON.parse(content);
     console.log(`[BuyerIntent] Detected: ${result.intent} (${result.confidence})`);
-    return result.intent;
+    const intent = result.intent;
+    if (phase === 'conversation' && !recentMessages?.trim() && intent === 'restart') {
+      const msg = (message || '').trim();
+      if (msg.length > 80 || /\d{4,}|\$\d+|budget|address|sq ft|replacement|repair|install/.test(msg)) {
+        console.log('[BuyerIntent] Override: first message with job-like details treated as continue_conversation');
+        return 'continue_conversation';
+      }
+    }
+    return intent;
   } catch (error) {
     console.error('[BuyerIntent] LLM classification error:', error.message);
     if (phase === 'conversation') return 'continue_conversation';
@@ -263,14 +281,23 @@ async function handleRefinement(session, message, send) {
   const recentMessages = conversationHistory.slice(-10).map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n');
   const jobContext = job ? `Job Details:\n- Title: ${job.title}\n- Service Category: ${job.service_category_id}\n- Budget: $${job.budget.min}-$${job.budget.max}\n- Start: ${job.startDate}\n- End: ${job.endDate}\n- Location: ${job.location || 'Not specified'}\n- Description: ${job.description || 'No detailed description'}` : 'No job details available.';
   const dealsContext = deals && deals.length > 0 ? `Available Providers (${deals.length}):\n${deals.map((d, i) => `${i + 1}. ${d.sellerName}\n   - Price: $${d.quote.price}\n   - Completion: ${d.quote.days} days\n   - Match Score: ${d.matchScore}/100`).join('\n')}` : 'No providers found yet.';
-  const prompt = `You are a helpful assistant in the refinement phase after finding service providers.\nConversation History:\n${recentMessages}\n${jobContext}\n${dealsContext}\nUser's Question: "${message}"\nAnswer naturally. Reply ONLY with JSON: { "message": "<response>", "intent": "<info_request|provider_selection|filter_request|new_search|comparison|other>", "requires_action": true/false }`;
+  const prompt = `You are a helpful assistant in the refinement phase after finding service providers.\nConversation History:\n${recentMessages}\n${jobContext}\n${dealsContext}\nUser's Question: "${message}"\nAnswer naturally. Reply ONLY with JSON: { "message": "<response as a string only, never an object>", "intent": "<info_request|provider_selection|filter_request|new_search|comparison|other>", "requires_action": true/false }. When the user asks for job details, summarize the job in a short friendly message using the job context above; do not return raw data.`;
   try {
-    const res = await llm.invoke([new SystemMessage('Only output valid JSON.'), new HumanMessage(prompt)]);
+    const res = await llm.invoke([new SystemMessage('Only output valid JSON. The "message" value must always be a string.'), new HumanMessage(prompt)]);
     let content = res.content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const response = JSON.parse(content);
-    send({ type: 'message', text: response.message });
+    let messageText = response.message;
+    if (messageText != null && typeof messageText !== 'string') {
+      if (job && typeof messageText === 'object' && (messageText.title || messageText.description != null)) {
+        messageText = `Here are your job details:\n\nTitle: ${job.title || 'N/A'}\nService: ${job.service_category_name ?? job.service_category_id ?? 'N/A'}\nBudget: $${job.budget?.min ?? '?'}-$${job.budget?.max ?? '?'}\nStart: ${job.startDate ?? 'N/A'}\nEnd: ${job.endDate ?? 'N/A'}\nLocation: ${typeof job.location === 'object' ? job.location?.address : job.location ?? 'N/A'}\nDescription: ${job.description || 'None'}`;
+      } else {
+        messageText = JSON.stringify(messageText);
+      }
+    }
+    messageText = String(messageText ?? '');
+    send({ type: 'message', text: messageText });
     await appendMessage(sessionId, { role: 'user', content: message });
-    await appendMessage(sessionId, { role: 'assistant', content: response.message });
+    await appendMessage(sessionId, { role: 'assistant', content: messageText });
     if (response.intent === 'info_request') {
       const lowerMessage = message.toLowerCase();
       if (lowerMessage.includes('all providers') || lowerMessage.includes('all details') || lowerMessage.includes('show all') || lowerMessage.includes('complete details')) {
@@ -285,14 +312,19 @@ async function handleRefinement(session, message, send) {
 
 async function handleGeneralQuestion(session, message, send) {
   const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.7, openAIApiKey: OPENAI_API_KEY });
-  const prompt = `You are a helpful assistant for a service marketplace platform (buyer side).\nUser's Question: "${message}"\nThis is a general question. Reply ONLY with JSON: { "message": "<your helpful response>" }`;
+  const prompt = `You are a helpful assistant for a service marketplace platform (buyer side).\nUser's Question: "${message}"\nThis is a general question. Reply ONLY with JSON: { "message": "<your helpful response as a string only>" }`;
   try {
-    const res = await llm.invoke([new SystemMessage('Only output valid JSON.'), new HumanMessage(prompt)]);
+    const res = await llm.invoke([new SystemMessage('Only output valid JSON. The "message" value must be a string.'), new HumanMessage(prompt)]);
     let content = res.content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const response = JSON.parse(content);
-    send({ type: 'message', text: response.message });
+    let messageText = response.message;
+    if (messageText != null && typeof messageText !== 'string') {
+      messageText = typeof messageText === 'object' ? JSON.stringify(messageText) : String(messageText);
+    }
+    messageText = String(messageText ?? '');
+    send({ type: 'message', text: messageText });
     await appendMessage(session.sessionId, { role: 'user', content: message });
-    await appendMessage(session.sessionId, { role: 'assistant', content: response.message });
+    await appendMessage(session.sessionId, { role: 'assistant', content: messageText });
   } catch (error) {
     send({ type: 'message', text: "I'm here to help you find service providers! You can describe what service you need, and I'll guide you through the process." });
   }

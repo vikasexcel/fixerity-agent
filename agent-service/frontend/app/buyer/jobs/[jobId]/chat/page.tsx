@@ -676,11 +676,13 @@ export default function JobChatPage() {
               </div>
             );
           }
+          const safeContent = (c: unknown): string =>
+            typeof c === 'string' ? c : c !== null && typeof c === 'object' ? JSON.stringify(c, null, 2) : String(c ?? '');
           if (msg.type === 'user') {
             return (
               <div key={idx} className="flex justify-end" role="article" aria-label="Your message">
                 <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[85%]">
-                  <p className="text-sm whitespace-pre-wrap break-words">{msg.content}</p>
+                  <p className="text-sm whitespace-pre-wrap break-words">{safeContent(msg.content)}</p>
                 </div>
               </div>
             );
@@ -689,7 +691,7 @@ export default function JobChatPage() {
             return (
               <div key={idx} className="flex justify-start" role="article" aria-label="Assistant reply">
                 <div className="bg-card border border-border rounded-lg px-4 py-2 max-w-[85%] text-sm text-foreground [&_p]:my-1 [&_p]:leading-relaxed [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0 [&_h1]:text-base [&_h2]:text-base [&_h3]:text-sm [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:overflow-x-auto [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-muted [&_code]:text-xs [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_a]:text-primary [&_a]:underline [&_strong]:font-semibold">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{safeContent(msg.content)}</ReactMarkdown>
                 </div>
               </div>
             );
@@ -700,7 +702,7 @@ export default function JobChatPage() {
               <div key={idx} className="flex justify-start" role="alert" aria-label="Error message">
                 <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-2 max-w-[85%] flex items-start gap-2">
                   <AlertCircle size={18} className="text-destructive shrink-0 mt-0.5" />
-                  <p className="text-sm text-destructive whitespace-pre-wrap break-words">{msg.content}</p>
+                  <p className="text-sm text-destructive whitespace-pre-wrap break-words">{safeContent(msg.content)}</p>
                 </div>
               </div>
             );

@@ -143,6 +143,11 @@ async function buyerNode(state) {
   const startDate = state.job.startDate || 'ASAP';
   const endDate = state.job.endDate || 'flexible';
   const jobTitle = state.job.title || 'service job';
+  const jobDescription = state.job.description ?? null;
+  const loc = state.job.location;
+  const jobLocation = loc != null && typeof loc === 'object'
+    ? (loc.address ?? JSON.stringify(loc))
+    : (loc != null ? String(loc) : '');
 
   let preferenceContext = '';
   if (state.buyerPreferences?.summary?.top_insights) {
@@ -160,6 +165,8 @@ Job Details:
 - Start: ${startDate}
 - End: ${endDate}
 - Budget: $${state.job.budget?.min || '?'} - $${state.job.budget?.max || '?'}
+- Scope/Description: ${jobDescription || 'Not provided'}
+- Location: ${jobLocation || 'Not specified'}
 ${preferenceContext}
 
 Write a NATURAL, CONVERSATIONAL message asking for:
@@ -169,6 +176,7 @@ Write a NATURAL, CONVERSATIONAL message asking for:
 4. Payment terms they offer (upfront % vs on completion)
 5. If they're licensed
 6. If they have references
+If Scope/Description is provided, your message should reference or include the key details so the provider understands the full scope and can give a complete quote without asking more questions.
 
 Tone:
 - Friendly and conversational (like texting a professional)
@@ -243,6 +251,12 @@ async function sellerNode(state) {
   const startDate = state.job.startDate || 'ASAP';
   const endDate = state.job.endDate || 'flexible';
   const jobTitle = state.job.title || 'the job';
+  const jobDescription = state.job.description ?? null;
+  const loc = state.job.location;
+  const jobLocation = loc != null && typeof loc === 'object'
+    ? (loc.address ?? JSON.stringify(loc))
+    : (loc != null ? String(loc) : '');
+
   const rating = state.providerServiceData.average_rating || 0;
   const jobsCompleted = state.providerServiceData.total_completed_order || 0;
   const isLicensed = state.providerServiceData.licensed !== false;
@@ -280,6 +294,8 @@ Job Requirements:
 - Client needs to start: ${startDate}
 - Client needs to finish: ${endDate}
 - Budget range: $${state.job.budget?.min || '?'} - $${state.job.budget?.max || '?'}
+- Full scope/description: ${jobDescription || 'No additional details'}
+- Location: ${jobLocation || 'Not specified'}
 
 CRITICAL - Date Availability:
 ${availability.canMeet 
@@ -298,6 +314,7 @@ Write a NATURAL, PROFESSIONAL response that includes:
 5. Your payment terms (e.g., "I typically do 20% upfront, 80% when done")
 6. Mention your license status naturally
 7. Mention references if available
+Base your quote on the full scope/description; address the client's specific requirements so they get a complete bid.
 
 Tone:
 - Professional but friendly (like a text from a skilled contractor)
