@@ -1,3 +1,5 @@
+import { backfillJobEmbeddings } from "./src/services/jobEmbeddingService.js";
 import { backfillSellerEmbeddings } from "./src/services/sellerEmbeddingService.js";
 
-await backfillSellerEmbeddings(); // re-embeds all profiles with new richer text
+await backfillJobEmbeddings();     // from job_embedding_service.js
+await backfillSellerEmbeddings();  // from seller_embedding_service.js
