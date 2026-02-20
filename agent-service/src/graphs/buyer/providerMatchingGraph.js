@@ -249,10 +249,30 @@ async function runFallbackProviderMatching(job) {
    FINAL LLM RANKER
 ───────────────────────────────────────────────────────────── */
 
-const FINAL_RANK_SYSTEM = `You are selecting the most accurate service providers (sellers) for a buyer's job.
-Rank candidates by best match — consider: service match, location, budget compatibility, credentials, availability.
-Output ONLY a JSON object: {"ranked_seller_ids": ["id1", "id2", ...]}
-Omit clearly unsuitable candidates. No other text.`;
+const FINAL_RANK_SYSTEM = `You are acting as a smart recruiter doing a final selection of service providers (sellers) for a buyer's job.
+
+Your job has TWO steps:
+
+STEP 1 — FILTER: Decide if each seller CAN actually do the required job based on their skills and services. Use real-world trade knowledge:
+- A "concrete work" provider CAN do "foundation repair", "slab work", "concrete pouring"
+- A "concrete work" provider CANNOT do "home cleaning", "painting", "electrical work"
+- A "plumber" CAN do "pipe repair", "drain cleaning", "water heater installation"
+- A "home cleaning" provider CANNOT do "roofing" or "carpentry"
+Use common sense about which trades overlap and which do not.
+
+STEP 2 — RANK: From the sellers who CAN do the job, rank them by best overall fit:
+- How closely their specific skills match the job requirements
+- Location compatibility with the job
+- Budget compatibility (their pricing vs job budget)
+- Credentials (licensed, references, years of experience)
+- Track record (completed jobs)
+- Availability vs job timeline
+
+OUTPUT RULES:
+- Return ONLY a JSON object: {"ranked_seller_ids": ["id1", "id2", ...]}
+- Only include sellers who CAN do this job
+- If NO sellers are suitable, return: {"ranked_seller_ids": []}
+- No explanation, no other text, just the JSON`;
 
 async function finalRankProvidersForJob(job, candidates) {
   logSection('Final LLM Ranking');
@@ -281,22 +301,48 @@ async function finalRankProvidersForJob(job, candidates) {
     .map((c, i) => `${i + 1}. seller_id: ${c.seller_id} | ${(c.searchable_text || '').slice(0, 400)}`)
     .join('\n');
 
-  const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.1, openAIApiKey: OPENAI_API_KEY });
-  const response = await llm.invoke([
-    new SystemMessage(FINAL_RANK_SYSTEM),
-    new HumanMessage(`Job:\n${jobSummary}\n\nCandidates:\n${candidateList}\n\nReturn JSON with most accurate providers first.`),
-  ]);
+  console.log('\n  Job context:');
+  console.log('  ' + '-'.repeat(56));
+  jobSummary.split('\n').forEach((l) => console.log('  ' + l));
+  console.log('  ' + '-'.repeat(56));
+  console.log(`\n  Candidates: ${candidates.length} sellers`);
 
-  const content = response?.content;
-  if (typeof content === 'string') {
-    content.split('\n').forEach((l) => console.log(`    ${l}`));
+  const userPrompt =
+    `Job:\n${jobSummary}\n\n` +
+    `Seller candidates:\n${candidateList}\n\n` +
+    `Return JSON with ranked_seller_ids — only sellers who CAN do this job, best fit first. ` +
+    `If none are suitable return {"ranked_seller_ids": []}`;
+
+  const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.1, openAIApiKey: OPENAI_API_KEY });
+
+  let content;
+  try {
+    const response = await llm.invoke([
+      new SystemMessage(FINAL_RANK_SYSTEM),
+      new HumanMessage(userPrompt),
+    ]);
+    content = response?.content;
+  } catch (err) {
+    console.error(`${LOG_PREFIX} LLM error in finalRankProvidersForJob:`, err.message);
+    return candidates.map((c) => c.seller_id);
   }
 
-  const ranked = parseRankedSellerIdsFromContent(typeof content === 'string' ? content : '');
-  if (ranked && Array.isArray(ranked) && ranked.length === 0) return [];
+  console.log('\n  LLM response:');
+  if (typeof content === 'string') content.split('\n').forEach((l) => console.log('    ' + l));
 
-  const valid  = ranked ? ranked.filter((id) => candidateSet.has(id)) : [];
-  const result = valid.length ? valid : candidates.map((c) => c.seller_id);
+  const ranked = parseRankedSellerIdsFromContent(typeof content === 'string' ? content : '');
+
+  // LLM explicitly returned empty — no suitable sellers, respect that decision
+  if (ranked && Array.isArray(ranked) && ranked.length === 0) {
+    console.log('\n  ⚠️  LLM determined: no suitable providers for this job');
+    return [];
+  }
+
+  // Filter to only valid IDs from our candidate set
+  const valid = ranked ? ranked.filter((id) => candidateSet.has(id)) : [];
+
+  // If LLM response was unparseable, fall back to original order
+  const result = valid.length > 0 ? valid : candidates.map((c) => c.seller_id);
 
   console.log(`\n  ✅ Final ranked: ${result.length} providers`);
   result.forEach((id, i) => console.log(`    [${i + 1}] ${id}`));
