@@ -619,3 +619,99 @@ export async function sendSellerChatMessage(
   return data.reply ?? '';
 }
 
+/** Session preview for sidebar chat list. */
+export interface SessionPreview {
+  sessionId: string;
+  title: string;
+  phase: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessagePreview: string | null;
+}
+
+/** Message from conversation history. */
+export interface SessionMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  createdAt?: string;
+}
+
+/** Full session data with messages. */
+export interface SessionData {
+  sessionId: string;
+  phase: string;
+  userId: string;
+  createdAt: string;
+  updatedAt: string;
+  job: Record<string, unknown> | null;
+  deals: Deal[];
+}
+
+/**
+ * Get all chat sessions for a user (for sidebar history).
+ * Calls GET /agent/sessions
+ */
+export async function getUserSessions(
+  userType: 'buyer' | 'seller',
+  userId: string,
+  options?: { limit?: number }
+): Promise<SessionPreview[]> {
+  const base = getAgentServiceUrl();
+  const params = new URLSearchParams({
+    userId,
+    userType,
+  });
+  if (options?.limit) params.set('limit', String(options.limit));
+
+  const res = await fetch(`${base}/agent/sessions?${params.toString()}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    status?: number;
+    sessions?: SessionPreview[];
+    message?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data?.message ?? res.statusText ?? 'Failed to load sessions');
+  }
+  return data.sessions ?? [];
+}
+
+/**
+ * Get session details and messages.
+ * Calls GET /agent/session/:sessionId
+ */
+export async function getSessionMessages(
+  sessionId: string
+): Promise<{ session: SessionData; messages: SessionMessage[] }> {
+  const base = getAgentServiceUrl();
+  const res = await fetch(`${base}/agent/session/${sessionId}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    status?: number;
+    session?: SessionData;
+    messages?: SessionMessage[];
+    message?: string;
+  };
+  if (!res.ok || data.status === 0) {
+    throw new Error(data?.message ?? res.statusText ?? 'Failed to load session');
+  }
+  return {
+    session: data.session ?? {
+      sessionId,
+      phase: 'conversation',
+      userId: '',
+      createdAt: '',
+      updatedAt: '',
+      job: null,
+      deals: [],
+    },
+    messages: data.messages ?? [],
+  };
+}
+

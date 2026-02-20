@@ -1,19 +1,37 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, User, Building2, Check } from 'lucide-react';
+import {
+  ArrowLeft,
+  Send,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+  User,
+  Building2,
+  Check,
+  MessageSquarePlus,
+  MessageCircle,
+  PanelLeftClose,
+  PanelLeft,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
   unifiedAgentChatStream,
+  getUserSessions,
+  getSessionMessages,
   type UnifiedChatStreamEvent,
   type NegotiationStep,
+  type SessionPreview,
+  type SessionMessage,
 } from '@/lib/agent-api';
 import { useAuth, getAccessToken } from '@/lib/auth-context';
 import type { Deal } from '@/lib/dummy-data';
 import { ProviderMatchCard } from '@/components/ProviderMatchCard';
+import { cn } from '@/lib/utils';
 
 type MatchPhase = 'evaluating' | 'complete' | 'error';
 
@@ -29,7 +47,19 @@ type UnifiedChatMessage =
   | { type: 'user'; content: string }
   | { type: 'assistant'; content: string }
   | { type: 'error'; content: string }
-  | { type: 'provider_matches'; deals: Deal[] }; // New type for final matches
+  | { type: 'provider_matches'; deals: Deal[] };
+
+type ChatSession = {
+  id: string;
+  sessionId: string | null;
+  title: string;
+  phase: string;
+  messages: UnifiedChatMessage[];
+  updatedAt: number;
+  isLoaded: boolean;
+};
+
+const MAX_TITLE_LENGTH = 40;
 
 function NegotiationProviderCard({
   provider,
@@ -90,19 +120,48 @@ function NegotiationProviderCard({
   );
 }
 
+function convertServerMessages(messages: SessionMessage[]): UnifiedChatMessage[] {
+  return messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => {
+      if (m.role === 'user') {
+        return { type: 'user' as const, content: m.content };
+      }
+      return { type: 'assistant' as const, content: m.content };
+    });
+}
+
+function createNewChat(): ChatSession {
+  return {
+    id: `chat-${Date.now()}`,
+    sessionId: null,
+    title: 'New chat',
+    phase: 'conversation',
+    messages: [],
+    updatedAt: Date.now(),
+    isLoaded: true,
+  };
+}
+
 export default function UnifiedChatPage() {
   const router = useRouter();
-  const sessionIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const [messages, setMessages] = useState<UnifiedChatMessage[]>([]);
+  const [chats, setChats] = useState<ChatSession[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
   const [sending, setSending] = useState(false);
-  const [phase, setPhase] = useState<string>('conversation');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [loadingChats, setLoadingChats] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
 
   const { session } = useAuth();
   const user = session.user;
   const token = getAccessToken();
+
+  const activeChat = activeChatId ? chats.find((c) => c.id === activeChatId) : null;
+  const displayMessages = activeChat?.messages ?? [];
+  const phase = activeChat?.phase ?? 'conversation';
 
   useEffect(() => {
     if (!session.isLoading && (!user || user.role !== 'buyer')) {
@@ -112,64 +171,169 @@ export default function UnifiedChatPage() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [displayMessages]);
 
-  const findLastMatchIndex = () => {
+  useEffect(() => {
+    if (!user?.id || user.role !== 'buyer') return;
+
+    const loadSessions = async () => {
+      setLoadingChats(true);
+      try {
+        const sessions = await getUserSessions('buyer', String(user.id), { limit: 50 });
+        if (sessions.length === 0) {
+          const newChat = createNewChat();
+          setChats([newChat]);
+          setActiveChatId(newChat.id);
+        } else {
+          const loadedChats: ChatSession[] = sessions.map((s: SessionPreview) => ({
+            id: s.sessionId,
+            sessionId: s.sessionId,
+            title: s.title || 'Chat',
+            phase: s.phase,
+            messages: [],
+            updatedAt: new Date(s.updatedAt).getTime(),
+            isLoaded: false,
+          }));
+          setChats(loadedChats);
+          setActiveChatId(loadedChats[0].id);
+        }
+      } catch (err) {
+        console.error('Failed to load sessions:', err);
+        const newChat = createNewChat();
+        setChats([newChat]);
+        setActiveChatId(newChat.id);
+      } finally {
+        setLoadingChats(false);
+      }
+    };
+
+    loadSessions();
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    if (!activeChat || activeChat.isLoaded || !activeChat.sessionId) return;
+
+    const loadMessages = async () => {
+      setLoadingMessages(true);
+      try {
+        const { session: sessionData, messages } = await getSessionMessages(activeChat.sessionId!);
+        const convertedMessages = convertServerMessages(messages);
+        setChats((prev) =>
+          prev.map((c) =>
+            c.id === activeChat.id
+              ? { ...c, messages: convertedMessages, phase: sessionData.phase, isLoaded: true }
+              : c
+          )
+        );
+      } catch (err) {
+        console.error('Failed to load messages:', err);
+        setChats((prev) =>
+          prev.map((c) => (c.id === activeChat.id ? { ...c, isLoaded: true } : c))
+        );
+      } finally {
+        setLoadingMessages(false);
+      }
+    };
+
+    loadMessages();
+  }, [activeChat?.id, activeChat?.isLoaded, activeChat?.sessionId]);
+
+  const updateActiveChat = useCallback(
+    (updates: Partial<ChatSession>) => {
+      if (!activeChatId) return;
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === activeChatId ? { ...c, ...updates, updatedAt: Date.now() } : c
+        )
+      );
+    },
+    [activeChatId]
+  );
+
+  const handleNewChat = useCallback(() => {
+    const newChat = createNewChat();
+    setChats((prev) => [newChat, ...prev]);
+    setActiveChatId(newChat.id);
+    setSidebarOpen(false);
+  }, []);
+
+  const handleSelectChat = useCallback((id: string) => {
+    setActiveChatId(id);
+    setSidebarOpen(false);
+  }, []);
+
+  const findLastMatchIndex = useCallback(() => {
     let idx = -1;
-    messages.forEach((m, i) => {
+    displayMessages.forEach((m, i) => {
       if (m.type === 'match') idx = i;
     });
     return idx;
-  };
+  }, [displayMessages]);
 
-  const updateLastMatch = (updates: Partial<Extract<UnifiedChatMessage, { type: 'match' }>>) => {
-    const idx = findLastMatchIndex();
-    if (idx < 0) return;
-    setMessages((prev) =>
-      prev.map((m, i) => (i === idx && m.type === 'match' ? { ...m, ...updates } : m))
-    );
-  };
+  const updateLastMatch = useCallback(
+    (updates: Partial<Extract<UnifiedChatMessage, { type: 'match' }>>) => {
+      const idx = findLastMatchIndex();
+      if (idx < 0) return;
+      setChats((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeChatId) return c;
+          const newMessages = c.messages.map((m, i) =>
+            i === idx && m.type === 'match' ? { ...m, ...updates } : m
+          );
+          return { ...c, messages: newMessages, updatedAt: Date.now() };
+        })
+      );
+    },
+    [activeChatId, findLastMatchIndex]
+  );
 
   const handleApprove = async (deal: Deal) => {
     console.log('Approving deal:', deal);
-    setMessages((prev) => [
-      ...prev,
-      { 
-        type: 'assistant', 
-        content: `Great! Booking ${deal.sellerName} for $${deal.quote.price}. They'll contact you shortly!` 
-      }
-    ]);
-    // TODO: Call API to approve/book the provider
+    const msg: UnifiedChatMessage = {
+      type: 'assistant',
+      content: `Great! Booking ${deal.sellerName} for $${deal.quote.price}. They'll contact you shortly!`,
+    };
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === activeChatId ? { ...c, messages: [...c.messages, msg], updatedAt: Date.now() } : c
+      )
+    );
   };
 
   const handleReject = async (deal: Deal) => {
     console.log('Rejecting deal:', deal);
-    setMessages((prev) => [
-      ...prev,
-      { 
-        type: 'assistant', 
-        content: `Noted. I've removed ${deal.sellerName} from your options. Would you like to see other providers?` 
-      }
-    ]);
-    // TODO: Call API to reject the provider
+    const msg: UnifiedChatMessage = {
+      type: 'assistant',
+      content: `Noted. I've removed ${deal.sellerName} from your options. Would you like to see other providers?`,
+    };
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === activeChatId ? { ...c, messages: [...c.messages, msg], updatedAt: Date.now() } : c
+      )
+    );
   };
 
   const handleContact = async (deal: Deal) => {
     console.log('Contacting provider:', deal);
-    // TODO: Navigate to direct messaging with provider
-    // Example: router.push(`/buyer/messages/${deal.sellerId}`);
   };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = inputValue.trim();
-    if (!text || !user || !token || sending) return;
+    if (!text || !user || !token || sending || !activeChatId) return;
 
     setInputValue('');
-    setMessages((prev) => [...prev, { type: 'user', content: text }]);
+    const userMsg: UnifiedChatMessage = { type: 'user', content: text };
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === activeChatId ? { ...c, messages: [...c.messages, userMsg], updatedAt: Date.now() } : c
+      )
+    );
     setSending(true);
 
     const providersById = new Map<string, NegotiationProviderLog>();
+    const currentSessionId = activeChat?.sessionId ?? null;
+    const isNewChat = currentSessionId == null;
 
     try {
       const { sessionId } = await unifiedAgentChatStream(
@@ -178,28 +342,40 @@ export default function UnifiedChatPage() {
         token,
         text,
         {
-          sessionId: sessionIdRef.current,
+          sessionId: currentSessionId,
+          forceNewSession: isNewChat,
           onEvent: (event: UnifiedChatStreamEvent) => {
             if (event.type === 'session' && event.sessionId) {
-              sessionIdRef.current = event.sessionId;
+              updateActiveChat({ sessionId: event.sessionId });
             }
             if (event.type === 'phase') {
-              setPhase(event.phase);
+              updateActiveChat({ phase: event.phase });
             }
             if (event.type === 'message') {
-              setMessages((prev) => [...prev, { type: 'assistant', content: event.text }]);
+              const assistantMsg: UnifiedChatMessage = { type: 'assistant', content: event.text };
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === activeChatId
+                    ? { ...c, messages: [...c.messages, assistantMsg], updatedAt: Date.now() }
+                    : c
+                )
+              );
             }
             if (event.type === 'phase_transition' && event.to === 'negotiation') {
-              setPhase('negotiation');
-              setMessages((prev) => [
-                ...prev,
-                {
-                  type: 'match',
-                  phase: 'evaluating',
-                  negotiationProviders: [],
-                  deals: undefined,
-                },
-              ]);
+              updateActiveChat({ phase: 'negotiation' });
+              const matchMsg: UnifiedChatMessage = {
+                type: 'match',
+                phase: 'evaluating',
+                negotiationProviders: [],
+                deals: undefined,
+              };
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === activeChatId
+                    ? { ...c, messages: [...c.messages, matchMsg], updatedAt: Date.now() }
+                    : c
+                )
+              );
             }
             if (event.type === 'providers_fetched') {
               updateLastMatch({ providersCount: event.count });
@@ -237,31 +413,61 @@ export default function UnifiedChatPage() {
                   deals: event.deals ?? [],
                   negotiationProviders: Array.from(providersById.values()),
                 });
-                
-                // Add provider matches as a separate message for better UI
                 if (event.deals && event.deals.length > 0) {
-                  setMessages((prev) => [
-                    ...prev,
-                    { type: 'provider_matches', deals: event.deals }
-                  ]);
+                  const matchesMsg: UnifiedChatMessage = { type: 'provider_matches', deals: event.deals };
+                  setChats((prev) =>
+                    prev.map((c) =>
+                      c.id === activeChatId
+                        ? { ...c, messages: [...c.messages, matchesMsg], updatedAt: Date.now() }
+                        : c
+                    )
+                  );
                 }
               }
               if (event.reply) {
-                setMessages((prev) => [...prev, { type: 'assistant', content: event.reply! }]);
+                const replyMsg: UnifiedChatMessage = { type: 'assistant', content: event.reply };
+                setChats((prev) =>
+                  prev.map((c) =>
+                    c.id === activeChatId
+                      ? { ...c, messages: [...c.messages, replyMsg], updatedAt: Date.now() }
+                      : c
+                  )
+                );
               }
             }
             if (event.type === 'error') {
-              setMessages((prev) => [...prev, { type: 'error', content: event.error }]);
+              const errMsg: UnifiedChatMessage = { type: 'error', content: event.error };
+              setChats((prev) =>
+                prev.map((c) =>
+                  c.id === activeChatId
+                    ? { ...c, messages: [...c.messages, errMsg], updatedAt: Date.now() }
+                    : c
+                )
+              );
             }
           },
         }
       );
-      if (sessionId) sessionIdRef.current = sessionId;
+
+      if (sessionId) {
+        updateActiveChat({ sessionId });
+      }
+
+      const shouldUpdateTitle = activeChat?.title === 'New chat' || !activeChat?.title;
+      if (shouldUpdateTitle) {
+        const newTitle = text.slice(0, MAX_TITLE_LENGTH) + (text.length > MAX_TITLE_LENGTH ? '…' : '');
+        updateActiveChat({ title: newTitle });
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { type: 'error', content: err instanceof Error ? err.message : 'Something went wrong.' },
-      ]);
+      const errMsg: UnifiedChatMessage = {
+        type: 'error',
+        content: err instanceof Error ? err.message : 'Something went wrong.',
+      };
+      setChats((prev) =>
+        prev.map((c) =>
+          c.id === activeChatId ? { ...c, messages: [...c.messages, errMsg], updatedAt: Date.now() } : c
+        )
+      );
     } finally {
       setSending(false);
     }
@@ -272,124 +478,222 @@ export default function UnifiedChatPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      <header className="sticky top-0 bg-card border-b border-border z-40">
-        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3">
-          <Link
-            href="/buyer/dashboard"
-            className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-sm"
-          >
-            <ArrowLeft size={18} />
-            Back
-          </Link>
-          <h1 className="text-lg font-semibold text-foreground">Chat to find providers</h1>
-          {phase && (
-            <span className="text-xs text-muted-foreground capitalize ml-auto">{phase}</span>
-          )}
-        </div>
-      </header>
+    <div className="min-h-screen bg-background flex">
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close sidebar"
+          className="fixed inset-0 bg-black/40 z-20 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
-      <main className="flex-1 max-w-3xl w-full mx-auto px-4 py-4 flex flex-col">
-        {messages.length === 0 && (
-          <div className="flex-1 flex items-center justify-center text-center px-4">
-            <p className="text-muted-foreground text-sm">
-              Describe what you need (e.g. &quot;I need home cleaning&quot;). I&apos;ll ask about budget and dates, then find providers for you.
-            </p>
-          </div>
+      <aside
+        className={cn(
+          'flex flex-col border-r border-border bg-card text-card-foreground z-30',
+          'md:transition-[width] md:duration-200 md:ease-out',
+          sidebarOpen
+            ? 'w-[280px] min-w-[280px] fixed inset-y-0 left-0 md:relative md:inset-auto'
+            : 'w-0 min-w-0 overflow-hidden md:inline'
         )}
-
-        <div className="space-y-4 pb-4">
-          {messages.map((m, i) => {
-            const safeContent = (c: unknown): string =>
-              typeof c === 'string' ? c : c !== null && typeof c === 'object' ? JSON.stringify(c, null, 2) : String(c ?? '');
-            if (m.type === 'user') {
-              return (
-                <div key={i} className="flex justify-end">
-                  <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm">{safeContent(m.content)}</p>
-                  </div>
-                </div>
-              );
-            }
-            if (m.type === 'assistant') {
-              return (
-                <div key={i} className="flex justify-start">
-                  <div className="bg-secondary/50 rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm text-foreground whitespace-pre-wrap">{safeContent(m.content)}</p>
-                  </div>
-                </div>
-              );
-            }
-            if (m.type === 'error') {
-              return (
-                <div key={i} className="flex justify-start">
-                  <div className="bg-destructive/10 text-destructive rounded-lg px-4 py-2 max-w-[85%]">
-                    <p className="text-sm">{safeContent(m.content)}</p>
-                  </div>
-                </div>
-              );
-            }
-            if (m.type === 'match') {
-              return (
-                <div key={i} className="space-y-3">
-                  <div className="text-sm font-medium text-muted-foreground">
-                    {m.phase === 'evaluating' && (m.providersCount != null ? `Finding providers (${m.providersCount})…` : 'Finding providers…')}
-                    {m.phase === 'complete' && `Found ${m.deals?.length ?? 0} provider(s).`}
-                    {m.phase === 'error' && (m.error || 'Something went wrong.')}
-                  </div>
-                  {m.negotiationProviders && m.negotiationProviders.length > 0 && (
-                    <div className="space-y-2">
-                      {m.negotiationProviders.map((prov, idx) => (
-                        <NegotiationProviderCard key={prov.providerId} provider={prov} rank={idx + 1} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            }
-            if (m.type === 'provider_matches') {
-              return (
-                <div key={i} className="space-y-3">
-                  <div className="bg-card border border-border rounded-lg p-4">
-                    <h3 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
-                      <Building2 size={18} className="text-primary" />
-                      Top Matches
-                    </h3>
-                    <div className="space-y-3">
-                      {m.deals.map((deal, idx) => (
-                        <ProviderMatchCard
-                          key={deal.id || idx}
-                          deal={deal}
-                          rank={idx + 1}
-                          onApprove={handleApprove}
-                          onReject={handleReject}
-                          onContact={handleContact}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              );
-            }
-            return null;
-          })}
-        </div>
-
-        <div ref={messagesEndRef} />
-
-        <form onSubmit={handleSend} className="sticky bottom-0 bg-background pt-2 pb-4 flex gap-2">
-          <Input
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Type your message..."
-            className="flex-1"
-            disabled={sending}
-          />
-          <Button type="submit" disabled={sending || !inputValue.trim()}>
-            {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+      >
+        <div className={cn('flex flex-col h-full w-[280px]', !sidebarOpen && 'invisible w-0')}>
+          <div className="p-3 border-b border-border flex items-center justify-between shrink-0">
+            <Link
+              href="/buyer/dashboard"
+              className="text-muted-foreground hover:text-foreground transition p-1.5 rounded-lg hover:bg-secondary"
+              aria-label="Back to dashboard"
+            >
+              <ArrowLeft size={20} />
+            </Link>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSidebarOpen(false)}
+              className="shrink-0 lg:hidden"
+              aria-label="Close sidebar"
+            >
+              <PanelLeftClose size={20} />
+            </Button>
+          </div>
+          <Button
+            onClick={handleNewChat}
+            className="m-3 gap-2 bg-primary text-primary-foreground hover:bg-primary/90"
+            aria-label="New chat"
+          >
+            <MessageSquarePlus size={18} />
+            New chat
           </Button>
-        </form>
-      </main>
+          <div className="flex-1 overflow-y-auto px-2 pb-4">
+            {loadingChats ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 size={20} className="animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <nav className="space-y-0.5" aria-label="Chat list">
+                {chats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    type="button"
+                    onClick={() => handleSelectChat(chat.id)}
+                    className={cn(
+                      'w-full text-left rounded-lg px-3 py-2.5 text-sm transition-colors flex items-center gap-2',
+                      activeChatId === chat.id
+                        ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                        : 'hover:bg-sidebar-accent/60 text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <MessageCircle size={16} className="shrink-0 opacity-70" />
+                    <span className="truncate flex-1">{chat.title}</span>
+                  </button>
+                ))}
+              </nav>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="sticky top-0 bg-card border-b border-border z-20 flex items-center gap-2 px-4 py-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setSidebarOpen((o) => !o)}
+            aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
+          >
+            {sidebarOpen ? <PanelLeftClose size={20} /> : <PanelLeft size={20} />}
+          </Button>
+          <h1 className="text-lg font-semibold text-foreground truncate flex-1">
+            {activeChat?.title ?? 'Chat to find providers'}
+          </h1>
+          {phase && (
+            <span className="text-xs text-muted-foreground capitalize shrink-0">{phase}</span>
+          )}
+        </header>
+
+        <main className="flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-6 py-4 max-w-3xl w-full mx-auto">
+          {loadingMessages ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 size={24} className="animate-spin text-muted-foreground" />
+            </div>
+          ) : displayMessages.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center text-center px-4 min-h-[200px]">
+              <p className="text-muted-foreground text-sm">
+                Describe what you need (e.g. &quot;I need home cleaning&quot;). I&apos;ll ask about budget and dates, then find providers for you.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4 pb-4">
+              {displayMessages.map((m, i) => {
+                const safeContent = (c: unknown): string =>
+                  typeof c === 'string' ? c : c !== null && typeof c === 'object' ? JSON.stringify(c, null, 2) : String(c ?? '');
+                if (m.type === 'user') {
+                  return (
+                    <div key={i} className="flex justify-end">
+                      <div className="bg-primary text-primary-foreground rounded-lg px-4 py-2 max-w-[85%]">
+                        <p className="text-sm whitespace-pre-wrap break-words">{safeContent(m.content)}</p>
+                      </div>
+                    </div>
+                  );
+                }
+                if (m.type === 'assistant') {
+                  return (
+                    <div key={i} className="flex justify-start w-full">
+                      <div className="bg-card border border-border rounded-lg px-4 py-3 w-full max-w-full min-w-0">
+                        <div className="text-sm text-foreground whitespace-pre-wrap break-words leading-relaxed">
+                          {safeContent(m.content)}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+                if (m.type === 'error') {
+                  return (
+                    <div key={i} className="flex justify-start">
+                      <div className="bg-destructive/10 text-destructive rounded-lg px-4 py-2 max-w-[85%]">
+                        <p className="text-sm">{safeContent(m.content)}</p>
+                      </div>
+                    </div>
+                  );
+                }
+                if (m.type === 'match') {
+                  return (
+                    <div key={i} className="space-y-3">
+                      <div className="text-sm font-medium text-muted-foreground">
+                        {m.phase === 'evaluating' && (m.providersCount != null ? `Finding providers (${m.providersCount})…` : 'Finding providers…')}
+                        {m.phase === 'complete' && `Found ${m.deals?.length ?? 0} provider(s).`}
+                        {m.phase === 'error' && (m.error || 'Something went wrong.')}
+                      </div>
+                      {m.negotiationProviders && m.negotiationProviders.length > 0 && (
+                        <div className="space-y-2">
+                          {m.negotiationProviders.map((prov, idx) => (
+                            <NegotiationProviderCard key={prov.providerId} provider={prov} rank={idx + 1} />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                if (m.type === 'provider_matches') {
+                  return (
+                    <div key={i} className="space-y-3">
+                      <div className="bg-card border border-border rounded-lg p-4">
+                        <h3 className="text-base font-semibold text-foreground mb-3 flex items-center gap-2">
+                          <Building2 size={18} className="text-primary" />
+                          Top Matches
+                        </h3>
+                        <div className="space-y-3">
+                          {m.deals.map((deal, idx) => (
+                            <ProviderMatchCard
+                              key={deal.id || idx}
+                              deal={deal}
+                              rank={idx + 1}
+                              onApprove={handleApprove}
+                              onReject={handleReject}
+                              onContact={handleContact}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              })}
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </main>
+
+        <div className="sticky bottom-0 bg-background border-t border-border py-4">
+          <div className="max-w-3xl mx-auto px-4 sm:px-6">
+            <form onSubmit={handleSend} className="flex gap-2">
+              <Input
+                type="text"
+                placeholder="Type your message..."
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                className="flex-1 bg-card border-border"
+                aria-label="Message input"
+                autoComplete="off"
+                disabled={sending}
+              />
+              <Button
+                type="submit"
+                disabled={!inputValue.trim() || sending}
+                className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0"
+                aria-label="Send message"
+              >
+                {sending ? (
+                  <Loader2 size={20} className="animate-spin" />
+                ) : (
+                  <Send size={20} />
+                )}
+              </Button>
+            </form>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

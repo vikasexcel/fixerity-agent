@@ -430,6 +430,81 @@ router.delete('/session/:sessionId', async (req, res) => {
   }
 });
 
+/* -------------------- LIST USER SESSIONS -------------------- */
+
+/**
+ * GET /api/agent/sessions
+ * 
+ * List all sessions for a user (for chat history sidebar)
+ * Query params:
+ * - userId: string (required)
+ * - userType: 'buyer' | 'seller' (required)
+ * - limit: number (optional, default 50)
+ */
+router.get('/sessions', async (req, res) => {
+  try {
+    const { userId, userType, limit } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        status: 0,
+        message: 'userId is required',
+      });
+    }
+
+    if (!userType || !['buyer', 'seller'].includes(userType)) {
+      return res.status(400).json({
+        status: 0,
+        message: 'userType must be "buyer" or "seller"',
+      });
+    }
+
+    const sessions = await sessionRepository.findByUser(String(userId), userType, {
+      limit: limit ? Number(limit) : 50,
+    });
+
+    const sessionList = sessions.map((session) => {
+      const state = session.state || {};
+      const messages = session.messages || [];
+      const lastMessage = messages[0];
+      
+      let title = 'New chat';
+      if (state.collected?.title) {
+        title = state.collected.title;
+      } else if (state.collected?.service_category_name) {
+        title = state.collected.service_category_name;
+      } else if (lastMessage?.content) {
+        const content = String(lastMessage.content);
+        title = content.length > 40 ? content.slice(0, 40) + '…' : content;
+      }
+
+      return {
+        sessionId: session.id,
+        title,
+        phase: session.phase,
+        isActive: session.isActive,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messageCount: messages.length,
+        lastMessagePreview: lastMessage?.content ? String(lastMessage.content).slice(0, 100) : null,
+      };
+    });
+
+    res.json({
+      status: 1,
+      message: 'Success',
+      sessions: sessionList,
+    });
+
+  } catch (error) {
+    console.error('[Agent Route] List sessions error:', error);
+    res.status(500).json({
+      status: 0,
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
 /* -------------------- HEALTH CHECK -------------------- */
 
 /**
