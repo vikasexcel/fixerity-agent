@@ -12,35 +12,33 @@ import { getCustomerUserDetails, upsertJobEmbedding } from '../../services/index
    ================================================================================ */
 
 /**
- * Uses LLM to generate a professional job post from collected conversation info.
- * Produces structured sections dynamically based on available data.
- * Sections: Job Title, Description (Project Overview, Proposed Program, Site Info, Budget & Timeline, Proposal Requirements).
+ * Uses LLM to generate a professional RFP-style job post from collected conversation info.
+ * The RFP structure is determined dynamically by the LLM based on service type and available data—
+ * no hardcoded templates. Architect gets project/program/style/site sections; plumber gets issue/urgency/access;
+ * cleaning gets scope/frequency; etc.
  */
 async function generateJobPostWithLLM(collectedInfo, llm) {
-  const prompt = `You are a professional job post writer for a service marketplace. Given the following collected information from a buyer conversation, generate a complete, professional job listing that providers can use to give accurate pricing and timelines.
+  const prompt = `You are a professional job post writer for a service marketplace. Given collected information from a buyer conversation, generate a complete, professional RFP-style job listing so providers can give accurate pricing and timelines.
 
 COLLECTED INFORMATION (JSON):
 ${JSON.stringify(collectedInfo, null, 2)}
 
-INSTRUCTIONS:
-1. Generate a professional, concise JOB TITLE (e.g. "Request for Architect – New Single-Family Residence, Saratoga CA").
-2. Generate a full DESCRIPTION with structured sections. Use ONLY sections that have relevant data. Format each section with a bold header followed by content.
+CRITICAL - DYNAMIC RFP STRUCTURE:
+Do NOT use a fixed template. Infer the appropriate RFP structure from service_category_name and the data you have.
 
-POSSIBLE SECTIONS (include only when data exists):
-- **PROJECT OVERVIEW** – Project type, target dates (design start, construction start, move-in), location summary
-- **SCOPE OF SERVICES** – For architect: concept/schematic, design development, construction docs, permit support, structural/civil coordination, construction admin, etc.
-- **PROPOSED PROGRAM** – Living area (sq ft), stories, garage, bedrooms, bathrooms, office, kitchen type, special features (high ceilings, large windows, outdoor living)
-- **STYLE PREFERENCES** – Architectural style (modern, contemporary, etc.) and any design direction
-- **SITE INFORMATION** – Lot size, zoning, topography, utilities, survey/soil report availability, constraints (easements, setbacks, HOA, tree restrictions)
-- **BUDGET & TIMELINE** – Design fee range, construction budget (if provided), level of finish, start/end dates, decision timeline
-- **PROPOSAL REQUIREMENTS** – What providers should include (scope by phase, fee estimate, timeline, permit assumptions, revision rounds, similar projects, availability)
+- For ARCHITECT / design / construction: PROJECT OVERVIEW, SCOPE OF SERVICES, PROPOSED PROGRAM, STYLE PREFERENCES, SITE INFORMATION, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
+- For PLUMBER / repair: ISSUE DETAILS (what's broken, where), URGENCY, PROPERTY & ACCESS, EXISTING SYSTEMS/FIXTURES, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
+- For HOME CLEANING: SCOPE (what's needed), FREQUENCY, PROPERTY SIZE, SPECIAL REQUIREMENTS (pets, supplies), BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
+- For ELECTRICIAN: SCOPE (panel, EV charger, etc.), PERMIT NEEDS, PROPERTY TYPE, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
+- For GENERAL CONTRACTOR: PROJECT TYPE & SCOPE, TIMELINE, PERMITS, EXISTING PLANS, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
+- For ANY other service: invent sections that fit the job type and collected data. Use 3–6 sections that help providers price accurately.
 
-For simpler job types (plumber, cleaning, etc.): use fewer sections—Description, Scope/Details, Budget & Timeline. Adapt to the job type.
+Include ONLY sections that have data. Format each section with a bold header (**SECTION NAME**) followed by content. For PROPOSAL REQUIREMENTS, state what providers should include in their response (e.g. quote, timeline, availability).
 
 Output valid JSON only:
 {
-  "title": "<professional job title>",
-  "description": "<full markdown-formatted description with **SECTION** headers and content>"
+  "title": "<professional job title for this service type>",
+  "description": "<full markdown-formatted RFP with **SECTION** headers and content>"
 }`;
 
   try {
@@ -208,13 +206,13 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
     },
     {
       name: 'create_job',
-      description: `Create a job listing on the marketplace. Call when you have gathered enough info for providers to give accurate bids. Required: service_category_name.
+      description: `Create a job listing on the marketplace. Call when you have gathered enough info for providers to give accurate bids. Required: service_category_name. Do NOT ask the user for confirmation—call this tool directly when ready.
 
-IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional job post (title + full description with sections) from your data. You do NOT need to compose the description—just pass the structured data.
+IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional RFP-style job post from your data. The RFP structure is determined dynamically by service type (plumber: Issue Details, Urgency, Property & Access; architect: Project Overview, Program, Style, Site; cleaning: Scope, Frequency, etc.). You do NOT need to compose the description—just pass the structured data.
 
-specific_requirements: Pass every detail the user shared. For architect: lot_size_sqft, zoning, topography, city, state, living_area_sqft, stories, bedrooms, bathrooms, garage, office, special_features, style, scope_phases, survey_available, constraints, design_fee_min/max, construction_budget_min/max, level_of_finish, design_start_target, construction_start_target, proposals_until, selection_target. For other jobs: job-type-specific fields (issue_type, urgency, frequency, sq_ft, etc.).
+specific_requirements: Pass every detail the user shared. Plumber: leak_location, issue_type, urgency, property_type, access, existing_fixtures. Architect: lot_size_sqft, living_area_sqft, bedrooms, style, scope_phases, survey_available, constraints. Cleaning: sq_ft, frequency, pets, supplies. Electrician: scope, panel_upgrade, ev_charger, permit_needs. Adapt to the job type.
 
-Also pass: budget_min, budget_max, start_date, end_date, location. The tool generates Project Overview, Proposed Program, Site Information, Budget & Timeline, Proposal Requirements dynamically.`,
+Also pass: budget_min, budget_max (use defaults if user said "flexible" or "reasonable"), start_date, end_date, location.`,
       schema: createJobSchema,
     }
   );

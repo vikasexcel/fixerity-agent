@@ -181,7 +181,7 @@ function formatJobCreatedResponse(job) {
     `**Title:** ${job.title || 'Job Listing'}\n`,
   ];
   if (job.description) {
-    parts.push(`**Description:**\n\n${job.description}\n`);
+    parts.push(`${job.description}\n`);
   }
   const budget = job.budget;
   if (budget && (budget.min != null || budget.max != null)) {
