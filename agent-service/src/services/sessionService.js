@@ -49,20 +49,7 @@ export const sessionService = {
   _getInitialState(userType) {
     if (userType === 'buyer') {
       return {
-        collected: {
-          service_category_id: null,
-          service_category_name: null,
-          title: null,
-          description: null,
-          budget: { min: null, max: null },
-          startDate: null,
-          endDate: null,
-          priorities: [],
-          location: null,
-        },
-        requiredMissing: ['service_category', 'budget_max', 'start_date', 'location'],
-        optionalMissing: ['title', 'description', 'budget_min', 'end_date'],
-        jobReadiness: 'incomplete',
+        job: null,
       };
     } else {
       // Seller

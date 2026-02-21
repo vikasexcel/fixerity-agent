@@ -337,7 +337,7 @@ async function handleBuyerRestart(session, send) {
   send({ type: 'session', sessionId: sessionObj.sessionId, phase: 'conversation', userType: 'buyer' });
   send({ type: 'phase', phase: 'conversation' });
   send({ type: 'message', text: "No problem, let's start fresh! What kind of service are you looking for today?" });
-  send({ type: 'collected', data: { service_category_id: null, service_category_name: null, title: null, description: null, budget: { min: null, max: null }, startDate: null, endDate: null, priorities: [], location: null }, requiredMissing: ['service_category_id', 'budget_max', 'start_date', 'location'], optionalMissing: ['title', 'description', 'budget_min', 'end_date'], jobReadiness: 'incomplete' });
+  send({ type: 'collected', data: {}, requiredMissing: [], optionalMissing: [], jobReadiness: 'incomplete' });
 }
 
 async function handleProviderSelection(session, message, send) {

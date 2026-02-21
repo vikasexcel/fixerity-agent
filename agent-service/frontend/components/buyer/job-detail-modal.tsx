@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Star, Sparkles, Target, X, MessageCircle, Loader2 } from 'lucide-react';
 import { Job, Deal } from '@/lib/dummy-data';
 import { Button } from '@/components/ui/button';
@@ -83,9 +85,11 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
       <div className="bg-card rounded-lg border border-border w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-lg">
         {/* Header */}
         <div className="sticky top-0 bg-card border-b border-border p-6 flex justify-between items-start">
-          <div>
+          <div className="min-w-0 flex-1 pr-8">
             <h2 className="text-2xl font-bold text-foreground">{job.title}</h2>
-            <p className="text-muted-foreground text-sm mt-1">{job.description}</p>
+            {job.description && (
+              <p className="text-muted-foreground text-sm mt-1 line-clamp-2">{job.description}</p>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -98,6 +102,16 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
 
         {/* Content */}
         <div className="p-6 space-y-6">
+          {/* Full Job Description (RFP-style with sections) */}
+          {job.description && (
+            <div>
+              <h3 className="text-lg font-semibold text-foreground mb-3">Project Details</h3>
+              <div className="bg-secondary/30 rounded-lg p-4 border border-border/50 prose prose-sm dark:prose-invert max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{job.description}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+
           {/* Budget & Timeline */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="bg-secondary/50 rounded-lg p-4">
@@ -120,7 +134,7 @@ export function JobDetailModal({ job, deals: dealsProp = [], mode = 'with-recomm
           <div>
             <h3 className="text-lg font-semibold text-foreground mb-4">Job Requirements & Priorities</h3>
             <div className="space-y-3">
-              {job.priorities.map((priority, idx) => (
+              {(job.priorities || []).map((priority, idx) => (
                 <div key={idx} className="bg-secondary/30 rounded-lg p-4 border border-border/50">
                   <div className="flex items-start gap-3">
                     <span className="flex items-center">{getPriorityIcon(priority.level)}</span>
