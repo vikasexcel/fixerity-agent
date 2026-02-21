@@ -120,6 +120,17 @@ function buildProfileSummary(sellerProfile) {
     parts.push(`Bio: ${String(sellerProfile.bio).slice(0, 200)}`);
   }
 
+  // Conversation-derived profile (equipment, materials, project types, etc.)
+  const conv = sellerProfile?.preferences?.conversation_profile;
+  if (conv && typeof conv === 'object') {
+    const cp = [];
+    if (conv.equipment?.length) cp.push(`Equipment: ${conv.equipment.join(', ')}`);
+    if (conv.materials?.length) cp.push(`Materials: ${conv.materials.join(', ')}`);
+    if (conv.project_focus) cp.push(`Focus: ${conv.project_focus}`);
+    if (conv.additional_services?.length) cp.push(`Also offers: ${conv.additional_services.join(', ')}`);
+    if (cp.length > 0) parts.push(`Details: ${cp.join('; ')}`);
+  }
+
   return parts.join('\n') || 'Service provider (no profile details)';
 }
 
@@ -258,9 +269,10 @@ const RERANK_SELLERS_SYSTEM = `You are acting as a smart recruiter matching serv
 Your job has TWO steps:
 
 STEP 1 — FILTER: Go through each seller candidate and decide if this seller CAN do the required job based on their skills/services. Use real-world trade knowledge:
-- A "concrete work" provider CAN do "foundation repair" jobs
+- A "concrete work" or "foundation repair" provider CAN do "foundation crack repair", "foundation leak", "concrete repair" jobs (even if job category says Plumbers—buyers sometimes miscategorize)
 - A "home cleaning" provider CANNOT do "electrical work" jobs
 - A "plumber" CAN do "pipe repair" jobs
+- Consider the seller's conversation-derived details (equipment, materials, project types) in searchable_text—not just category labels
 - Use common sense about which trades overlap and which do not
 
 STEP 2 — RANK: From the sellers who CAN do the job, rank them by best fit considering:

@@ -1,11 +1,12 @@
 import { runConversation } from './buyer/conversationGraph.js';
 import { runNegotiationAndMatchStream, updateNegotiationOutcome } from './buyer/negotiationOrchestrator.js';
-import { runSellerProfileConversation } from './seller/sellerProfileGraph.js';
+import { runProviderProfileConversation } from './seller/providerConversationGraph.js';
 import { findJobsForSeller } from './seller/jobMatchingGraph.js';
 import { submitSellerBid } from './seller/sellerBiddingGraph.js';
 import { getSellerDashboard } from './seller/sellerOrchestrator.js';
 import { invokeSellerAgent, resumeSellerAgent } from './seller/sellerAgentGraph.js';
 import { sessionService, messageService } from '../services/index.js';
+import { logSellerAgent } from '../utils/providerProfileLogger.js';
 import { sessionRepository } from '../../prisma/repositories/sessionRepository.js';
 import { prisma } from '../primsadb.js';
 import { ChatOpenAI } from '@langchain/openai';
@@ -399,6 +400,17 @@ async function handleFilterResults(session, message, send) {
 async function handleSellerAgent(input, send) {
   const { sellerId, accessToken, message, resume, forceNewSession } = input;
   let { sessionId } = input;
+
+  logSellerAgent('handleSellerAgent_input', {
+    sellerId: sellerId ?? null,
+    sessionId: sessionId ?? null,
+    hasMessage: !!message,
+    messageLength: typeof message === 'string' ? message.length : 0,
+    messagePreview: typeof message === 'string' ? message.slice(0, 80) + (message.length > 80 ? '...' : '') : null,
+    resume: resume !== undefined && resume !== null,
+    forceNewSession: !!forceNewSession,
+  });
+
   if (!sellerId || !accessToken) {
     send({ type: 'error', error: 'Missing sellerId or accessToken' });
     return;
@@ -412,13 +424,16 @@ async function handleSellerAgent(input, send) {
         const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
         dbSession = session;
         sessionId = dbSession.id;
+        logSellerAgent('session_created_new_after_inactive', { sessionId, sellerId: sellerIdStr });
       } else {
         sessionId = dbSession.id;
+        logSellerAgent('session_resumed', { sessionId, phase: dbSession.phase });
       }
     } else {
       const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
       dbSession = session;
       sessionId = dbSession.id;
+      logSellerAgent('session_created_new', { sessionId, sellerId: sellerIdStr, phase: dbSession.phase });
     }
     const profileSessionScoped = !!(forceNewSession || dbSession?.state?.profileSessionScoped);
     const config = { configurable: { thread_id: sessionId, sellerId: sellerIdStr, profileSessionScoped } };
@@ -443,6 +458,74 @@ async function handleSellerAgent(input, send) {
       send({ type: 'error', error: 'Message is required' });
       return;
     }
+
+    const providerId = parseInt(sellerIdStr, 10);
+    const hasProfile = !isNaN(providerId) && (await prisma.sellerProfile.findFirst({
+      where: { providerId, active: true },
+      select: { id: true },
+    }));
+    const phaseProfileCreation = dbSession?.phase === 'profile_creation';
+
+    // When the user is describing their specialty (e.g. "My specialty is concrete work..."),
+    // always use the provider profile flow so they get domain-specific questions—not the
+    // generic seller agent which asks for location first.
+    const messageLower = (message || '').trim().toLowerCase();
+    const suggestsProfileCreation =
+      messageLower.includes('my specialty') ||
+      messageLower.includes('i build') ||
+      messageLower.includes('i repair') ||
+      messageLower.includes("i'm a ") ||
+      messageLower.includes('i am a ') ||
+      messageLower.includes('i do ') ||
+      messageLower.includes('i offer ') ||
+      /^(i do|i'm|i am|my (specialty|service|work))/.test(messageLower);
+
+    const useProviderProfileFlow = !hasProfile || phaseProfileCreation || suggestsProfileCreation;
+
+    logSellerAgent('routing_decision', {
+      sessionId,
+      sellerId: sellerIdStr,
+      providerId: isNaN(providerId) ? null : providerId,
+      hasProfile: !!hasProfile,
+      phase: dbSession?.phase ?? null,
+      phaseProfileCreation,
+      suggestsProfileCreation,
+      useProviderProfileFlow,
+    });
+
+    if (useProviderProfileFlow) {
+      send({ type: 'phase', phase: 'profile_creation' });
+      logSellerAgent('calling_runProviderProfileConversation', { sessionId, sellerId: sellerIdStr });
+      const result = await runProviderProfileConversation({ sessionId, sellerId: sellerIdStr, accessToken, message });
+      logSellerAgent('runProviderProfileConversation_result', {
+        sessionId,
+        phase: result?.phase ?? null,
+        action: result?.action ?? null,
+        profileCreated: !!result?.profile,
+        responseLength: result?.response?.length ?? 0,
+        responsePreview: result?.response ? result.response.slice(0, 120) + (result.response.length > 120 ? '...' : '') : null,
+      });
+      send({ type: 'message', text: result.response, action: result.action });
+      send({ type: 'profile_collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, profileReadiness: result.profileReadiness });
+      if (result.phase === 'complete' && result.profile) {
+        await sessionService.updateState(sessionId, { profile: result.profile });
+        await sessionService.updatePhase(sessionId, 'job_browsing');
+        send({ type: 'phase_transition', from: 'profile_creation', to: 'job_browsing', profile: result.profile });
+        send({ type: 'message', text: "Excellent! Your profile is now live. Let me find jobs that match your skills..." });
+        const jobResult = await findJobsForSeller(sellerIdStr);
+        await sessionService.updateState(sessionId, { matchedJobs: jobResult.jobs });
+        if (jobResult.jobs?.length > 0) {
+          const topJobs = jobResult.jobs.slice(0, 5);
+          send({ type: 'matched_jobs', jobs: topJobs.map((j) => ({ job_id: j.job_id, title: j.title, budget: j.budget, location: j.location?.address, start_date: j.start_date, matchScore: j.matchScore })), count: jobResult.jobs.length });
+          send({ type: 'message', text: `Great news! I found ${jobResult.jobs.length} job(s) matching your profile. Would you like to bid on one?` });
+        } else {
+          send({ type: 'message', text: "I couldn't find any jobs matching your profile right now. I'll notify you when new jobs become available!" });
+        }
+      }
+      return;
+    }
+
+    logSellerAgent('using_invokeSellerAgent', { sessionId, sellerId: sellerIdStr });
     await messageService.addUserMessage(sessionId, message).catch(() => {});
 
     const result = await invokeSellerAgent(
@@ -527,7 +610,7 @@ async function intelligentSellerIntent(message, session) {
 async function handleSellerProfileCreation(session, message, send) {
   const { sessionId, sellerId, accessToken } = session;
   send({ type: 'phase', phase: 'profile_creation' });
-  const result = await runSellerProfileConversation({ sessionId, sellerId, accessToken, message });
+  const result = await runProviderProfileConversation({ sessionId, sellerId, accessToken, message });
   send({ type: 'message', text: result.response, action: result.action });
   send({ type: 'profile_collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, profileReadiness: result.profileReadiness });
   if (result.phase === 'complete' && result.profile) {

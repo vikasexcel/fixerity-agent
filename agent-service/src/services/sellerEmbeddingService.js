@@ -150,6 +150,41 @@ export function buildSearchableText(profile) {
     if (rfp.length > 0) parts.push(`Preferences: ${rfp.join('; ')}.`);
   }
 
+  // ── 9. Conversation-derived profile (domain-specific details) ──────────────
+  // Captures equipment, materials, project sizes, focus, etc. from onboarding
+  const conv = prefs?.conversation_profile;
+  if (conv && typeof conv === 'object') {
+    const cp = [];
+    if (conv.equipment && Array.isArray(conv.equipment)) {
+      cp.push(`Equipment: ${conv.equipment.join(', ')}`);
+    }
+    if (conv.materials && Array.isArray(conv.materials)) {
+      cp.push(`Materials: ${conv.materials.join(', ')}`);
+    }
+    if (conv.project_focus && String(conv.project_focus).trim()) {
+      cp.push(`Focus: ${String(conv.project_focus).trim()}`);
+    }
+    if (conv.project_sizes_sqft) {
+      const ps = conv.project_sizes_sqft;
+      if (typeof ps === 'object' && (ps.min != null || ps.max != null)) {
+        cp.push(`Project sizes: ${ps.min ?? '?'}–${ps.max ?? '?'} sq ft`);
+      } else if (typeof ps === 'string' && ps.trim()) {
+        cp.push(`Project sizes: ${ps.trim()}`);
+      }
+    }
+    if (conv.additional_services && Array.isArray(conv.additional_services)) {
+      cp.push(`Also offers: ${conv.additional_services.join(', ')}`);
+    }
+    // Flatten any other string/array values for searchability
+    Object.entries(conv).forEach(([k, v]) => {
+      if (['equipment', 'materials', 'project_focus', 'project_sizes_sqft', 'additional_services'].includes(k)) return;
+      if (Array.isArray(v) && v.length > 0) cp.push(`${k}: ${v.join(', ')}`);
+      else if (typeof v === 'string' && v.trim()) cp.push(`${k}: ${v.trim()}`);
+      else if (typeof v === 'boolean' && v) cp.push(k.replace(/_/g, ' '));
+    });
+    if (cp.length > 0) parts.push(`Details: ${cp.join('. ')}.`);
+  }
+
   return parts.join(' ').trim() || 'No profile content available.';
 }
 
