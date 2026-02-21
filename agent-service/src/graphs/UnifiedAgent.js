@@ -15,17 +15,21 @@ import { OPENAI_API_KEY } from '../config/index.js';
 /* UNIFIED AGENT - Supports Both Buyer and Seller (No Redis, Services-Only) */
 
 async function getMessagesForSession(sessionId, limit = 50) {
+  console.log('[UnifiedAgent] getMessagesForSession sessionId=', sessionId, 'limit=', limit);
   const history = await messageService.getConversationHistory(sessionId, { limit, includeSystem: true });
+  console.log('[UnifiedAgent] getMessagesForSession result count=', history?.length ?? 0);
   return history.map(m => ({ role: m.role, content: m.content }));
 }
 
 async function appendMessage(sessionId, { role, content }) {
+  console.log('[UnifiedAgent] appendMessage sessionId=', sessionId, 'role=', role);
   if (role === 'user') await messageService.addUserMessage(sessionId, content);
   else if (role === 'assistant') await messageService.addAssistantMessage(sessionId, content);
   else if (role === 'system') await messageService.addSystemMessage(sessionId, content);
 }
 
 async function cleanupMessages(sessionId) {
+  console.log('[UnifiedAgent] cleanupMessages sessionId=', sessionId);
   await messageService.clearHistory(sessionId);
 }
 
@@ -61,43 +65,55 @@ function buildSellerSessionFromDb(dbSession) {
 
 export const sessionManager = {
   async cleanup(sessionId) {
+    console.log('[UnifiedAgent] SessionManager.cleanup sessionId=', sessionId);
     await sessionRepository.markInactive(sessionId);
     await cleanupMessages(sessionId).catch(() => {});
-    console.log(`[SessionManager] Cleaned up session: ${sessionId}`);
+    console.log('[UnifiedAgent] SessionManager cleanup done sessionId=', sessionId);
   },
 };
 
 export const sellerSessionManager = {
   async cleanup(sessionId) {
+    console.log('[UnifiedAgent] SellerSessionManager.cleanup | sessionId=', sessionId);
     await sessionRepository.markInactive(sessionId);
     await cleanupMessages(sessionId).catch(() => {});
-    console.log(`[SellerSessionManager] Cleaned up session: ${sessionId}`);
+    console.log('[UnifiedAgent] SellerSessionManager cleanup done | sessionId=', sessionId);
   },
 };
 
 export async function handleAgentChat(input, send) {
-  if (input.userType === 'seller') return handleSellerAgent(input, send);
+  console.log('[UnifiedAgent] ========== handleAgentChat ========== userType=', input.userType, 'sessionId=', input.sessionId);
+  if (input.userType === 'seller') {
+    console.log('[UnifiedAgent] routing to handleSellerAgent');
+    return handleSellerAgent(input, send);
+  }
+  console.log('[UnifiedAgent] routing to handleBuyerAgent');
   return handleBuyerAgent(input, send);
 }
 
 /* ---------- BUYER AGENT ---------- */
 
 async function handleBuyerAgent(input, send) {
+  console.log('[UnifiedAgent] --- handleBuyerAgent ---');
   const { buyerId, accessToken, message, forceNewSession } = input;
   let { sessionId } = input;
   if (!buyerId || !accessToken) {
+    console.log('[UnifiedAgent] handleBuyerAgent validation failed | missing buyerId or accessToken');
     send({ type: 'error', error: 'Missing buyerId or accessToken' });
     return;
   }
   if (!message || typeof message !== 'string') {
+    console.log('[UnifiedAgent] handleBuyerAgent validation failed | message required');
     send({ type: 'error', error: 'Message is required' });
     return;
   }
   try {
     let dbSession;
     if (sessionId) {
+      console.log('[UnifiedAgent] handleBuyerAgent resolving session by id | sessionId=', sessionId);
       dbSession = await sessionRepository.findById(sessionId);
       if (!dbSession || !dbSession.isActive) {
+        console.log('[UnifiedAgent] handleBuyerAgent session not found or inactive, getOrCreate');
         const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken, forceNew: !!forceNewSession });
         dbSession = session;
         sessionId = dbSession.id;
@@ -105,49 +121,73 @@ async function handleBuyerAgent(input, send) {
         sessionId = dbSession.id;
       }
     } else {
+      console.log('[UnifiedAgent] handleBuyerAgent no sessionId, getOrCreate');
       const { session } = await sessionService.getOrCreateSession({ userId: buyerId, userType: 'buyer', accessToken, forceNew: !!forceNewSession });
       dbSession = session;
       sessionId = dbSession.id;
     }
+    console.log('[UnifiedAgent] handleBuyerAgent session ready | sessionId=', sessionId, '| phase=', dbSession.phase);
     const session = buildBuyerSessionFromDb(dbSession);
     send({ type: 'session', sessionId: session.sessionId, phase: session.phase, userType: 'buyer' });
     const intent = await intelligentBuyerIntentCheck(message, session);
-    console.log(`[BuyerAgent] Phase: ${session.phase}, Intent: ${intent}`);
+    console.log('[UnifiedAgent] handleBuyerAgent intent=', intent, '| phase=', session.phase);
     switch (intent) {
       case 'restart':
+        console.log('[UnifiedAgent] handleBuyerAgent branch restart');
         await handleBuyerRestart(session, send);
         break;
       case 'confirm_and_proceed':
+        console.log('[UnifiedAgent] handleBuyerAgent branch confirm_and_proceed');
         await handleConfirmAndProceed(session, message, send);
         break;
       case 'modify_before_confirm':
+        console.log('[UnifiedAgent] handleBuyerAgent branch modify_before_confirm');
         await handleModifyBeforeConfirm(session, message, send);
         break;
       case 'select_provider':
+        console.log('[UnifiedAgent] handleBuyerAgent branch select_provider');
         await handleProviderSelection(session, message, send);
         break;
       case 'filter_results':
+        console.log('[UnifiedAgent] handleBuyerAgent branch filter_results');
         await handleFilterResults(session, message, send);
         break;
       case 'continue_conversation':
+        console.log('[UnifiedAgent] handleBuyerAgent branch continue_conversation');
         await handleConversation(session, message, send);
         break;
       case 'refinement_question':
+        console.log('[UnifiedAgent] handleBuyerAgent branch refinement_question');
         await handleRefinement(session, message, send);
         break;
       case 'ask_question':
+        console.log('[UnifiedAgent] handleBuyerAgent branch ask_question');
         await handleGeneralQuestion(session, message, send);
         break;
       default:
+        console.log('[UnifiedAgent] handleBuyerAgent branch default -> handleConversation');
         await handleConversation(session, message, send);
     }
   } catch (error) {
-    console.error('[BuyerAgent] Error:', error);
+    console.error('[UnifiedAgent] handleBuyerAgent error:', error.message);
     send({ type: 'error', error: error.message || 'An unexpected error occurred' });
   }
 }
 
 async function intelligentBuyerIntentCheck(message, session) {
+  console.log('[UnifiedAgent] intelligentBuyerIntentCheck | phase=', session.phase, '| messagePreview=', (message || '').slice(0, 60));
+  const text = String(message || '').trim().toLowerCase();
+  if (session.phase === 'confirmation') {
+    if (/^(yes|yep|yeah|confirm|proceed|go ahead|post|do it|find providers)\b/.test(text)) {
+      console.log('[UnifiedAgent] intelligentBuyerIntentCheck quick match | intent=confirm_and_proceed');
+      return 'confirm_and_proceed';
+    }
+    if (/^(no|nope|not yet|edit|change|modify|add more|update)\b/.test(text)) {
+      console.log('[UnifiedAgent] intelligentBuyerIntentCheck quick match | intent=modify_before_confirm');
+      return 'modify_before_confirm';
+    }
+  }
+
   const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0, openAIApiKey: OPENAI_API_KEY });
   const { phase, job, deals } = session;
   const hasDeals = deals && deals.length > 0;
@@ -184,18 +224,18 @@ Reply ONLY with JSON:\n{ "intent": "<one of the 8 intents above>", "confidence":
     const res = await llm.invoke([new SystemMessage('Only output valid JSON. Be accurate in intent classification.'), new HumanMessage(prompt)]);
     let content = res.content.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '');
     const result = JSON.parse(content);
-    console.log(`[BuyerIntent] Detected: ${result.intent} (${result.confidence})`);
+    console.log('[UnifiedAgent] intelligentBuyerIntentCheck LLM result | intent=', result.intent, '| confidence=', result.confidence);
     const intent = result.intent;
-    if (phase === 'conversation' && !recentMessages?.trim() && intent === 'restart') {
+    if (phase === 'conversation' && !recentMessages?.trim() && (intent === 'restart' || intent === 'ask_question')) {
       const msg = (message || '').trim();
       if (msg.length > 80 || /\d{4,}|\$\d+|budget|address|sq ft|replacement|repair|install/.test(msg)) {
-        console.log('[BuyerIntent] Override: first message with job-like details treated as continue_conversation');
+        console.log('[UnifiedAgent] intelligentBuyerIntentCheck override | first message job-like -> continue_conversation');
         return 'continue_conversation';
       }
     }
     return intent;
   } catch (error) {
-    console.error('[BuyerIntent] LLM classification error:', error.message);
+    console.error('[UnifiedAgent] intelligentBuyerIntentCheck LLM error:', error.message);
     if (phase === 'conversation') return 'continue_conversation';
     if (phase === 'confirmation') return 'confirm_and_proceed';
     if (phase === 'refinement') return 'refinement_question';
@@ -205,10 +245,12 @@ Reply ONLY with JSON:\n{ "intent": "<one of the 8 intents above>", "confidence":
 
 async function handleConversation(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleConversation sessionId=', sessionId, 'messageLength=', (message || '').length);
   send({ type: 'phase', phase: 'conversation' });
   const result = await runConversation({ sessionId, buyerId, accessToken, message });
+  console.log('[UnifiedAgent] handleConversation result phase=', result.phase, 'hasJob=', !!result.job);
   send({ type: 'message', text: result.response, action: result.action });
-  send({ type: 'collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, jobReadiness: result.jobReadiness });
+  send({ type: 'collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, jobReadiness: result.jobReadiness, completion: result.completion });
   if (result.phase === 'confirmation') {
     await sessionService.updatePhase(sessionId, 'confirmation');
     await appendMessage(sessionId, { role: 'system', content: `Job preview ready: ${JSON.stringify(result.collected)}` });
@@ -227,8 +269,10 @@ async function handleConversation(session, message, send) {
 
 async function handleConfirmAndProceed(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleConfirmAndProceed sessionId=', sessionId);
   send({ type: 'phase', phase: 'confirmation' });
   const result = await runConversation({ sessionId, buyerId, accessToken, message: message });
+  console.log('[UnifiedAgent] handleConfirmAndProceed result phase=', result.phase, 'hasJob=', !!result.job);
   if (result.phase === 'complete' && result.job) {
     await sessionService.updateState(sessionId, { job: result.job });
     await sessionService.updatePhase(sessionId, 'negotiation');
@@ -242,12 +286,14 @@ async function handleConfirmAndProceed(session, message, send) {
 
 async function handleModifyBeforeConfirm(session, message, send) {
   const { sessionId, buyerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleModifyBeforeConfirm sessionId=', sessionId);
   await sessionService.updatePhase(sessionId, 'conversation');
   send({ type: 'phase_transition', from: 'confirmation', to: 'conversation' });
   send({ type: 'phase', phase: 'conversation' });
   const result = await runConversation({ sessionId, buyerId, accessToken, message });
+  console.log('[UnifiedAgent] handleModifyBeforeConfirm result phase=', result.phase);
   send({ type: 'message', text: result.response, action: result.action });
-  send({ type: 'collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, jobReadiness: result.jobReadiness });
+  send({ type: 'collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, jobReadiness: result.jobReadiness, completion: result.completion });
   if (result.phase === 'confirmation') {
     await sessionService.updatePhase(sessionId, 'confirmation');
     send({ type: 'phase_transition', from: 'conversation', to: 'confirmation', jobPreview: result.collected });
@@ -257,9 +303,11 @@ async function handleModifyBeforeConfirm(session, message, send) {
 
 async function handleNegotiation(session, job, send) {
   const { sessionId, buyerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleNegotiation sessionId=', sessionId, 'jobId=', job?.id);
   send({ type: 'phase', phase: 'negotiation' });
   await sessionService.updateState(sessionId, { job });
   const result = await runNegotiationAndMatchStream(job, accessToken, { buyerId, useMem0: true, providerLimit: 10, maxRounds: 1 }, send);
+  console.log('[UnifiedAgent] handleNegotiation result dealsCount=', result?.deals?.length ?? 0);
   if (result?.deals) await sessionService.updateState(sessionId, { deals: result.deals });
   await sessionService.updatePhase(sessionId, 'refinement');
   send({ type: 'phase_transition', from: 'negotiation', to: 'refinement' });
@@ -275,6 +323,7 @@ async function handleNegotiation(session, job, send) {
 
 async function handleRefinement(session, message, send) {
   const { deals, job, sessionId } = session;
+  console.log('[UnifiedAgent] handleRefinement sessionId=', sessionId, 'dealsCount=', deals?.length ?? 0);
   send({ type: 'phase', phase: 'refinement' });
   const conversationHistory = await getMessagesForSession(sessionId, 50);
   const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.7, openAIApiKey: OPENAI_API_KEY });
@@ -311,6 +360,7 @@ async function handleRefinement(session, message, send) {
 }
 
 async function handleGeneralQuestion(session, message, send) {
+  console.log('[UnifiedAgent] handleGeneralQuestion sessionId=', session.sessionId);
   const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.7, openAIApiKey: OPENAI_API_KEY });
   const prompt = `You are a helpful assistant for a service marketplace platform (buyer side).\nUser's Question: "${message}"\nThis is a general question. Reply ONLY with JSON: { "message": "<your helpful response as a string only>" }`;
   try {
@@ -332,17 +382,50 @@ async function handleGeneralQuestion(session, message, send) {
 
 async function handleBuyerRestart(session, send) {
   const { sessionId, buyerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleBuyerRestart oldSessionId=', sessionId);
   const newSession = await sessionService.restartSession(sessionId, { userId: buyerId, userType: 'buyer', accessToken });
+  console.log('[UnifiedAgent] handleBuyerRestart newSessionId=', newSession.id);
   const sessionObj = buildBuyerSessionFromDb(newSession);
   send({ type: 'session', sessionId: sessionObj.sessionId, phase: 'conversation', userType: 'buyer' });
   send({ type: 'phase', phase: 'conversation' });
-  send({ type: 'message', text: "No problem, let's start fresh! What kind of service are you looking for today?" });
-  send({ type: 'collected', data: { service_category_id: null, service_category_name: null, title: null, description: null, budget: { min: null, max: null }, startDate: null, endDate: null, priorities: [], location: null }, requiredMissing: ['service_category_id', 'budget_max', 'start_date', 'location'], optionalMissing: ['title', 'description', 'budget_min', 'end_date'], jobReadiness: 'incomplete' });
+  send({ type: 'message', text: "No problem, let's start fresh. Tell me what you're trying to get done and I'll ask only what matters." });
+  send({
+    type: 'collected',
+    data: {
+      service_category_id: null,
+      service_category_name: null,
+      title: null,
+      description: null,
+      budget: { min: null, max: null },
+      startDate: null,
+      endDate: null,
+      priorities: [],
+      location: null,
+      slots: {
+        intent_summary: null,
+        service: null,
+        scope: null,
+        location: null,
+        timeline: null,
+        budget: null,
+        deliverables: null,
+        constraints: null,
+      },
+      assumptions: [],
+      questionCount: 0,
+    },
+    requiredMissing: ['service_category', 'scope'],
+    optionalMissing: ['budget_max', 'start_date', 'location', 'end_date'],
+    jobReadiness: 'incomplete',
+    completion: { ready: false, confidence: 0, missingCritical: ['service', 'scope'], assumptions: [] },
+  });
 }
 
 async function handleProviderSelection(session, message, send) {
   const { sessionId, buyerId, deals, job } = session;
+  console.log('[UnifiedAgent] handleProviderSelection sessionId=', sessionId, 'dealsCount=', deals?.length ?? 0);
   if (!deals || deals.length === 0) {
+    console.log('[UnifiedAgent] handleProviderSelection no deals');
     send({ type: 'message', text: "I don't have any providers to select from. Would you like to search for providers first?" });
     return;
   }
@@ -362,12 +445,14 @@ async function handleProviderSelection(session, message, send) {
     }
   }
   if (selectedDeal) {
+    console.log('[UnifiedAgent] handleProviderSelection selected sellerId=', selectedDeal.sellerId, 'sellerName=', selectedDeal.sellerName);
     if (job?.id) await updateNegotiationOutcome(buyerId, job.id, selectedDeal.sellerId, 'accepted');
     send({ type: 'provider_selected', deal: { id: selectedDeal.id, sellerId: selectedDeal.sellerId, sellerName: selectedDeal.sellerName, price: selectedDeal.quote.price, days: selectedDeal.quote.days, paymentSchedule: selectedDeal.quote.paymentSchedule } });
     send({ type: 'message', text: `Excellent choice! I've selected ${selectedDeal.sellerName} for $${selectedDeal.quote.price}. They'll complete the job in ${selectedDeal.quote.days} day(s). You can now proceed to confirm the booking!` });
     await sessionService.updatePhase(sessionId, 'complete');
     send({ type: 'phase', phase: 'complete' });
   } else {
+    console.log('[UnifiedAgent] handleProviderSelection no match for message');
     const providerList = deals.map((d, i) => `${i + 1}. ${d.sellerName} - $${d.quote.price}`).join('\n');
     send({ type: 'message', text: `Which provider would you like to select?\n\n${providerList}\n\nJust say "select provider 1" or mention their name!` });
   }
@@ -375,6 +460,7 @@ async function handleProviderSelection(session, message, send) {
 
 async function handleFilterResults(session, message, send) {
   const { deals } = session;
+  console.log('[UnifiedAgent] handleFilterResults dealsCount=', deals?.length ?? 0);
   if (!deals || deals.length === 0) {
     send({ type: 'message', text: "I don't have any results to filter. Would you like to search for providers?" });
     return;
@@ -397,9 +483,11 @@ async function handleFilterResults(session, message, send) {
 /* ---------- SELLER AGENT (Tool-calling + HITL) ---------- */
 
 async function handleSellerAgent(input, send) {
+  console.log('[UnifiedAgent] --- handleSellerAgent ---');
   const { sellerId, accessToken, message, resume, forceNewSession } = input;
   let { sessionId } = input;
   if (!sellerId || !accessToken) {
+    console.log('[UnifiedAgent] handleSellerAgent validation failed missing sellerId or accessToken');
     send({ type: 'error', error: 'Missing sellerId or accessToken' });
     return;
   }
@@ -407,8 +495,10 @@ async function handleSellerAgent(input, send) {
   try {
     let dbSession;
     if (sessionId) {
+      console.log('[UnifiedAgent] handleSellerAgent resolving session sessionId=', sessionId);
       dbSession = await sessionRepository.findById(sessionId);
       if (!dbSession || !dbSession.isActive) {
+        console.log('[UnifiedAgent] handleSellerAgent session not found or inactive getOrCreate');
         const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
         dbSession = session;
         sessionId = dbSession.id;
@@ -416,15 +506,18 @@ async function handleSellerAgent(input, send) {
         sessionId = dbSession.id;
       }
     } else {
+      console.log('[UnifiedAgent] handleSellerAgent no sessionId getOrCreate');
       const { session } = await sessionService.getOrCreateSession({ userId: sellerIdStr, userType: 'seller', accessToken, forceNew: !!forceNewSession });
       dbSession = session;
       sessionId = dbSession.id;
     }
+    console.log('[UnifiedAgent] handleSellerAgent session ready sessionId=', sessionId, 'phase=', dbSession.phase);
     const profileSessionScoped = !!(forceNewSession || dbSession?.state?.profileSessionScoped);
     const config = { configurable: { thread_id: sessionId, sellerId: sellerIdStr, profileSessionScoped } };
     send({ type: 'session', sessionId, phase: dbSession.phase || 'conversation', userType: 'seller' });
 
     if (resume !== undefined && resume !== null) {
+      console.log('[UnifiedAgent] handleSellerAgent resume path resume=', resume);
       const result = await resumeSellerAgent(config, resume);
       if (result && result.__interrupt__) {
         send({ type: 'interrupt', value: result.__interrupt__ });
@@ -440,29 +533,33 @@ async function handleSellerAgent(input, send) {
     }
 
     if (!message || typeof message !== 'string') {
+      console.log('[UnifiedAgent] handleSellerAgent validation failed message required');
       send({ type: 'error', error: 'Message is required' });
       return;
     }
     await messageService.addUserMessage(sessionId, message).catch(() => {});
 
+    console.log('[UnifiedAgent] handleSellerAgent invoking invokeSellerAgent');
     const result = await invokeSellerAgent(
       { sellerId: sellerIdStr, sessionId, newMessage: message },
       config
     );
 
     if (result && result.__interrupt__) {
+      console.log('[UnifiedAgent] handleSellerAgent interrupt');
       send({ type: 'interrupt', value: result.__interrupt__ });
       return;
     }
 
     const lastMsg = result?.messages?.[result.messages.length - 1];
     const text = lastMsg?.content && typeof lastMsg.content === 'string' ? lastMsg.content : (lastMsg?.content?.[0]?.text ?? "I'm here to help. What would you like to do?");
+    console.log('[UnifiedAgent] handleSellerAgent response length=', (text || '').length);
     send({ type: 'message', text });
     if (lastMsg && lastMsg.getType?.() === 'ai') {
       await messageService.addAssistantMessage(sessionId, text).catch(() => {});
     }
   } catch (error) {
-    console.error('[SellerAgent] Error:', error);
+    console.error('[UnifiedAgent] handleSellerAgent error:', error.message);
     send({ type: 'error', error: error.message || 'An unexpected error occurred' });
   }
 }
@@ -526,8 +623,10 @@ async function intelligentSellerIntent(message, session) {
 
 async function handleSellerProfileCreation(session, message, send) {
   const { sessionId, sellerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleSellerProfileCreation sessionId=', sessionId);
   send({ type: 'phase', phase: 'profile_creation' });
   const result = await runSellerProfileConversation({ sessionId, sellerId, accessToken, message });
+  console.log('[UnifiedAgent] handleSellerProfileCreation result phase=', result.phase, 'hasProfile=', !!result.profile);
   send({ type: 'message', text: result.response, action: result.action });
   send({ type: 'profile_collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, profileReadiness: result.profileReadiness });
   if (result.phase === 'complete' && result.profile) {
@@ -541,8 +640,10 @@ async function handleSellerProfileCreation(session, message, send) {
 
 async function handleJobBrowsing(session, message, send) {
   const { sessionId, sellerId } = session;
+  console.log('[UnifiedAgent] handleJobBrowsing sessionId=', sessionId, 'sellerId=', sellerId);
   send({ type: 'phase', phase: 'job_browsing' });
   const result = await findJobsForSeller(sellerId);
+  console.log('[UnifiedAgent] handleJobBrowsing result jobsCount=', result.jobs?.length ?? 0);
   await sessionService.updateState(sessionId, { matchedJobs: result.jobs });
   if (result.jobs?.length > 0) {
     const topJobs = result.jobs.slice(0, 5);
@@ -557,12 +658,15 @@ async function handleJobBrowsing(session, message, send) {
 
 async function handleBidding(session, message, send) {
   const { sellerId, matchedJobs, sessionId } = session;
+  console.log('[UnifiedAgent] handleBidding sessionId=', sessionId, 'matchedJobsCount=', matchedJobs?.length ?? 0);
   if (!matchedJobs?.length) {
+    console.log('[UnifiedAgent] handleBidding no matched jobs calling handleJobBrowsing');
     send({ type: 'message', text: "Let me first find some jobs for you..." });
     await handleJobBrowsing(session, "show jobs", send);
     return;
   }
   const selectedJob = await intelligentJobSelection(message, matchedJobs, session);
+  console.log('[UnifiedAgent] handleBidding selectedJob=', selectedJob?.job_id ?? selectedJob?.title ?? 'none');
   if (!selectedJob) {
     await sessionService.updatePhase(sessionId, 'job_browsing');
     const jobList = matchedJobs.slice(0, 5).map((j, i) => `${i + 1}. "${j.title}" - $${j.budget.min}-$${j.budget.max} (Match: ${j.matchScore}/100)`).join('\n');
@@ -574,6 +678,7 @@ async function handleBidding(session, message, send) {
   send({ type: 'phase', phase: 'bidding' });
   send({ type: 'message', text: `Preparing your bid for "${selectedJob.title}"...` });
   const result = await submitSellerBid({ sellerId, jobId: selectedJob.job_id, customMessage: biddingDetails.customMessage || null, customPrice: biddingDetails.customPrice || null });
+  console.log('[UnifiedAgent] handleBidding submitSellerBid result hasBid=', !!result.bid, 'error=', result.error || '—');
   if (result.bid) {
     send({ type: 'bid_submitted', bid: { bid_id: result.bid.bid_id, job_id: result.bid.job_id, quoted_price: result.bid.quoted_price, quoted_timeline: result.bid.quoted_timeline, message: result.bid.message } });
     send({ type: 'message', text: `Perfect! I've submitted your bid for $${result.bid.quoted_price} with ${result.bid.quoted_completion_days} day(s) completion time. The buyer will review your bid.` });
@@ -585,7 +690,9 @@ async function handleBidding(session, message, send) {
 
 async function handleDashboard(session, send) {
   const { sellerId } = session;
+  console.log('[UnifiedAgent] handleDashboard sellerId=', sellerId);
   const dashboard = await getSellerDashboard(sellerId);
+  console.log('[UnifiedAgent] handleDashboard pending_bids=', dashboard.stats.pending_bids, 'active_jobs=', dashboard.stats.active_jobs);
   send({ type: 'dashboard', data: { pending_bids: dashboard.stats.pending_bids, active_jobs: dashboard.stats.active_jobs, new_matches: dashboard.stats.new_matches }, activeBids: dashboard.activeBids.slice(0, 5), activeJobs: dashboard.activeJobs.slice(0, 5) });
   send({ type: 'message', text: `Here's your dashboard: ${dashboard.stats.pending_bids} pending bid(s), ${dashboard.stats.active_jobs} active job(s), ${dashboard.stats.new_matches} new match(es). Would you like to see details?` });
 }
@@ -605,7 +712,9 @@ async function handleSellerQuestion(session, message, send) {
 
 async function handleSellerRestart(session, send) {
   const { sessionId, sellerId, accessToken } = session;
+  console.log('[UnifiedAgent] handleSellerRestart oldSessionId=', sessionId);
   const newSession = await sessionService.restartSession(sessionId, { userId: sellerId, userType: 'seller', accessToken });
+  console.log('[UnifiedAgent] handleSellerRestart newSessionId=', newSession.id);
   const sessionObj = buildSellerSessionFromDb(newSession);
   send({ type: 'session', sessionId: sessionObj.sessionId, phase: 'profile_check', userType: 'seller' });
   send({ type: 'phase', phase: 'profile_check' });

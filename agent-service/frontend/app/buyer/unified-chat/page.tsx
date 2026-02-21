@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   ArrowLeft,
@@ -145,7 +145,9 @@ function createNewChat(): ChatSession {
 
 export default function UnifiedChatPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prefillSentRef = useRef(false);
 
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -317,12 +319,9 @@ export default function UnifiedChatPage() {
     console.log('Contacting provider:', deal);
   };
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = inputValue.trim();
+  const sendBuyerText = useCallback(async (text: string) => {
     if (!text || !user || !token || sending || !activeChatId) return;
 
-    setInputValue('');
     const userMsg: UnifiedChatMessage = { type: 'user', content: text };
     setChats((prev) =>
       prev.map((c) =>
@@ -471,7 +470,31 @@ export default function UnifiedChatPage() {
     } finally {
       setSending(false);
     }
+  }, [
+    activeChat?.sessionId,
+    activeChat?.title,
+    activeChatId,
+    sending,
+    token,
+    updateActiveChat,
+    updateLastMatch,
+    user,
+  ]);
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = inputValue.trim();
+    setInputValue('');
+    await sendBuyerText(text);
   };
+
+  useEffect(() => {
+    const prefill = searchParams.get('q')?.trim();
+    if (!prefill || prefillSentRef.current || !activeChatId || sending) return;
+    prefillSentRef.current = true;
+    setInputValue('');
+    sendBuyerText(prefill);
+  }, [activeChatId, searchParams, sendBuyerText, sending]);
 
   if (!user || user.role !== 'buyer') {
     return null;
@@ -579,7 +602,7 @@ export default function UnifiedChatPage() {
           ) : displayMessages.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-center px-4 min-h-[200px]">
               <p className="text-muted-foreground text-sm">
-                Describe what you need (e.g. &quot;I need home cleaning&quot;). I&apos;ll ask about budget and dates, then find providers for you.
+                Describe your goal (e.g. &quot;I need an architect for a new house&quot;). I&apos;ll ask only what&apos;s needed, then find providers for you.
               </p>
             </div>
           ) : (

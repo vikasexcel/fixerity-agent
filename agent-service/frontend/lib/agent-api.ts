@@ -159,6 +159,9 @@ export type UnifiedCollectedData = {
   endDate?: string | null;
   priorities?: unknown[];
   location?: string | null;
+  slots?: Record<string, unknown>;
+  assumptions?: Array<{ key: string; value: string; reason?: string }>;
+  completion?: { ready: boolean; confidence: number; missingCritical: string[]; assumptions?: Array<{ key: string; value: string; reason?: string }> };
 };
 
 /** Event from unified agent POST /agent/chat SSE stream. */
@@ -166,13 +169,13 @@ export type UnifiedChatStreamEvent =
   | { type: 'session'; sessionId: string; phase: string }
   | { type: 'phase'; phase: string }
   | { type: 'message'; text: string; action?: string }
-  | { type: 'collected'; data: UnifiedCollectedData; missing: string[] }
+  | { type: 'collected'; data: UnifiedCollectedData; missing?: string[]; requiredMissing?: string[]; optionalMissing?: string[]; jobReadiness?: string; completion?: { ready: boolean; confidence: number; missingCritical: string[]; assumptions?: Array<{ key: string; value: string; reason?: string }> } }
   | { type: 'phase_transition'; from: string; to: string; job?: Record<string, unknown> }
   | { type: 'providers_fetched'; count: number }
   | { type: 'provider_start'; providerId: string; providerName: string }
   | { type: 'negotiation_step'; providerId: string; providerName?: string; step: NegotiationStep }
   | { type: 'provider_done'; providerId: string; providerName?: string; outcome: { status: string; negotiatedPrice: number; negotiatedCompletionDays: number } }
-  | { type: 'done'; deals?: Deal[]; reply?: string }
+  | { type: 'done'; deals?: Deal[]; reply?: string; error?: string }
   | { type: 'deals_detail'; deals: unknown[] }
   | { type: 'filtered_deals'; deals: unknown[]; count: number }
   | { type: 'provider_selected'; deal: unknown }
@@ -714,4 +717,3 @@ export async function getSessionMessages(
     messages: data.messages ?? [],
   };
 }
-
