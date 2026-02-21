@@ -1,17 +1,9 @@
-import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { sessionService, messageService } from '../../services/index.js';
 import { createProviderAgentTools } from './providerAgentTools.js';
 import { createProviderAgentGraph } from './providerAgentGraph.js';
 import { serviceCategoryManager } from '../../services/serviceCategoryManager.js';
 import { logProviderConversation } from '../../utils/providerProfileLogger.js';
-
-function toLangChainMessage(m) {
-  const content = m.content || '';
-  if (m.role === 'user') return new HumanMessage(content);
-  if (m.role === 'assistant') return new AIMessage(content);
-  if (m.role === 'system') return new SystemMessage(content);
-  return new HumanMessage(content);
-}
 
 /* ================================================================================
    PROVIDER CONVERSATION GRAPH - Profile Creation Through Conversational Agent
@@ -54,16 +46,47 @@ function extractProfileFromToolMessages(messages) {
 }
 
 function formatProfileCreatedResponse(profile) {
+  const marketplace = profile.preferences?.marketplace_profile && typeof profile.preferences.marketplace_profile === 'object'
+    ? profile.preferences.marketplace_profile
+    : {};
   const parts = [
     "Your profile has been successfully created! Here are the details:\n",
-    `**Services:** ${(profile.service_category_names || []).join(', ') || 'Not specified'}\n`,
   ];
+  const fullName = [profile.first_name, profile.last_name].filter(Boolean).join(' ').trim();
+  if (fullName) {
+    parts.push(`**Name:** ${fullName}\n`);
+  }
+  if (profile.contact_number || profile.email) {
+    parts.push(`**Contact:** ${[profile.contact_number, profile.email].filter(Boolean).join(' | ')}\n`);
+  }
+  if (marketplace.service_title) {
+    parts.push(`**Service title:** ${marketplace.service_title}\n`);
+  }
+  if (marketplace.tagline) {
+    parts.push(`**Tagline:** ${marketplace.tagline}\n`);
+  }
+  parts.push(
+    `**Services:** ${(profile.service_category_names || []).join(', ') || 'Not specified'}\n`,
+  );
+  if (marketplace.short_description) {
+    parts.push(`\n**Short description:** ${marketplace.short_description}\n`);
+  }
+  if (marketplace.long_description) {
+    parts.push(`\n**Detailed description:** ${marketplace.long_description}\n`);
+  }
   if (profile.bio) {
-    parts.push(`\n**About you:** ${profile.bio}\n`);
+    parts.push(`\n**Bio:** ${profile.bio}\n`);
   }
   const area = profile.service_area;
   if (area && (typeof area === 'object' ? area.location : area)) {
     parts.push(`\n**Service area:** ${typeof area === 'object' ? area.location : area}\n`);
+  }
+  const languages = Array.isArray(marketplace.languages_spoken) ? marketplace.languages_spoken.filter(Boolean) : [];
+  if (languages.length > 0) {
+    parts.push(`\n**Languages spoken:** ${languages.join(', ')}\n`);
+  }
+  if (marketplace.delivery_or_completion_time) {
+    parts.push(`\n**Delivery / completion time:** ${marketplace.delivery_or_completion_time}\n`);
   }
 
   // Availability
@@ -107,7 +130,7 @@ function formatProfileCreatedResponse(profile) {
     }
     if (conv.additional_services?.length) cp.push(`**Also offers:** ${conv.additional_services.join(', ')}`);
     Object.entries(conv).forEach(([k, v]) => {
-      if (['equipment', 'materials', 'project_focus', 'project_sizes_sqft', 'additional_services'].includes(k)) return;
+      if (['equipment', 'materials', 'project_focus', 'project_sizes_sqft', 'additional_services', 'location', 'availability', 'service_area', 'languages_spoken'].includes(k)) return;
       if (Array.isArray(v) && v.length > 0) cp.push(`**${k.replace(/_/g, ' ')}:** ${v.join(', ')}`);
       else if (typeof v === 'string' && v.trim()) cp.push(`**${k.replace(/_/g, ' ')}:** ${v.trim()}`);
       else if (typeof v === 'boolean' && v) cp.push(`**${k.replace(/_/g, ' ')}:** Yes`);
@@ -130,6 +153,11 @@ function formatProfileCreatedResponse(profile) {
     }
     parts.push('\n');
   }
+  const packages = Array.isArray(pricing?.packages) ? pricing.packages.filter(Boolean) : [];
+  if (packages.length > 0) {
+    const pkgText = packages.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join('; ');
+    parts.push(`\n**Packages:** ${pkgText}\n`);
+  }
 
   parts.push("You're all set! I'll find jobs that match your skills.");
   return parts.join('');
@@ -140,14 +168,58 @@ function profileToCollected(profile) {
   const area = profile.service_area;
   const location = typeof area === 'object' && area?.location ? area.location : (area ?? null);
   return {
+    first_name: profile.first_name ?? null,
+    last_name: profile.last_name ?? null,
+    email: profile.email ?? null,
+    contact_number: profile.contact_number ?? null,
     service_category_names: profile.service_category_names ?? [],
     service_area: location,
     availability: profile.availability,
     credentials: profile.credentials ?? {},
     pricing: profile.pricing ?? {},
     preferences: profile.preferences ?? {},
+    marketplace_profile: profile.preferences?.marketplace_profile ?? {},
     bio: profile.bio ?? null,
   };
+}
+
+function detectDomainHint(message) {
+  const text = String(message || '').toLowerCase();
+  if (text.includes('plumb')) return 'plumbing';
+  if (text.includes('electric') || text.includes('ev charger') || text.includes('solar')) return 'electrical';
+  if (text.includes('concrete') || text.includes('foundation') || text.includes('rebar')) return 'concrete/foundation';
+  if (text.includes('clean')) return 'home cleaning';
+  if (text.includes('contractor') || text.includes('remodel') || text.includes('renov')) return 'general contracting';
+  if (text.includes('paint')) return 'painting';
+  if (text.includes('roof')) return 'roofing';
+  if (text.includes('hvac') || text.includes('heating') || text.includes('air condition')) return 'HVAC';
+  return null;
+}
+
+function buildFirstTurnReminder(userMessage) {
+  const domainHint = detectDomainHint(userMessage);
+  const domainText = domainHint ? `Detected specialty: ${domainHint}.` : 'Detected specialty from user message.';
+  return new SystemMessage(
+    `CRITICAL - This is the user's FIRST message. ${domainText} Ask exactly ONE domain-specific question first (tools/equipment, license/certification, project type, materials, method, compliance). Do NOT ask about service area, location, availability, schedule, or pricing yet. Avoid form-filling style.`
+  );
+}
+
+function buildDomainDepthGuard(domainQuestionsAsked) {
+  const asked = Number.isFinite(domainQuestionsAsked) ? domainQuestionsAsked : 0;
+  const remaining = Math.max(0, 2 - asked);
+  return new SystemMessage(
+    `Progress guard: domain_questions_asked=${asked}. Before asking service area/location/availability/pricing, you must ask ${remaining} more domain-specific question(s). Ask only one focused question this turn.`
+  );
+}
+
+function classifyAssistantQuestionTopic(text) {
+  const lower = String(text || '').toLowerCase();
+  if (!lower.includes('?')) return 'none';
+  if (/(service area|location|where do you serve|where are you based|city|state|zip|radius|coverage area)/.test(lower)) return 'location';
+  if (/(availability|available|schedule|weekend|weekday|hours|time slot|when can you|emergency)/.test(lower)) return 'availability';
+  if (/(price|pricing|hourly|rate|budget|quote|cost|charge)/.test(lower)) return 'pricing';
+  if (/(equipment|tools|material|license|licen[cs]e|certif|specialt|project|install|repair|permit|scope|experience|method|workflow)/.test(lower)) return 'domain';
+  return 'other';
 }
 
 /* -------------------- RUNNER FUNCTION -------------------- */
@@ -169,25 +241,31 @@ export async function runProviderProfileConversation(input) {
     hasStateProfile: !!(sessionData?.state?.profile),
   });
 
-  const history = await messageService.getConversationHistory(sessionId, { limit: 50, includeSystem: false });
-  const historyMessages = history.map(toLangChainMessage);
-  let inputMessages = [...historyMessages, new HumanMessage(message)];
+  const conversationMessages = (sessionData?.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
+  const profileFlowState = sessionData?.state?.provider_profile_state ?? {};
+  const domainQuestionsAsked = Number.isFinite(Number(profileFlowState.domain_questions_asked))
+    ? Number(profileFlowState.domain_questions_asked)
+    : 0;
+  let inputMessages = [new HumanMessage(message)];
 
-  const isFirstMessage = historyMessages.length === 0;
+  const isFirstMessage = conversationMessages.length === 0;
   logProviderConversation('conversation_history', {
     sessionId,
-    historyCount: history.length,
-    historyRoles: history.map((m) => m.role),
+    historyCount: conversationMessages.length,
+    historyRoles: conversationMessages.map((m) => m.role),
     isFirstMessage,
+    domainQuestionsAsked,
   });
+
+  if (domainQuestionsAsked < 2) {
+    inputMessages = [buildDomainDepthGuard(domainQuestionsAsked), ...inputMessages];
+  }
 
   // When it's the first message (user describing their specialty), inject a strong reminder
   // so the model asks domain-specific questions first—not service area.
   if (isFirstMessage) {
     logProviderConversation('first_message_reminder_injected', { sessionId });
-    const firstMsgReminder = new SystemMessage(
-      `CRITICAL - This is the user's FIRST message. They described their specialty. Your response MUST ask about equipment, certifications, or project types—NEVER about service area, location, or availability. For concrete/foundation: ask "What equipment do you use—pumps, forms, finishing tools? Do you have ACI certification or a state license?" Do NOT say "Can you tell me your service area" or "Where do you provide these services."`
-    );
+    const firstMsgReminder = buildFirstTurnReminder(message);
     inputMessages = [firstMsgReminder, ...inputMessages];
   }
 
@@ -218,6 +296,10 @@ export async function runProviderProfileConversation(input) {
   const responseText = profile
     ? formatProfileCreatedResponse(profile)
     : getLastAIMessageText(messages) || "I'm here to help you create your profile!";
+  const questionTopic = classifyAssistantQuestionTopic(responseText);
+  const nextDomainQuestionsAsked = questionTopic === 'domain'
+    ? domainQuestionsAsked + 1
+    : domainQuestionsAsked;
 
   const phase = profile ? 'complete' : 'profile_creation';
 
@@ -226,6 +308,9 @@ export async function runProviderProfileConversation(input) {
     totalMessagesFromGraph: messages.length,
     profileExtracted: !!profile,
     phase,
+    questionTopic,
+    domainQuestionsAsked,
+    nextDomainQuestionsAsked,
     responseLength: responseText?.length ?? 0,
     responsePreview: responseText ? responseText.slice(0, 150) + (responseText.length > 150 ? '...' : '') : null,
   });
@@ -237,6 +322,10 @@ export async function runProviderProfileConversation(input) {
 
   await sessionService.updateState(sessionId, {
     profile: profile ?? sessionData.state?.profile ?? null,
+    provider_profile_state: {
+      domain_questions_asked: nextDomainQuestionsAsked,
+      last_ai_question_topic: questionTopic,
+    },
   });
 
   if (phase !== sessionData.phase) {

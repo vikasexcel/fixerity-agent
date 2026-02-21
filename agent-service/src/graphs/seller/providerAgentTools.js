@@ -21,53 +21,53 @@ import { logProviderTools } from '../../utils/providerProfileLogger.js';
  * conversation into a flexible structure that adapts to any service type.
  */
 async function generateSellerProfileWithLLM(collectedInfo, llm) {
-  const prompt = `You are a professional profile writer for a service marketplace. Given collected information from a provider conversation, generate a complete, professional seller profile.
+  const prompt = `You are a professional profile writer for a service marketplace. Given collected information from a provider conversation, generate a complete professional seller profile using ONLY facts from the conversation.
 
 COLLECTED INFORMATION (from conversation - JSON):
 ${JSON.stringify(collectedInfo, null, 2)}
 
-CRITICAL - CONVERSATION-DERIVED PROFILE (no predefined schema):
-Extract EVERYTHING the provider said. Do NOT drop details to fit a template. The profile must reflect what was actually discussed.
+CRITICAL:
+- Conversation-derived only: extract EVERYTHING the provider said.
+- Do NOT invent values.
+- If unknown, return null or empty array/object.
+- Keep domain-specific details rich and searchable.
 
-1. "bio": 2-4 sentence professional intro in first person. Include: specialty, equipment/tools, certifications, project types, what makes them stand out. Use the exact terms they used (e.g. "foundation crack repair", "fiber-reinforced concrete").
-
-2. "service_category_names": Array of service types. Include primary + sub-services (e.g. ["concrete", "foundation repair", "new construction", "foundation waterproofing"]).
-
-3. "credentials": Standard + domain-specific. Include: licensed, insured, years_experience, references_available, certifications (array), certifications_not_held (e.g. ["ACI"]), emergency_available, etc.
-
-4. "pricing": hourly_rate_min, hourly_rate_max, fixed_prices. Include pricing_notes if they mentioned flat-rate, project-based, etc.
-
-5. "preferences": Standard (min_job_size_hours, max_travel_distance, provides_materials, preferred_payment) PLUS a "conversation_profile" object with ALL domain-specific details from the conversation:
-   - equipment: array of tools/equipment mentioned
-   - materials: array (e.g. concrete mix types, fiber-reinforced)
-   - project_sizes_sqft: { min, max } or string
-   - project_focus: "residential" | "commercial" | "both"
-   - additional_services: array (e.g. ["foundation waterproofing"])
-   - Any other key-value pairs the provider mentioned
-
-Output valid JSON only:
+Return valid JSON only with this shape:
 {
-  "bio": "<2-4 sentences, first person, includes equipment/certs/project types from conversation>",
-  "service_category_names": ["<primary>", "<sub1>", "<sub2>", ...],
-  "credentials": { "licensed": bool, "insured": bool, "years_experience": number, "certifications": [], "certifications_not_held": [], ... },
-  "pricing": { "hourly_rate_min": number, "hourly_rate_max": number, "fixed_prices": {}, "pricing_notes": "optional" },
+  "service_category_names": ["<primary>", "<sub1>", "..."],
+  "bio": "<2-4 sentence professional summary in first person>",
+  "service_area": { "location": "<string|null>", "city": "<string|null>", "state": "<string|null>", "radius_miles": <number|null>, "zip_codes": [] },
+  "availability": { "schedule": "<string|null>", "weekdays": "<string|null>", "weekends": "<string|null>", "weekday_evenings": <bool|null>, "emergency": <bool|null> },
+  "credentials": { "licensed": <bool|null>, "insured": <bool|null>, "years_experience": <number|null>, "references_available": <bool|null>, "certifications": [], "certifications_not_held": [] },
+  "pricing": { "hourly_rate_min": <number|null>, "hourly_rate_max": <number|null>, "fixed_prices": {}, "pricing_notes": "<string|null>", "packages": [] },
+  "marketplace_profile": {
+    "service_title": "<string|null>",
+    "tagline": "<1-2 sentences|null>",
+    "short_description": "<string|null>",
+    "long_description": "<string|null>",
+    "delivery_or_completion_time": "<string|null>",
+    "languages_spoken": []
+  },
   "preferences": {
-    "min_job_size_hours": number|null,
-    "max_travel_distance": number|null,
-    "provides_materials": bool|null,
+    "min_job_size_hours": <number|null>,
+    "max_travel_distance": <number|null>,
+    "provides_materials": <bool|null>,
     "preferred_payment": [],
     "conversation_profile": {
-      "equipment": ["<exact terms from conversation>"],
-      "materials": ["<mix types, materials mentioned>"],
-      "project_sizes_sqft": { "min": number, "max": number } | "<description>",
-      "project_focus": "residential"|"commercial"|"both",
-      "additional_services": ["<e.g. waterproofing>"],
-      "<any_other_key>": "<value from conversation>"
+      "equipment": [],
+      "materials": [],
+      "project_sizes_sqft": { "min": <number|null>, "max": <number|null> },
+      "project_focus": "<residential|commercial|both|null>",
+      "additional_services": [],
+      "<other_domain_specific_key>": "<value>"
     }
   }
 }
 
-Include ONLY fields that have data. Use null for unknown. The conversation_profile must capture ALL domain-specific details—equipment, materials, project sizes, focus, additional services—so the profile is searchable and matches jobs accurately.`;
+Notes:
+- service_title/tagline/descriptions must be professional and directly grounded in user facts.
+- languages_spoken must come from conversation only.
+- Include domain depth in conversation_profile (tools, materials, methods, project sizes, standards, compliance, etc.).`;
 
   try {
     const res = await llm.invoke([
@@ -93,6 +93,21 @@ function normalizeServiceArea(area) {
       state: area.state ?? null,
       radius_miles: area.radius_miles ?? null,
       zip_codes: area.zip_codes ?? null,
+    };
+  }
+  return null;
+}
+
+function normalizeAvailability(availability) {
+  if (availability == null) return null;
+  if (typeof availability === 'string') return { schedule: availability };
+  if (typeof availability === 'object') {
+    return {
+      schedule: availability.schedule ?? null,
+      weekdays: availability.weekdays ?? null,
+      weekends: availability.weekends ?? null,
+      weekday_evenings: availability.weekday_evenings ?? null,
+      emergency: availability.emergency ?? null,
     };
   }
   return null;
@@ -186,14 +201,19 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           ? match.category_name.trim()
           : (service_category_name || '').trim() || service_category_name;
 
+        const providerDetails = await getProviderBasicDetails(providerId);
         const serviceAreaObj = normalizeServiceArea(service_area);
-        const availabilityObj = typeof availability === 'string'
-          ? { schedule: availability }
-          : (availability && typeof availability === 'object' ? availability : null);
+        const availabilityObj = normalizeAvailability(availability);
 
         const collectedInfo = {
           service_category_name: serviceCategoryName,
           bio_draft: bio,
+          provider_identity: {
+            first_name: providerDetails?.firstName ?? null,
+            last_name: providerDetails?.lastName ?? null,
+            email: providerDetails?.email ?? null,
+            contact_number: providerDetails?.contactNumber ?? null,
+          },
           service_area: serviceAreaObj,
           availability: availabilityObj,
           pricing: pricing ?? {},
@@ -220,30 +240,56 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           generated = await generateSellerProfileWithLLM(collectedInfo, llm);
         }
 
-        const finalBio = generated?.bio ?? bio ?? (serviceCategoryName ? `Professional ${serviceCategoryName} provider.` : 'Service provider.');
+        const generatedServiceArea = normalizeServiceArea(generated?.service_area);
+        const generatedAvailability = normalizeAvailability(generated?.availability);
+        const finalServiceArea = generatedServiceArea ?? serviceAreaObj;
+        const finalAvailability = generatedAvailability ?? availabilityObj;
+        const finalBio = generated?.bio ?? bio ?? null;
         const finalServiceNames = generated?.service_category_names?.length
           ? generated.service_category_names
-          : [serviceCategoryName || 'General Service'];
+          : (serviceCategoryName ? [serviceCategoryName] : []);
         const finalCredentials = { ...(credentials ?? {}), ...(generated?.credentials ?? {}) };
         const finalPricing = generated?.pricing ?? pricing ?? { hourly_rate_min: null, hourly_rate_max: null, fixed_prices: {} };
-        const defaultPrefs = { min_job_size_hours: null, max_travel_distance: null, provides_materials: null, preferred_payment: [] };
-        const finalPreferences = generated?.preferences
-          ? { ...defaultPrefs, ...generated.preferences }
-          : defaultPrefs;
+        const defaultPrefs = {
+          min_job_size_hours: null,
+          max_travel_distance: null,
+          provides_materials: null,
+          preferred_payment: [],
+          conversation_profile: {},
+          marketplace_profile: {},
+        };
+        const generatedPrefs = generated?.preferences && typeof generated.preferences === 'object'
+          ? generated.preferences
+          : {};
+        const finalPreferences = {
+          ...defaultPrefs,
+          ...generatedPrefs,
+          conversation_profile: generatedPrefs?.conversation_profile && typeof generatedPrefs.conversation_profile === 'object'
+            ? generatedPrefs.conversation_profile
+            : {},
+          marketplace_profile: {
+            ...(generatedPrefs?.marketplace_profile && typeof generatedPrefs.marketplace_profile === 'object'
+              ? generatedPrefs.marketplace_profile
+              : {}),
+            ...(generated?.marketplace_profile && typeof generated.marketplace_profile === 'object'
+              ? generated.marketplace_profile
+              : {}),
+          },
+        };
 
         let score = 0;
         if (finalServiceNames.length > 0) score += 20;
-        if (serviceAreaObj?.location) score += 15;
-        if (availabilityObj?.schedule) score += 15;
+        if (finalServiceArea?.location) score += 15;
+        if (finalAvailability?.schedule || finalAvailability?.weekdays || finalAvailability?.weekends) score += 15;
         if (finalPricing?.hourly_rate_max || (finalPricing?.fixed_prices && Object.keys(finalPricing.fixed_prices).length > 0)) score += 15;
         if (finalCredentials?.years_experience) score += 10;
         if (finalCredentials?.licensed !== undefined && finalCredentials?.licensed !== null) score += 5;
         if (finalCredentials?.references_available) score += 5;
         if (finalBio) score += 10;
-        if (finalPreferences?.min_job_size_hours != null) score += 5;
+        if (finalPreferences?.marketplace_profile?.service_title) score += 5;
+        if (finalPreferences?.marketplace_profile?.tagline) score += 5;
+        if (finalPreferences?.marketplace_profile?.delivery_or_completion_time) score += 5;
         if (finalPreferences?.conversation_profile && Object.keys(finalPreferences.conversation_profile).length > 0) score += 5;
-
-        const providerDetails = await getProviderBasicDetails(providerId);
 
         const profileData = {
           providerId,
@@ -253,8 +299,8 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           gender: providerDetails?.gender ?? null,
           contactNumber: providerDetails?.contactNumber ?? null,
           serviceCategoryNames: finalServiceNames,
-          serviceArea: serviceAreaObj,
-          availability: availabilityObj,
+          serviceArea: finalServiceArea,
+          availability: finalAvailability,
           credentials: finalCredentials,
           pricing: finalPricing,
           preferences: finalPreferences,
@@ -302,6 +348,10 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           id: created.id,
           seller_id: created.id,
           provider_id: created.providerId,
+          first_name: created.firstName,
+          last_name: created.lastName,
+          email: created.email,
+          contact_number: created.contactNumber,
           service_category_names: created.serviceCategoryNames,
           service_area: created.serviceArea,
           availability: created.availability,
@@ -329,7 +379,9 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
 
 Enough info = services + domain-specific details (equipment, certs, project types for concrete; license for plumber; etc.) + service_area + availability. You must ask domain questions FIRST—never lead with service area.
 
-Pass ALL collected info in specific_requirements: concrete: equipment, certifications, project_sizes_sqft, new_build_vs_repair, materials; plumber: license_type, emergency_available; electrician: license_level, ev_charger, solar. Also pass: service_area, availability, pricing, credentials.`,
+Pass ALL collected info in specific_requirements: concrete: equipment, certifications, project_sizes_sqft, new_build_vs_repair, materials; plumber: license_type, emergency_available; electrician: license_level, ev_charger, solar.
+Also include marketplace fields in specific_requirements when known: service_title, tagline, short_description, long_description, delivery_or_completion_time, languages_spoken, packages.
+Also pass: service_area, availability, pricing, credentials. Never invent values.`,
       schema: createSellerProfileSchema,
     }
   );
