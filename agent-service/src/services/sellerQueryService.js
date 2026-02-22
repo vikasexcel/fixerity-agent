@@ -203,7 +203,7 @@ export async function buildOptimizedQueryForSellerProfile(profile) {
       serviceCategories.length > 0 ? `${serviceCategories.join(', ')} jobs` : '',
       area ? `in ${area}` : '',
       profile.bio || '',
-    ].filter(Boolean).join(' ').trim().slice(0, 500);
+    ].filter(Boolean).join(' ').trim().slice(0, 2000);
 
     const query = fallback || 'service provider jobs';
     console.log('[SellerQueryService] No OPENAI_API_KEY — fallback query:', query);
@@ -238,7 +238,7 @@ export async function buildOptimizedQueryForSellerProfile(profile) {
 
     const content = response?.content;
     if (typeof content === 'string' && content.trim()) {
-      query = content.trim().slice(0, 1000);
+      query = content.trim().slice(0, 3000);
     } else {
       query = serviceCategories.length > 0
         ? `${serviceCategories.join(', ')} jobs`

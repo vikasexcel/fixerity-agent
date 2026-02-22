@@ -58,7 +58,7 @@ export async function buildOptimizedQueryForJob(job) {
     const fallback = job.service_category_name
       ? `${job.service_category_name} ${job.title || ''} ${job.description || ''}`.trim()
       : (job.title || job.description || 'service provider');
-    const query = fallback.slice(0, 500);
+    const query = fallback.slice(0, 2000);
     console.log('\n[JobQueryService] No OPENAI_API_KEY — using fallback query:', query + '\n');
     return query;
   }
@@ -89,7 +89,7 @@ export async function buildOptimizedQueryForJob(job) {
   if (typeof content !== 'string' || !content.trim()) {
     query = (job.service_category_name || 'service provider') + ' ' + (job.title || '').trim();
   } else {
-    query = content.trim().slice(0, 1000);
+    query = content.trim().slice(0, 3000);
   }
 
   console.log('  Built retrieval query (optimized for semantic search):');

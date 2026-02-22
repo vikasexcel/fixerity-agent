@@ -246,6 +246,89 @@ async function runFallbackProviderMatching(job) {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   SELLER DETAIL BUILDER
+   Builds comprehensive seller description from SellerProfile record
+───────────────────────────────────────────────────────────── */
+
+function buildSellerDetail(profile) {
+  const parts = [];
+
+  // Services
+  const services = Array.isArray(profile.serviceCategoryNames)
+    ? profile.serviceCategoryNames.filter(Boolean)
+    : [];
+  if (services.length > 0) {
+    parts.push(`Services: ${services.join(', ')}`);
+  }
+
+  // Location
+  const area = profile.serviceArea;
+  if (area && typeof area === 'object') {
+    const loc = area.location || area.city || area.address;
+    if (loc) parts.push(`Service area: ${String(loc)}`);
+  } else if (typeof area === 'string' && area.trim()) {
+    parts.push(`Service area: ${area.trim()}`);
+  }
+
+  // Pricing
+  const pricing = profile.pricing;
+  if (pricing && typeof pricing === 'object') {
+    if (pricing.hourly_rate != null) {
+      parts.push(`Pricing: $${pricing.hourly_rate}/hr`);
+    } else if (pricing.hourly_rate_min != null || pricing.hourly_rate_max != null) {
+      parts.push(`Pricing: $${pricing.hourly_rate_min ?? '?'}–$${pricing.hourly_rate_max ?? '?'}/hr`);
+    }
+  }
+
+  // Availability
+  const avail = profile.availability;
+  if (avail && typeof avail === 'object') {
+    const ap = [];
+    if (avail.schedule) ap.push(String(avail.schedule));
+    if (avail.weekdays) ap.push(`weekdays: ${avail.weekdays}`);
+    if (avail.weekends && String(avail.weekends).toLowerCase().trim() !== 'not available') {
+      ap.push(`weekends: ${avail.weekends}`);
+    }
+    if (avail.emergency) ap.push('emergency available');
+    if (ap.length > 0) parts.push(`Availability: ${ap.join(', ')}`);
+  }
+
+  // Credentials
+  const cred = profile.credentials;
+  if (cred && typeof cred === 'object') {
+    const cp = [];
+    if (cred.licensed === true) cp.push('licensed');
+    if (cred.license && String(cred.license).trim()) cp.push(String(cred.license).trim());
+    if (cred.references_available === true) cp.push('references available');
+    if (cred.years_experience != null) cp.push(`${cred.years_experience} years experience`);
+    if (cp.length > 0) parts.push(`Credentials: ${cp.join(', ')}`);
+  }
+
+  // Bio
+  if (profile.bio && String(profile.bio).trim()) {
+    parts.push(`Bio: ${String(profile.bio).trim()}`);
+  }
+
+  // Conversation-derived profile
+  const conv = profile.preferences?.conversation_profile;
+  if (conv && typeof conv === 'object') {
+    const cp = [];
+    if (conv.equipment?.length) cp.push(`Equipment: ${conv.equipment.join(', ')}`);
+    if (conv.materials?.length) cp.push(`Materials: ${conv.materials.join(', ')}`);
+    if (conv.project_focus) cp.push(`Focus: ${conv.project_focus}`);
+    if (conv.additional_services?.length) cp.push(`Also offers: ${conv.additional_services.join(', ')}`);
+    if (cp.length > 0) parts.push(cp.join('; '));
+  }
+
+  // Track record
+  if (profile.totalBidsAccepted != null && profile.totalBidsAccepted > 0) {
+    parts.push(`Completed jobs: ${profile.totalBidsAccepted}`);
+  }
+
+  return parts.join(' | ');
+}
+
+/* ─────────────────────────────────────────────────────────────
    FINAL LLM RANKER
 ───────────────────────────────────────────────────────────── */
 
@@ -297,15 +380,86 @@ async function finalRankProvidersForJob(job, candidates) {
     job?.priorities            && `Priorities: ${JSON.stringify(job.priorities)}`,
   ].filter(Boolean).join('\n');
 
-  const candidateList = candidates
-    .map((c, i) => `${i + 1}. seller_id: ${c.seller_id} | ${(c.searchable_text || '').slice(0, 400)}`)
-    .join('\n');
+  // Fetch full seller profiles from database
+  const sellerIds = candidates.map((c) => c.seller_id).filter(Boolean);
+  let sellerRecords = [];
+  
+  try {
+    sellerRecords = await prisma.sellerProfile.findMany({
+      where: { id: { in: sellerIds } },
+    });
+    console.log(`\n  ✅ Fetched ${sellerRecords.length} full seller profiles from database`);
+  } catch (err) {
+    console.error(`${LOG_PREFIX} Error fetching sellers from DB:`, err.message);
+    // Fallback to searchable_text if DB fetch fails
+    const candidateList = candidates
+      .map((c, i) => `${i + 1}. seller_id: ${c.seller_id} | ${c.searchable_text || 'No summary'}`)
+      .join('\n');
+
+    console.log('\n  Job context:');
+    console.log('  ' + '-'.repeat(56));
+    jobSummary.split('\n').forEach((l) => console.log('  ' + l));
+    console.log('  ' + '-'.repeat(56));
+    console.log(`\n  Candidates: ${candidates.length} sellers (using cached text)`);
+
+    const userPrompt =
+      `Job:\n${jobSummary}\n\n` +
+      `Seller candidates:\n${candidateList}\n\n` +
+      `Return JSON with ranked_seller_ids — only sellers who CAN do this job, best fit first. ` +
+      `If none are suitable return {"ranked_seller_ids": []}`;
+
+    const llm = new ChatOpenAI({ model: 'gpt-4o-mini', temperature: 0.1, openAIApiKey: OPENAI_API_KEY });
+
+    let content;
+    try {
+      const response = await llm.invoke([
+        new SystemMessage(FINAL_RANK_SYSTEM),
+        new HumanMessage(userPrompt),
+      ]);
+      content = response?.content;
+    } catch (err2) {
+      console.error(`${LOG_PREFIX} LLM error in finalRankProvidersForJob:`, err2.message);
+      return candidates.map((c) => c.seller_id);
+    }
+
+    console.log('\n  LLM response:');
+    if (typeof content === 'string') content.split('\n').forEach((l) => console.log('    ' + l));
+
+    const ranked = parseRankedSellerIdsFromContent(typeof content === 'string' ? content : '');
+
+    if (ranked && Array.isArray(ranked) && ranked.length === 0) {
+      console.log('\n  ⚠️  LLM determined: no suitable providers for this job');
+      return [];
+    }
+
+    const valid = ranked ? ranked.filter((id) => candidateSet.has(id)) : [];
+    const result = valid.length > 0 ? valid : candidates.map((c) => c.seller_id);
+
+    console.log(`\n  ✅ Final ranked: ${result.length} providers`);
+    result.forEach((id, i) => console.log(`    [${i + 1}] ${id}`));
+
+    return result;
+  }
+
+  // Build seller summaries from database records
+  const sellerMap = new Map(sellerRecords.map((s) => [s.id, s]));
+  const candidateList = sellerIds.map((sellerId, i) => {
+    const seller = sellerMap.get(sellerId);
+    if (!seller) {
+      // Fallback to cached text if seller not found
+      const candidate = candidates.find((c) => c.seller_id === sellerId);
+      const fallbackText = candidate?.searchable_text || 'Seller not found';
+      return `${i + 1}. seller_id: ${sellerId} | ${fallbackText}`;
+    }
+    const summary = buildSellerDetail(seller);
+    return `${i + 1}. seller_id: ${sellerId} | ${summary}`;
+  }).join('\n');
 
   console.log('\n  Job context:');
   console.log('  ' + '-'.repeat(56));
   jobSummary.split('\n').forEach((l) => console.log('  ' + l));
   console.log('  ' + '-'.repeat(56));
-  console.log(`\n  Candidates: ${candidates.length} sellers`);
+  console.log(`\n  Candidates: ${sellerRecords.length} sellers (with full details from DB)`);
 
   const userPrompt =
     `Job:\n${jobSummary}\n\n` +

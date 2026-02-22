@@ -1,4 +1,4 @@
-import { HumanMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { sessionService, messageService } from '../../services/index.js';
 import { createProviderAgentTools } from './providerAgentTools.js';
 import { createProviderAgentGraph } from './providerAgentGraph.js';
@@ -222,9 +222,17 @@ export async function runProviderProfileConversation(input) {
     isFirstMessage,
   });
 
+  // Convert DB messages to LangChain format
+  const historyMessages = conversationMessages.map((m) => {
+    if (m.role === 'user') return new HumanMessage(m.content);
+    if (m.role === 'assistant') return new AIMessage(m.content);
+    return null;
+  }).filter(Boolean);
+
   // LLM manages domain detection, phase transitions, and question depth.
   // No guard messages or counters injected — the system prompt handles all of this.
-  const inputMessages = [new HumanMessage(message)];
+  // Include full conversation history + new message for memory persistence
+  const inputMessages = [...historyMessages, new HumanMessage(message)];
 
   const tools = createProviderAgentTools({
     sellerId,
