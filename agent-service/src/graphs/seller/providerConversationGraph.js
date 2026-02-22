@@ -2,7 +2,6 @@ import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { sessionService, messageService } from '../../services/index.js';
 import { createProviderAgentTools } from './providerAgentTools.js';
 import { createProviderAgentGraph } from './providerAgentGraph.js';
-import { serviceCategoryManager } from '../../services/serviceCategoryManager.js';
 import { logProviderConversation } from '../../utils/providerProfileLogger.js';
 
 /* ================================================================================
@@ -237,7 +236,6 @@ export async function runProviderProfileConversation(input) {
   const tools = createProviderAgentTools({
     sellerId,
     accessToken,
-    serviceCategoryManager,
   });
 
   const graph = createProviderAgentGraph(tools);

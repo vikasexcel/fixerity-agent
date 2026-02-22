@@ -18,27 +18,27 @@ import { getCustomerUserDetails, upsertJobEmbedding } from '../../services/index
  * cleaning gets scope/frequency; etc.
  */
 async function generateJobPostWithLLM(collectedInfo, llm) {
-  const prompt = `You are a professional job post writer for a service marketplace. Given collected information from a buyer conversation, generate a complete, professional RFP-style job listing so providers can give accurate pricing and timelines.
+  const prompt = `You are a professional job post writer for a service marketplace. Given collected information from a buyer conversation, generate a complete, professional job listing so providers can give accurate pricing and timelines.
 
 COLLECTED INFORMATION (JSON):
 ${JSON.stringify(collectedInfo, null, 2)}
 
-CRITICAL - DYNAMIC RFP STRUCTURE:
-Do NOT use a fixed template. Infer the appropriate RFP structure from service_category_name and the data you have.
+CRITICAL - DYNAMIC STRUCTURE:
+Do NOT use a fixed template. Infer the appropriate structure from the data and what type of work is being requested. Use 3-6 sections with clear bold headers (**SECTION NAME**) that help providers understand the job and bid accurately.
 
-- For ARCHITECT / design / construction: PROJECT OVERVIEW, SCOPE OF SERVICES, PROPOSED PROGRAM, STYLE PREFERENCES, SITE INFORMATION, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
-- For PLUMBER / repair: ISSUE DETAILS (what's broken, where), URGENCY, PROPERTY & ACCESS, EXISTING SYSTEMS/FIXTURES, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
-- For HOME CLEANING: SCOPE (what's needed), FREQUENCY, PROPERTY SIZE, SPECIAL REQUIREMENTS (pets, supplies), BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
-- For ELECTRICIAN: SCOPE (panel, EV charger, etc.), PERMIT NEEDS, PROPERTY TYPE, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
-- For GENERAL CONTRACTOR: PROJECT TYPE & SCOPE, TIMELINE, PERMITS, EXISTING PLANS, BUDGET & TIMELINE, PROPOSAL REQUIREMENTS
-- For ANY other service: invent sections that fit the job type and collected data. Use 3–6 sections that help providers price accurately.
+For any type of work, organize the information logically:
+- What needs to be done (scope, requirements, deliverables)
+- Where and when (location, timeline, urgency)
+- Context that matters (existing conditions, constraints, preferences)
+- Budget and timeline expectations
+- What providers should include in their response (quote, timeline, availability, credentials)
 
-Include ONLY sections that have data. Format each section with a bold header (**SECTION NAME**) followed by content. For PROPOSAL REQUIREMENTS, state what providers should include in their response (e.g. quote, timeline, availability).
+Include ONLY sections where you have meaningful data. Format professionally with markdown.
 
 Output valid JSON only:
 {
-  "title": "<professional job title for this service type>",
-  "description": "<full markdown-formatted RFP with **SECTION** headers and content>"
+  "title": "<professional job title that describes the work>",
+  "description": "<full markdown-formatted job post with **SECTION** headers and content>"
 }`;
 
   try {
@@ -69,7 +69,6 @@ function normalizeLocation(location) {
 }
 
 const createJobSchema = z.object({
-  service_category_name: z.string().describe('Type of service needed (e.g. architect, plumber, home cleaning). Required.'),
   title: z.string().optional().describe('Job title for the listing.'),
   description: z.string().optional().describe('Detailed description of the work needed.'),
   budget_min: z.number().optional().describe('Minimum budget in dollars.'),
@@ -81,17 +80,15 @@ const createJobSchema = z.object({
     lat: z.number().optional(),
     lng: z.number().optional(),
   })]).optional().describe('Address or location where service is needed.'),
-  specific_requirements: z.record(z.string(), z.any()).optional().describe('Job-type-specific details (e.g. architect: scope, style, sq_ft).'),
+  specific_requirements: z.record(z.string(), z.any()).optional().describe('Job-type-specific details captured from the conversation.'),
 });
 
 /**
  * Factory: creates buyer agent tools with buyerId and accessToken in closure.
- * Pass serviceCategoryManager from the caller (conversationGraph) to avoid circular deps.
  */
-export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryManager }) {
+export function createBuyerAgentTools({ buyerId, accessToken }) {
   const createJobTool = tool(
     async ({
-      service_category_name,
       title,
       description,
       budget_min,
@@ -108,14 +105,6 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
           openAIApiKey: OPENAI_API_KEY,
         });
 
-        const categories = await serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken);
-        const match = categories?.length
-          ? await serviceCategoryManager.findCategory(service_category_name, categories, llm)
-          : null;
-
-        const serviceCategoryId = match?.matched && match?.category_id != null ? match.category_id : null;
-        const serviceCategoryName = (match?.category_name || service_category_name || '').trim() || service_category_name;
-
         const budgetMax = budget_max ?? (budget_min != null ? budget_min * 2 : 100);
         const budgetMin = budget_min ?? (budget_max != null ? Math.floor(budget_max * 0.5) : 100);
 
@@ -126,7 +115,6 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
         // Build collected info for LLM-based job post generation
         const loc = normalizeLocation(location);
         const collectedInfo = {
-          service_category_name: serviceCategoryName,
           title_draft: title,
           description_draft: description,
           budget_min: budgetMin,
@@ -142,8 +130,8 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
           (title && description) ||
           (loc?.address && (budget_min != null || budget_max != null));
 
-        let finalTitle = title || `${serviceCategoryName || 'Service'} request`;
-        let finalDescription = description || (serviceCategoryName ? `Looking for ${serviceCategoryName}` : 'Service request');
+        let finalTitle = title || 'Service Request';
+        let finalDescription = description || 'Service request';
 
         if (hasRichData) {
           const generated = await generateJobPostWithLLM(collectedInfo, llm);
@@ -160,8 +148,8 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
           lastName: buyerDetails?.lastName ?? null,
           email: buyerDetails?.email ?? null,
           contactNumber: buyerDetails?.contactNumber ?? null,
-          serviceCategoryId,
-          serviceCategoryName: serviceCategoryName || null,
+          serviceCategoryId: null,
+          serviceCategoryName: null,
           title: finalTitle,
           description: finalDescription,
           budget: { min: budgetMin, max: budgetMax },
@@ -206,13 +194,11 @@ export function createBuyerAgentTools({ buyerId, accessToken, serviceCategoryMan
     },
     {
       name: 'create_job',
-      description: `Create a job listing on the marketplace. Call when you have gathered enough info for providers to give accurate bids. Required: service_category_name. Do NOT ask the user for confirmation—call this tool directly when ready.
+      description: `Create a job listing on the marketplace. Call when you have gathered enough info for providers to give accurate bids. Do NOT ask the user for confirmation—call this tool directly when ready.
 
-IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional RFP-style job post from your data. The RFP structure is determined dynamically by service type (plumber: Issue Details, Urgency, Property & Access; architect: Project Overview, Program, Style, Site; cleaning: Scope, Frequency, etc.). You do NOT need to compose the description—just pass the structured data.
+IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional job post from your data. You do NOT need to compose the description—just pass the structured data as key-value pairs that match what matters for the type of work.
 
-specific_requirements: Pass every detail the user shared. Plumber: leak_location, issue_type, urgency, property_type, access, existing_fixtures. Architect: lot_size_sqft, living_area_sqft, bedrooms, style, scope_phases, survey_available, constraints. Cleaning: sq_ft, frequency, pets, supplies. Electrician: scope, panel_upgrade, ev_charger, permit_needs. Adapt to the job type.
-
-Also pass: budget_min, budget_max (use defaults if user said "flexible" or "reasonable"), start_date, end_date, location.`,
+Also pass: budget_min, budget_max (use defaults if user said "flexible" or "reasonable"), start_date, end_date, location, title (optional), description (optional).`,
       schema: createJobSchema,
     }
   );

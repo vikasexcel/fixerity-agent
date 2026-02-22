@@ -90,9 +90,6 @@ async function buildBuyerFacingQuery(job) {
   const llmQuery = await buildOptimizedQueryForJob(job);
   const parts    = [];
 
-  const service  = (job?.service_category_name ?? job?.serviceCategoryName ?? '').trim();
-  if (service) parts.push(`I need a ${service} provider.`);
-
   const location = resolveLocation(job?.location);
   if (location) parts.push(`Located in or serving ${location}.`);
 
@@ -532,21 +529,15 @@ export function sellerProfileToProvider(profile) {
 
 export async function runProviderMatching(job) {
   const startTime   = Date.now();
-  const serviceName = (job?.service_category_name ?? '').trim();
 
   console.log('\n' + '▓'.repeat(70));
   console.log(`${LOG_PREFIX} 🚀 PROVIDER MATCHING PIPELINE STARTED`);
   console.log('▓'.repeat(70));
 
-  if (!serviceName) {
-    return { providers: [], error: 'Job must have service_category_name for matching.' };
-  }
-
   try {
     logHeader('INPUT: Job Details');
     logKeyValue('Job ID',           job?.id,                    4);
     logKeyValue('Title',            job?.title,                 4);
-    logKeyValue('Service Category', serviceName,                4);
     logKeyValue('Budget',           resolveBudget(job?.budget), 4);
     logKeyValue('Location',         resolveLocation(job?.location), 4);
     logKeyValue('Start Date',       job?.startDate,             4);
@@ -557,11 +548,11 @@ export async function runProviderMatching(job) {
     console.log(`\n  ✅ Query: ${query}`);
     console.log(`  📏 Length: ${query.length} characters`);
 
-    // ── Step 2: Semantic search with normalised category filter ───────────
+    // ── Step 2: Pure semantic search ───────────────────────────────────────
     logHeader('STEP 2: Semantic Search (Embeddings)');
-    console.log(`  🔍 Searching with category filter: "${serviceName}"`);
+    console.log(`  🔍 Searching for best matches based on job description`);
 
-    const top40 = await searchSellersByQuery(query, 40, serviceName);
+    const top40 = await searchSellersByQuery(query, 40);
 
     console.log(`\n  ✅ Embedding Search: ${top40.length} sellers found`);
     if (top40.length > 0) {

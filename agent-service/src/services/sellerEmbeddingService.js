@@ -281,18 +281,13 @@ export async function upsertSellerEmbedding(sellerId, profile) {
    SEARCH
 ───────────────────────────────────────────────────────────── */
 
-export async function searchSellersByQuery(queryText, limit = 40, serviceCategoryFilter = null) {
+export async function searchSellersByQuery(queryText, limit = 40) {
   const cap = Math.min(Math.max(Number(limit) || 40, 1), 100);
-
-  const categoryFilter = serviceCategoryFilter
-    ? normaliseCategory(serviceCategoryFilter)
-    : null;
 
   console.log('\n' + '='.repeat(60));
   console.log(`${LOG_PREFIX} Semantic search: query and retrieval`);
   console.log('='.repeat(60));
   console.log(`\n  Query: ${(queryText || '').slice(0, 200)}`);
-  if (categoryFilter) console.log(`  Category filter (normalised): "${categoryFilter}"`);
   console.log('');
 
   const vector = await embedText(queryText || '');
@@ -304,71 +299,28 @@ export async function searchSellersByQuery(queryText, limit = 40, serviceCategor
   const vectorStr = '[' + vector.join(',') + ']';
   let rows = [];
 
-  // ── Pass 1: strict category filter ────────────────────────────────────────
+  // Pure semantic search - all active sellers ranked by similarity
   try {
-    if (categoryFilter) {
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.seller_id                                          AS "seller_id",
-          e.searchable_text                                    AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)               AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))         AS similarity_score
-        FROM seller_embeddings e
-        INNER JOIN seller_profiles p
-          ON p.seller_id = e.seller_id
-         AND p.active = true
-         AND EXISTS (
-               SELECT 1 FROM unnest(p.service_category_names) AS cat
-               WHERE lower(trim(cat)) = ${categoryFilter}
-             )
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-    } else {
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.seller_id                                          AS "seller_id",
-          e.searchable_text                                    AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)               AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))         AS similarity_score
-        FROM seller_embeddings e
-        INNER JOIN seller_profiles p
-          ON p.seller_id = e.seller_id
-         AND p.active = true
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-    }
+    rows = await prisma.$queryRaw`
+      SELECT
+        e.seller_id                                          AS "seller_id",
+        e.searchable_text                                    AS "searchable_text",
+        (e.embedding <=> ${vectorStr}::vector)               AS distance,
+        (1 - (e.embedding <=> ${vectorStr}::vector))         AS similarity_score
+      FROM seller_embeddings e
+      INNER JOIN seller_profiles p
+        ON p.seller_id = e.seller_id
+       AND p.active = true
+      ORDER BY e.embedding <=> ${vectorStr}::vector
+      LIMIT ${cap}
+    `;
   } catch (err) {
-    console.error(LOG_PREFIX, 'Pass-1 query error:', err.message);
+    console.error(LOG_PREFIX, 'Query error:', err.message);
     rows = [];
   }
 
-  console.log(`  Pass 1 (category filter "${categoryFilter}"): ${rows.length} results`);
+  console.log(`  Retrieved: ${rows.length} results`);
 
-  // ── Pass 2: widen if pass 1 returned nothing ──────────────────────────────
-  if (rows.length === 0 && categoryFilter) {
-    console.log('  ⚠️  0 results — widening to all active sellers...');
-    try {
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.seller_id                                          AS "seller_id",
-          e.searchable_text                                    AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)               AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))         AS similarity_score
-        FROM seller_embeddings e
-        INNER JOIN seller_profiles p
-          ON p.seller_id = e.seller_id
-         AND p.active = true
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-      console.log(`  Pass 2 (widened): ${rows.length} results`);
-    } catch (err) {
-      console.error(LOG_PREFIX, 'Pass-2 query error:', err.message);
-      rows = [];
-    }
-  }
 
   const list = Array.isArray(rows) ? rows : [];
   console.log('\n  Retrieved (top ' + list.length + ' by cosine similarity):');

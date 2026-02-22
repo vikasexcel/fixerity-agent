@@ -1,6 +1,5 @@
 import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
 import { sessionService, messageService } from '../../services/index.js';
-import { serviceCategoryManager } from '../../services/serviceCategoryManager.js';
 import { createBuyerAgentTools } from './buyerAgentTools.js';
 import { createBuyerAgentGraph } from './buyerAgentGraph.js';
 
@@ -118,7 +117,6 @@ export async function runConversation(input) {
   const tools = createBuyerAgentTools({
     buyerId,
     accessToken,
-    serviceCategoryManager,
   });
 
   const graph = createBuyerAgentGraph(tools);

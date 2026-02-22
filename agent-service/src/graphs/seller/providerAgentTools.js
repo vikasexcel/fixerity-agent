@@ -114,8 +114,8 @@ function normalizeAvailability(availability) {
 }
 
 const createSellerProfileSchema = z.object({
-  service_category_name: z.string().describe('Primary service type (e.g. concrete, plumbing, home cleaning). Required.'),
-  specific_requirements: z.record(z.string(), z.any()).optional().describe('Domain-specific details: concrete: equipment, certifications, project_sizes; plumber: license_type, emergency; etc.'),
+  service_category_name: z.string().optional().describe('Primary service type - will be inferred from conversation if not provided.'),
+  specific_requirements: z.record(z.string(), z.any()).optional().describe('Domain-specific details captured from conversation.'),
   service_area: z.union([
     z.string(),
     z.object({
@@ -153,9 +153,8 @@ const createSellerProfileSchema = z.object({
 
 /**
  * Factory: creates provider agent tools with sellerId and accessToken in closure.
- * Pass serviceCategoryManager from the caller to avoid circular deps.
  */
-export function createProviderAgentTools({ sellerId, accessToken, serviceCategoryManager }) {
+export function createProviderAgentTools({ sellerId, accessToken }) {
   const createSellerProfileTool = tool(
     async ({
       service_category_name,
@@ -185,28 +184,12 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           openAIApiKey: OPENAI_API_KEY,
         });
 
-        const categories = await serviceCategoryManager.getProviderCategoriesOrFetch(providerId, accessToken);
-        const match = categories?.length
-          ? await serviceCategoryManager.findCategory(service_category_name, categories, llm)
-          : null;
-
-        logProviderTools('category_match', {
-          providerId,
-          categoriesCount: categories?.length ?? 0,
-          matched: match?.matched ?? false,
-          category_name: match?.category_name ?? null,
-        });
-
-        const serviceCategoryName = (match?.matched && match?.category_name)
-          ? match.category_name.trim()
-          : (service_category_name || '').trim() || service_category_name;
-
         const providerDetails = await getProviderBasicDetails(providerId);
         const serviceAreaObj = normalizeServiceArea(service_area);
         const availabilityObj = normalizeAvailability(availability);
 
         const collectedInfo = {
-          service_category_name: serviceCategoryName,
+          service_category_name: service_category_name ?? null,
           bio_draft: bio,
           provider_identity: {
             first_name: providerDetails?.firstName ?? null,
@@ -223,7 +206,7 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
 
         logProviderTools('collected_info', {
           providerId,
-          service_category_name: serviceCategoryName,
+          service_category_name: service_category_name,
           collectedInfoKeys: Object.keys(collectedInfo),
           collectedInfo,
         });
@@ -247,7 +230,7 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
         const finalBio = generated?.bio ?? bio ?? null;
         const finalServiceNames = generated?.service_category_names?.length
           ? generated.service_category_names
-          : (serviceCategoryName ? [serviceCategoryName] : []);
+          : (service_category_name ? [service_category_name] : []);
         const finalCredentials = { ...(credentials ?? {}), ...(generated?.credentials ?? {}) };
         const finalPricing = generated?.pricing ?? pricing ?? { hourly_rate_min: null, hourly_rate_max: null, fixed_prices: {} };
         const defaultPrefs = {

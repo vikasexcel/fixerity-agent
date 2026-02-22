@@ -64,14 +64,7 @@ export async function embedQueryForJob(text) {
 export function buildSearchableText(job) {
   const parts = [];
 
-  // ── 1. Service category (strongest signal — repeat for emphasis) ──────────
-  const service = (job.serviceCategoryName || job.service_category_name || '').trim();
-  if (service) {
-    parts.push(`This job requires a ${service} provider.`);
-    parts.push(`Looking for someone who offers ${service} services.`);
-  }
-
-  // ── 2. Job title and description ──────────────────────────────────────────
+  // ── 1. Job title and description (contains all job details) ───────────────
   if (job.title && String(job.title).trim()) {
     parts.push(String(job.title).trim());
   }
@@ -235,13 +228,8 @@ export async function upsertJobEmbedding(jobId, job) {
  * @param {string[]} [serviceCategoryNames] - Seller's service categories (raw, normalised internally)
  * @returns {Promise<Array<{ job_id, searchable_text, similarity_score, distance }>>}
  */
-export async function searchJobsByQuery(queryText, limit = 40, serviceCategoryNames = []) {
+export async function searchJobsByQuery(queryText, limit = 40) {
   const cap = Math.min(Math.max(Number(limit) || 40, 1), 100);
-
-  // Normalise all category names
-  const categories = Array.isArray(serviceCategoryNames)
-    ? serviceCategoryNames.map(normaliseCategory).filter(Boolean)
-    : [];
 
   console.log('\n' + '='.repeat(60));
   console.log(`${LOG_PREFIX} Semantic search: query and retrieval`);
@@ -249,9 +237,6 @@ export async function searchJobsByQuery(queryText, limit = 40, serviceCategoryNa
   console.log(`\n  Query used for search:`);
   console.log('  ' + '-'.repeat(56));
   console.log('  ' + (queryText || '(empty)'));
-  if (categories.length > 0) {
-    console.log(`  Service category filter (normalised): [${categories.join(', ')}]`);
-  }
   console.log('  ' + '-'.repeat(56) + '\n');
 
   const vector = await embedQueryForJob(queryText || '');
@@ -264,70 +249,27 @@ export async function searchJobsByQuery(queryText, limit = 40, serviceCategoryNa
   const vectorStr = '[' + vector.join(',') + ']';
   let rows = [];
 
-  // ── Pass 1: strict category filter ────────────────────────────────────────
+  // Pure semantic search - all open jobs ranked by similarity
   try {
-    if (categories.length > 0) {
-      // Match job's service_category_name against any of the seller's categories
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.job_id                                               AS "job_id",
-          e.searchable_text                                      AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)                 AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))           AS similarity_score
-        FROM job_embeddings e
-        INNER JOIN job_listings j
-          ON j.job_id = e.job_id
-         AND j.status = 'open'
-         AND lower(trim(j.service_category_name)) = ANY(${categories}::text[])
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-    } else {
-      // No category filter — return all open jobs ranked by similarity
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.job_id                                               AS "job_id",
-          e.searchable_text                                      AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)                 AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))           AS similarity_score
-        FROM job_embeddings e
-        INNER JOIN job_listings j
-          ON j.job_id = e.job_id
-         AND j.status = 'open'
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-    }
+    rows = await prisma.$queryRaw`
+      SELECT
+        e.job_id                                               AS "job_id",
+        e.searchable_text                                      AS "searchable_text",
+        (e.embedding <=> ${vectorStr}::vector)                 AS distance,
+        (1 - (e.embedding <=> ${vectorStr}::vector))           AS similarity_score
+      FROM job_embeddings e
+      INNER JOIN job_listings j
+        ON j.job_id = e.job_id
+       AND j.status = 'open'
+      ORDER BY e.embedding <=> ${vectorStr}::vector
+      LIMIT ${cap}
+    `;
   } catch (err) {
-    console.error(LOG_PREFIX, 'Pass-1 query error:', err.message);
+    console.error(LOG_PREFIX, 'Query error:', err.message);
     rows = [];
   }
 
-  console.log(`  Pass 1 (category filter [${categories.join(', ')}]): ${rows.length} results`);
-
-  // ── Pass 2: widen if pass 1 returned nothing ──────────────────────────────
-  if (rows.length === 0 && categories.length > 0) {
-    console.log('  ⚠️  0 results with category filter — widening to all open jobs...');
-    try {
-      rows = await prisma.$queryRaw`
-        SELECT
-          e.job_id                                               AS "job_id",
-          e.searchable_text                                      AS "searchable_text",
-          (e.embedding <=> ${vectorStr}::vector)                 AS distance,
-          (1 - (e.embedding <=> ${vectorStr}::vector))           AS similarity_score
-        FROM job_embeddings e
-        INNER JOIN job_listings j
-          ON j.job_id = e.job_id
-         AND j.status = 'open'
-        ORDER BY e.embedding <=> ${vectorStr}::vector
-        LIMIT ${cap}
-      `;
-      console.log(`  Pass 2 (widened, no category filter): ${rows.length} results`);
-    } catch (err) {
-      console.error(LOG_PREFIX, 'Pass-2 query error:', err.message);
-      rows = [];
-    }
-  }
+  console.log(`  Retrieved: ${rows.length} results`);
 
   // ── Log results ────────────────────────────────────────────────────────────
   const list = Array.isArray(rows) ? rows : [];

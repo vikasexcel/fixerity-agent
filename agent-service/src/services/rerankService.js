@@ -58,12 +58,7 @@ function parseRankedIds(content, key) {
 function buildJobSummary(job) {
   const parts = [];
 
-  // Service category
-  if (job.serviceCategoryName) {
-    parts.push(`Service: ${job.serviceCategoryName}`);
-  }
-
-  // Title and description
+  // Title and description (contains all job details)
   if (job.title) parts.push(`Title: ${job.title}`);
   if (job.description) parts.push(`Description: ${job.description}`);
 

@@ -150,13 +150,10 @@ async function findMatchingJobsNode(state) {
   }
 
   try {
-    // ── Build query + get category filter from profile ─────────────────────
+    // ── Build query from profile ──────────────────────────────────────────
     console.log('\n  🤖 Building optimized query from seller profile...');
 
-    // buildOptimizedQueryForSellerProfile now returns { query, serviceCategories }
-    const result = await buildOptimizedQueryForSellerProfile(profile);
-    const query            = result?.query ?? result;  // backward-compat if old signature
-    const serviceCategories = result?.serviceCategories ?? [];
+    const query = await buildOptimizedQueryForSellerProfile(profile);
 
     if (!query || !String(query).trim()) {
       console.log('  ❌ Empty query generated, skipping search');
@@ -164,13 +161,12 @@ async function findMatchingJobsNode(state) {
     }
 
     console.log(`\n  ✅ Query: ${query}`);
-    console.log(`  📌 Category filter: [${serviceCategories.join(', ')}]`);
 
-    // ── Semantic search with category filter ───────────────────────────────
+    // ── Pure semantic search ───────────────────────────────────────────────
     const searchLimit = 40;
     console.log(`\n  🔍 Searching job embeddings (limit: ${searchLimit})...`);
 
-    const embeddingResults = await searchJobsByQuery(query, searchLimit, serviceCategories);
+    const embeddingResults = await searchJobsByQuery(query, searchLimit);
 
     if (!embeddingResults || embeddingResults.length === 0) {
       console.log('  ❌ No jobs found from embedding search');

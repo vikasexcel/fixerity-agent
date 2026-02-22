@@ -179,35 +179,26 @@ function profileToPromptText(profile) {
 
 /**
  * Build an optimized retrieval query for the given seller profile.
- * Also returns the seller's normalised service_category_names so the
- * caller can pass them directly to searchJobsByQuery as a category filter.
  *
  * @param {object} profile - Seller profile
- * @returns {Promise<{ query: string, serviceCategories: string[] }>}
+ * @returns {Promise<string>} - The search query string
  */
 export async function buildOptimizedQueryForSellerProfile(profile) {
-  const names = Array.isArray(profile?.service_category_names)
-    ? profile.service_category_names.filter(Boolean)
-    : [];
-
-  const serviceCategories = names.map((n) => String(n).toLowerCase().trim()).filter(Boolean);
-
   if (!profile) {
-    return { query: 'service provider jobs', serviceCategories: [] };
+    return 'service provider jobs';
   }
 
   // ── Fallback if no OpenAI key ──────────────────────────────────────────────
   if (!OPENAI_API_KEY || !OPENAI_API_KEY.trim()) {
     const area = profile.service_area?.location || '';
     const fallback = [
-      serviceCategories.length > 0 ? `${serviceCategories.join(', ')} jobs` : '',
       area ? `in ${area}` : '',
       profile.bio || '',
     ].filter(Boolean).join(' ').trim().slice(0, 2000);
 
     const query = fallback || 'service provider jobs';
     console.log('[SellerQueryService] No OPENAI_API_KEY — fallback query:', query);
-    return { query, serviceCategories };
+    return query;
   }
 
   const llm = new ChatOpenAI({
@@ -240,23 +231,18 @@ export async function buildOptimizedQueryForSellerProfile(profile) {
     if (typeof content === 'string' && content.trim()) {
       query = content.trim().slice(0, 3000);
     } else {
-      query = serviceCategories.length > 0
-        ? `${serviceCategories.join(', ')} jobs`
-        : 'service provider jobs';
+      query = 'service provider jobs';
     }
   } catch (err) {
     console.error('[SellerQueryService] LLM error:', err.message);
-    query = serviceCategories.length > 0
-      ? `${serviceCategories.join(', ')} jobs`
-      : 'service provider jobs';
+    query = 'service provider jobs';
   }
 
   console.log('  Built retrieval query (for job search):');
   console.log('  ' + '-'.repeat(56));
   console.log('  ' + query);
   console.log('  ' + '-'.repeat(56));
-  console.log(`  Service categories for filter: [${serviceCategories.join(', ')}]`);
   console.log('='.repeat(60) + '\n');
 
-  return { query, serviceCategories };
+  return query;
 }
