@@ -460,36 +460,19 @@ async function handleSellerAgent(input, send) {
     }
 
     const providerId = parseInt(sellerIdStr, 10);
-    const hasProfile = !isNaN(providerId) && (await prisma.sellerProfile.findFirst({
-      where: { providerId, active: true },
-      select: { id: true },
-    }));
     const phaseProfileCreation = dbSession?.phase === 'profile_creation';
 
-    // When the user is describing their specialty (e.g. "My specialty is concrete work..."),
-    // always use the provider profile flow so they get domain-specific questions—not the
-    // generic seller agent which asks for location first.
-    const messageLower = (message || '').trim().toLowerCase();
-    const suggestsProfileCreation =
-      messageLower.includes('my specialty') ||
-      messageLower.includes('i build') ||
-      messageLower.includes('i repair') ||
-      messageLower.includes("i'm a ") ||
-      messageLower.includes('i am a ') ||
-      messageLower.includes('i do ') ||
-      messageLower.includes('i offer ') ||
-      /^(i do|i'm|i am|my (specialty|service|work))/.test(messageLower);
-
-    const useProviderProfileFlow = !hasProfile || phaseProfileCreation || suggestsProfileCreation;
+    // Always use provider profile flow for seller sessions.
+    // Each session creates one new profile - no profile existence checks.
+    // This allows one provider to create multiple profiles across different sessions.
+    const useProviderProfileFlow = true;
 
     logSellerAgent('routing_decision', {
       sessionId,
       sellerId: sellerIdStr,
       providerId: isNaN(providerId) ? null : providerId,
-      hasProfile: !!hasProfile,
       phase: dbSession?.phase ?? null,
       phaseProfileCreation,
-      suggestsProfileCreation,
       useProviderProfileFlow,
     });
 

@@ -309,36 +309,18 @@ export function createProviderAgentTools({ sellerId, accessToken, serviceCategor
           active: true,
         };
 
-        const existing = await prisma.sellerProfile.findFirst({
-          where: { providerId, active: true },
-          orderBy: { updatedAt: 'desc' },
+        // Always create a new profile (never update existing).
+        // This allows one provider to have multiple seller profiles.
+        const created = await prisma.sellerProfile.create({
+          data: { id: randomUUID(), ...profileData },
         });
-
-        let created;
-        if (existing) {
-          created = await prisma.sellerProfile.update({
-            where: { id: existing.id },
-            data: profileData,
-          });
-          logProviderTools('create_seller_profile_success', {
-            profileId: created.id,
-            providerId,
-            updated: true,
-            serviceCategoryNames: created.serviceCategoryNames,
-            profileCompletenessScore: created.profileCompletenessScore,
-          });
-        } else {
-          created = await prisma.sellerProfile.create({
-            data: { id: randomUUID(), ...profileData },
-          });
-          logProviderTools('create_seller_profile_success', {
-            profileId: created.id,
-            providerId,
-            updated: false,
-            serviceCategoryNames: created.serviceCategoryNames,
-            profileCompletenessScore: created.profileCompletenessScore,
-          });
-        }
+        logProviderTools('create_seller_profile_success', {
+          profileId: created.id,
+          providerId,
+          updated: false,
+          serviceCategoryNames: created.serviceCategoryNames,
+          profileCompletenessScore: created.profileCompletenessScore,
+        });
 
         upsertSellerEmbedding(created.id, created).catch((err) => {
           console.error('[create_seller_profile] Embedding failed:', err.message);

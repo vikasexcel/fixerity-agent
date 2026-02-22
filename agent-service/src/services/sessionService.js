@@ -24,7 +24,8 @@ export const sessionService = {
 
     // Create new session
     const initialState = this._getInitialState(userType);
-    if (forceNew && userType === 'seller') {
+    // All seller sessions are scoped to creating one profile
+    if (userType === 'seller') {
       initialState.profileSessionScoped = true;
     }
     const newSession = await sessionRepository.create({
