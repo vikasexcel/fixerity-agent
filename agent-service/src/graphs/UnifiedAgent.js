@@ -492,10 +492,14 @@ async function handleSellerAgent(input, send) {
       send({ type: 'profile_collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, profileReadiness: result.profileReadiness });
       if (result.phase === 'complete' && result.profile) {
         await sessionService.updateState(sessionId, { profile: result.profile });
+        // Store the profile ID in the session for proper job matching
+        if (result.profile.seller_id) {
+          await sessionService.setProfileId(sessionId, result.profile.seller_id);
+        }
         await sessionService.updatePhase(sessionId, 'job_browsing');
         send({ type: 'phase_transition', from: 'profile_creation', to: 'job_browsing', profile: result.profile });
         send({ type: 'message', text: "Excellent! Your profile is now live. Let me find jobs that match your skills..." });
-        const jobResult = await findJobsForSeller(sellerIdStr);
+        const jobResult = await findJobsForSeller(result.profile.seller_id || sellerIdStr);
         await sessionService.updateState(sessionId, { matchedJobs: jobResult.jobs });
         if (jobResult.jobs?.length > 0) {
           const topJobs = jobResult.jobs.slice(0, 5);
@@ -598,6 +602,10 @@ async function handleSellerProfileCreation(session, message, send) {
   send({ type: 'profile_collected', data: result.collected, requiredMissing: result.requiredMissing, optionalMissing: result.optionalMissing, profileReadiness: result.profileReadiness });
   if (result.phase === 'complete' && result.profile) {
     await sessionService.updateState(sessionId, { profile: result.profile });
+    // Store the profile ID in the session for proper job matching
+    if (result.profile.seller_id) {
+      await sessionService.setProfileId(sessionId, result.profile.seller_id);
+    }
     await sessionService.updatePhase(sessionId, 'job_browsing');
     send({ type: 'phase_transition', from: 'profile_creation', to: 'job_browsing', profile: result.profile });
     send({ type: 'message', text: "Excellent! Your profile is now live. Let me find jobs that match your skills..." });
@@ -606,9 +614,10 @@ async function handleSellerProfileCreation(session, message, send) {
 }
 
 async function handleJobBrowsing(session, message, send) {
-  const { sessionId, sellerId } = session;
+  const { sessionId, sellerId, profileId } = session;
   send({ type: 'phase', phase: 'job_browsing' });
-  const result = await findJobsForSeller(sellerId);
+  // Use profileId if available (session-scoped), otherwise fallback to sellerId
+  const result = await findJobsForSeller(profileId || sellerId);
   await sessionService.updateState(sessionId, { matchedJobs: result.jobs });
   if (result.jobs?.length > 0) {
     const topJobs = result.jobs.slice(0, 5);

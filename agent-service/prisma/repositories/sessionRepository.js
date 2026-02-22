@@ -114,6 +114,13 @@ export const sessionRepository = {
   },
 
   /**
+   * Set profile ID for seller session
+   */
+  async setProfileId(sessionId, profileId) {
+    return await this.update(sessionId, { profileId });
+  },
+
+  /**
    * Mark session as inactive (soft delete)
    */
   async markInactive(sessionId) {

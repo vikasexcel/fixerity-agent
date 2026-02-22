@@ -115,6 +115,7 @@ model ConversationSession {
   phase           String    @default("conversation") // conversation, confirmation, negotiation, etc.
   state           Json      // All collected data (budget, service, etc.)
   jobId           String?   @map("job_id") // Reference to created job
+  profileId       String?   @map("profile_id") // Reference to created seller profile (for sellers)
   isActive        Boolean   @default(true) @map("is_active") // Mark inactive when user explicitly ends
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
@@ -123,6 +124,7 @@ model ConversationSession {
 
   @@index([userId, userType])
   @@index([userId, isActive])
+  @@index([profileId])
   @@map("conversation_sessions")
 }
 

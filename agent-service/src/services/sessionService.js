@@ -137,6 +137,14 @@ export const sessionService = {
   },
 
   /**
+   * Set profile ID for seller session
+   */
+  async setProfileId(sessionId, profileId) {
+    await sessionRepository.setProfileId(sessionId, profileId);
+    console.log(`[SessionService] Set profileId ${profileId} for session ${sessionId}`);
+  },
+
+  /**
    * Deep merge two objects
    */
   _deepMerge(target, source) {

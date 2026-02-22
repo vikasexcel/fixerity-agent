@@ -87,40 +87,94 @@ async function loadSellerProfileNode(state) {
   console.log(`\n  🔍 Loading seller: ${state.sellerId}`);
 
   try {
-    const providerId = parseInt(String(state.sellerId), 10);
-
-    const profiles = await prisma.sellerProfile.findMany({
-      where: !isNaN(providerId)
-        ? { providerId, active: true }
-        : { id: state.sellerId, active: true },
-      orderBy: { updatedAt: 'desc' },
-    });
-
-    const profile = profiles[0];
-    if (!profile) {
-      console.log(`  ❌ No active profile found for seller: ${state.sellerId}`);
+    const sellerId = String(state.sellerId);
+    const providerId = parseInt(sellerId, 10);
+    
+    // Check if sellerId is a UUID (profile ID) or numeric (provider ID)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sellerId);
+    
+    let profile;
+    
+    if (isUUID) {
+      // Load specific profile by UUID (session-scoped)
+      console.log(`  🎯 Loading session-specific profile: ${sellerId}`);
+      profile = await prisma.sellerProfile.findFirst({
+        where: { id: sellerId, active: true },
+      });
+      
+      if (!profile) {
+        console.log(`  ❌ Profile not found: ${sellerId}`);
+        return {
+          error: 'Profile not found. Please create a profile first.',
+          matchedJobs: [],
+        };
+      }
+      
+      console.log(`\n  ✅ Loaded session-specific profile`);
+      logKeyValue('Profile ID',     profile.id,             4);
+      logKeyValue('Provider ID',    profile.providerId,     4);
+      logKeyValue('Services',       (profile.serviceCategoryNames ?? []).join(', ') || '—', 4);
+      logKeyValue('Service Area',   profile.serviceArea?.location ?? JSON.stringify(profile.serviceArea), 4);
+      logKeyValue('Availability',   JSON.stringify(profile.availability), 4);
+      logKeyValue('Pricing',        JSON.stringify(profile.pricing), 4);
+      
+    } else if (!isNaN(providerId)) {
+      // Load all profiles for provider (backward compatibility)
+      console.log(`  📚 Loading all profiles for provider: ${providerId}`);
+      const profiles = await prisma.sellerProfile.findMany({
+        where: { providerId, active: true },
+        orderBy: { updatedAt: 'desc' },
+      });
+      
+      profile = profiles[0];
+      if (!profile) {
+        console.log(`  ❌ No active profile found for provider: ${providerId}`);
+        return {
+          error: 'No active profile found. Please create a profile first.',
+          matchedJobs: [],
+        };
+      }
+      
+      // Collect all service category names across multiple profiles
+      const allServiceNames = profiles.length > 1
+        ? [...new Set(profiles.flatMap((p) => p.serviceCategoryNames ?? []))]
+        : (profile.serviceCategoryNames ?? []);
+      
+      console.log(`\n  ✅ Found ${profiles.length} profile(s) for provider ${providerId}`);
+      console.log(`  ⚠️  WARNING: Merging services from ${profiles.length} profiles - consider using session-specific profileId`);
+      logKeyValue('Profile ID',     profile.id,             4);
+      logKeyValue('Services',       allServiceNames.join(', ') || '—', 4);
+      logKeyValue('Service Area',   profile.serviceArea?.location ?? JSON.stringify(profile.serviceArea), 4);
+      logKeyValue('Availability',   JSON.stringify(profile.availability), 4);
+      logKeyValue('Pricing',        JSON.stringify(profile.pricing), 4);
+      
+      // Use merged services for backward compatibility
       return {
-        error: 'No active profile found. Please create a profile first.',
+        sellerProfile: {
+          seller_id:                profile.id,
+          service_category_names:   allServiceNames,
+          service_area:             profile.serviceArea,
+          availability:             profile.availability,
+          credentials:              profile.credentials,
+          pricing:                  profile.pricing,
+          preferences:              profile.preferences,
+          bio:                      profile.bio,
+          profile_completeness_score: profile.profileCompletenessScore,
+        },
+      };
+    } else {
+      console.log(`  ❌ Invalid seller ID format: ${sellerId}`);
+      return {
+        error: 'Invalid seller ID format',
         matchedJobs: [],
       };
     }
 
-    // Collect all service category names across multiple profiles (if any)
-    const allServiceNames = profiles.length > 1
-      ? [...new Set(profiles.flatMap((p) => p.serviceCategoryNames ?? []))]
-      : (profile.serviceCategoryNames ?? []);
-
-    console.log(`\n  ✅ Found ${profiles.length} profile(s) for seller ${state.sellerId}`);
-    logKeyValue('Seller ID',       profile.id,             4);
-    logKeyValue('Services',        allServiceNames.join(', ') || '—', 4);
-    logKeyValue('Service Area',    profile.serviceArea?.location ?? JSON.stringify(profile.serviceArea), 4);
-    logKeyValue('Availability',    JSON.stringify(profile.availability), 4);
-    logKeyValue('Pricing',         JSON.stringify(profile.pricing), 4);
-
+    // Return single profile (for UUID case)
     return {
       sellerProfile: {
         seller_id:                profile.id,
-        service_category_names:   allServiceNames,
+        service_category_names:   profile.serviceCategoryNames ?? [],
         service_area:             profile.serviceArea,
         availability:             profile.availability,
         credentials:              profile.credentials,
