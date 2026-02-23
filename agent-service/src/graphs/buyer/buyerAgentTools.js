@@ -5,6 +5,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import prisma from '../../prisma/client.js';
 import { OPENAI_API_KEY } from '../../config/index.js';
 import { getCustomerUserDetails, upsertJobEmbedding } from '../../services/index.js';
+import { serviceCategoryManager } from '../../services/serviceCategoryManager.js';
 
 /* ================================================================================
    BUYER AGENT TOOLS - Tools for the conversational buyer agent (job creation)
@@ -141,6 +142,23 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
           }
         }
 
+        let serviceCategoryId = null;
+        let serviceCategoryName = null;
+        try {
+          const categories = await serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken);
+          const userInput = [finalTitle, finalDescription, specific_requirements && Object.keys(specific_requirements).length ? JSON.stringify(specific_requirements) : ''].filter(Boolean).join(' ');
+          if (categories?.length && userInput.trim()) {
+            const match = await serviceCategoryManager.findCategory(userInput.slice(0, 500), categories, llm);
+            if (match?.matched && (match.category_id != null || match.category_name)) {
+              serviceCategoryId = match.category_id ?? null;
+              serviceCategoryName = match.category_name ?? null;
+              console.log(`[create_job] Matched service category: id=${serviceCategoryId}, name=${serviceCategoryName}`);
+            }
+          }
+        } catch (err) {
+          console.error('[create_job] Service category resolution failed:', err.message);
+        }
+
         const payload = {
           id: jobId,
           buyerId,
@@ -148,8 +166,8 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
           lastName: buyerDetails?.lastName ?? null,
           email: buyerDetails?.email ?? null,
           contactNumber: buyerDetails?.contactNumber ?? null,
-          serviceCategoryId: null,
-          serviceCategoryName: null,
+          serviceCategoryId,
+          serviceCategoryName,
           title: finalTitle,
           description: finalDescription,
           budget: { min: budgetMin, max: budgetMax },

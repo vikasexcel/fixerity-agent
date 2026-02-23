@@ -164,6 +164,7 @@ export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) 
   const service_category_id = job?.service_category_id != null ? Number(job.service_category_id) : null;
   const service_category_name = job?.service_category_name || null;
   if (!service_category_id && !service_category_name) {
+    console.log('[ProviderMatching] Skipped: job has no service_category_id or service_category_name.');
     return { deals: [], reply: 'Job must have a service (category name or ID).' };
   }
 

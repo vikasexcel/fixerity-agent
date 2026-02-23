@@ -555,11 +555,20 @@ export async function runProviderMatching(job) {
     const top40 = await searchSellersByQuery(query, 40);
 
     console.log(`\n  ✅ Embedding Search: ${top40.length} sellers found`);
+    let similarityMap = new Map();
     if (top40.length > 0) {
+      similarityMap = new Map(
+        top40.map((r) => [r.seller_id, r.similarity_score ?? 0]),
+      );
+      console.log('  ' + SUB_DIVIDER);
       top40.slice(0, 5).forEach((s, i) => {
         const score = s.similarity_score != null ? (s.similarity_score * 100).toFixed(2) : '—';
-        console.log(`    [${i + 1}] ${s.seller_id}  similarity: ${score}%`);
+        const preview = (s.searchable_text ?? '').slice(0, 80);
+        console.log(`    [${i + 1}] seller_id: ${s.seller_id}  similarity: ${score}%`);
+        console.log(`        ${preview}...`);
       });
+      if (top40.length > 5) console.log(`    ... and ${top40.length - 5} more`);
+      console.log('  ' + SUB_DIVIDER);
     }
 
     let rankedIds;
@@ -577,7 +586,8 @@ export async function runProviderMatching(job) {
       const top15Ids        = await rerankCandidatesForJob(job, top40, 15);
       const top15Candidates = top15Ids.map((id) => top40.find((c) => c.seller_id === id)).filter(Boolean);
 
-      console.log(`\n  ✅ Reranked to ${top15Ids.length} candidates`);
+      console.log(`\n  ✅ Reranked to ${top15Ids.length} candidates:`);
+      top15Ids.forEach((id, i) => console.log(`    [${i + 1}] ${id}`));
 
       // ── Step 4: Final LLM Ranking ──────────────────────────────────────
       logHeader('STEP 4: Final LLM Ranking');
@@ -604,25 +614,60 @@ export async function runProviderMatching(job) {
 
     const duration = Date.now() - startTime;
 
-    console.log('\n' + '▓'.repeat(70));
-    console.log(`${LOG_PREFIX} 🏁 PIPELINE COMPLETED`);
-    console.log('▓'.repeat(70));
-    logKeyValue('Service Category', serviceName,      4);
-    logKeyValue('Providers Found',  providers.length, 4);
-    logKeyValue('Duration',         `${duration}ms`,  4);
-
-    console.log('\n  🏆 Matched Providers (Ranked):');
+    // ── MATCHED PROVIDERS SUMMARY (full details, same style as job matching) ─
+    logHeader('MATCHED PROVIDERS SUMMARY');
     providers.forEach((p, i) => {
-      console.log(`\n    [${i + 1}] ${p.provider_id || p.id}`);
-      if (p.serviceCategoryNames) {
-        logKeyValue('Services', Array.isArray(p.serviceCategoryNames)
-          ? p.serviceCategoryNames.join(', ') : p.serviceCategoryNames, 6);
-      }
-      logKeyValue('Licensed',    p.licensed ? 'Yes' : 'No', 6);
-      logKeyValue('Jobs Done',   p.jobsCompleted ?? 0,      6);
+      const rank = i + 1;
+      const servicesLabel = Array.isArray(p.serviceCategoryNames)
+        ? p.serviceCategoryNames.join(', ')
+        : (p.serviceCategoryNames ?? '—');
+      const simScore = similarityMap.get(p.provider_id ?? p.id);
+      const scoreStr = simScore != null ? `${Math.round(simScore * 100)}% similarity` : '—';
+      const serviceArea = p.serviceArea && typeof p.serviceArea === 'object'
+        ? (p.serviceArea.location ?? p.serviceArea.city ?? p.serviceArea.address ?? JSON.stringify(p.serviceArea))
+        : (typeof p.serviceArea === 'string' ? p.serviceArea : '—');
+      const pricingStr = p.pricing && typeof p.pricing === 'object'
+        ? (p.pricing.hourly_rate != null
+          ? `$${p.pricing.hourly_rate}/hr`
+          : (p.pricing.hourly_rate_min != null || p.pricing.hourly_rate_max != null
+            ? `$${p.pricing.hourly_rate_min ?? '?'}–$${p.pricing.hourly_rate_max ?? '?'}/hr`
+            : '—'))
+        : '—';
+
+      console.log(`\n  🏆 Rank #${rank} — ${p.provider_id || p.id} (${servicesLabel})`);
+      logKeyValue('Provider ID',  p.provider_id ?? p.id,  4);
+      logKeyValue('Score',        scoreStr,                4);
+      logKeyValue('Services',     servicesLabel,           4);
+      logKeyValue('Service Area', serviceArea,            4);
+      logKeyValue('Pricing',      pricingStr,             4);
+      logKeyValue('Licensed',     p.licensed ? 'Yes' : 'No', 4);
+      logKeyValue('Jobs Done',    p.jobsCompleted ?? p.total_completed_order ?? 0, 4);
     });
 
-    console.log('▓'.repeat(70) + '\n');
+    console.log('\n' + '▓'.repeat(70));
+    console.log(`${LOG_PREFIX} 🏁 PROVIDER MATCHING PIPELINE COMPLETED`);
+    console.log('▓'.repeat(70));
+    logKeyValue('Job ID',           job?.id,                        2);
+    logKeyValue('Service Category', job?.service_category_name ?? '—', 2);
+    logKeyValue('Providers Found',  providers.length,                2);
+    logKeyValue('Duration',         `${duration}ms`,                 2);
+    logKeyValue('Error',            'None',                         2);
+
+    if (providers.length > 0) {
+      console.log('\n  📋 Matched Providers (Quick View):');
+      console.log('  ' + SUB_DIVIDER);
+      providers.forEach((p, i) => {
+        const services = Array.isArray(p.serviceCategoryNames)
+          ? p.serviceCategoryNames.join(', ')
+          : (p.serviceCategoryNames ?? '—');
+        const score = similarityMap.get(p.provider_id ?? p.id);
+        const scoreStr = score != null ? `${Math.round(score * 100)}%` : '—';
+        console.log(`    [${i + 1}] ${p.provider_id || p.id} — ${services} (score: ${scoreStr})`);
+      });
+      console.log('  ' + SUB_DIVIDER);
+    }
+
+    console.log('\n' + '▓'.repeat(70) + '\n');
     return { providers };
 
   } catch (error) {

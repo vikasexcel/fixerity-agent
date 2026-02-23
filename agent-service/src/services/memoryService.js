@@ -81,9 +81,10 @@ export const memoryService = {
    * Get buyer preferences for a service category
    */
   async getBuyerPreferences(buyerId, serviceCategory = null) {
+    const category = serviceCategory != null ? String(serviceCategory) : undefined;
     const memories = await memoryRepository.findByUser(buyerId, 'buyer', {
       memoryType: 'negotiation',
-      category: serviceCategory,
+      category,
       limit: 10,
     });
 
@@ -106,9 +107,10 @@ export const memoryService = {
    * Get provider pricing patterns
    */
   async getProviderPattern(providerId, serviceCategory = null) {
+    const category = serviceCategory != null ? String(serviceCategory) : undefined;
     const memories = await memoryRepository.findByUser(providerId, 'provider', {
       memoryType: 'negotiation',
-      category: serviceCategory,
+      category,
       limit: 10,
     });
 
