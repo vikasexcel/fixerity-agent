@@ -163,9 +163,10 @@ async function enhanceJobPriorities(job, buyerId) {
 export async function runMatchAndRecommend(job, buyerAccessToken, options = {}) {
   const service_category_id = job?.service_category_id != null ? Number(job.service_category_id) : null;
   const service_category_name = job?.service_category_name || null;
+
+  // Allow matching even without categories - embeddings/semantic search is primary method
   if (!service_category_id && !service_category_name) {
-    console.log('[ProviderMatching] Skipped: job has no service_category_id or service_category_name.');
-    return { deals: [], reply: 'Job must have a service (category name or ID).' };
+    console.log('[ProviderMatching] No category provided - will use pure semantic search (embeddings only).');
   }
 
   const buyerId = job.buyer_id || options.buyerId;

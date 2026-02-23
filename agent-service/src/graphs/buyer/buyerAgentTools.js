@@ -5,29 +5,29 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import prisma from '../../prisma/client.js';
 import { OPENAI_API_KEY } from '../../config/index.js';
 import { getCustomerUserDetails, upsertJobEmbedding } from '../../services/index.js';
-import { serviceCategoryManager } from '../../services/serviceCategoryManager.js';
 
 /* ================================================================================
    BUYER AGENT TOOLS - Tools for the conversational buyer agent (job creation)
+   Zero predefined structure. AI determines questions and collects data freely.
    Factory creates tools bound to buyerId and accessToken per invocation.
    ================================================================================ */
 
 /**
- * Uses LLM to generate a professional job post from collected conversation info.
- * The AI decides structure, format, and organization based on the type of work—
- * zero templates, zero constraints. Fully AI-native generation.
+ * Uses LLM to generate a professional job post from free-form conversation data.
+ * AI decides structure, format, and organization based on the type of work.
  */
-async function generateJobPostWithLLM(collectedInfo, llm) {
-  const prompt = `You are a professional job post writer for a service marketplace. Create a job listing from this information that helps providers give accurate bids:
+async function generateJobPostWithLLM(conversationData, llm) {
+  const prompt = `Generate a professional job post for a service marketplace.
 
-${JSON.stringify(collectedInfo, null, 2)}
+CONVERSATION DATA:
+${JSON.stringify(conversationData, null, 2)}
 
-Write a clear, professional job post. Use whatever format and structure makes sense for this specific type of work.
+Create a comprehensive job post that helps service providers give accurate bids. Use whatever format, structure, and sections make sense for this specific type of work.
 
 Output valid JSON only:
 {
-  "title": "<job title>",
-  "description": "<complete job post in markdown>"
+  "title": "<clear, descriptive job title>",
+  "post": "<complete job post in markdown format>"
 }`;
 
   try {
@@ -40,11 +40,47 @@ Output valid JSON only:
     const parsed = JSON.parse(content);
     return {
       title: parsed.title || 'Service Request',
-      description: parsed.description || '',
+      post: parsed.post || '',
     };
   } catch (err) {
     console.error('[generateJobPostWithLLM] Error:', err.message);
-    return null;
+    return { title: 'Service Request', post: 'Unable to generate job post' };
+  }
+}
+
+/**
+ * Uses LLM to infer a general service category from conversation data.
+ * Returns a simple category name (e.g., "Pet Care", "Home Improvement", "Art Services").
+ */
+async function inferCategoryFromConversation(conversationData, llm) {
+  const prompt = `Based on the following conversation data about a service request, infer a GENERAL service category name.
+
+CONVERSATION DATA:
+${JSON.stringify(conversationData, null, 2)}
+
+Examples of good category names:
+- "Pet Care" (for dog walking, cat sitting, pet grooming)
+- "Home Improvement" (for painting, repairs, renovations)
+- "Art Services" (for murals, portraits, custom artwork)
+- "Technology Services" (for laptop repair, IT support)
+- "Cleaning Services" (for house cleaning, office cleaning)
+- "Moving Services" (for relocation, packing)
+- "Personal Services" (for tutoring, personal training)
+- "Professional Services" (for tax prep, accounting, legal)
+
+Output ONLY a simple category name (2-4 words max) as plain text, no JSON, no explanation.`;
+
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('Output only the category name as plain text.'),
+      new HumanMessage(prompt),
+    ]);
+    const category = (res.content || '').trim();
+    console.log(`[inferCategory] Inferred category: "${category}"`);
+    return category || 'General Services';
+  } catch (err) {
+    console.error('[inferCategory] Error:', err.message);
+    return 'General Services';
   }
 }
 
@@ -57,94 +93,62 @@ function normalizeLocation(location) {
   return null;
 }
 
-const createJobSchema = z.object({
-  title: z.string().optional().describe('Job title for the listing.'),
-  description: z.string().optional().describe('Detailed description of the work needed.'),
-  budget_min: z.number().optional().describe('Minimum budget in dollars.'),
-  budget_max: z.number().optional().describe('Maximum budget in dollars.'),
-  start_date: z.string().optional().describe('When work should start (YYYY-MM-DD or ASAP).'),
-  end_date: z.string().optional().describe('When work should end (YYYY-MM-DD or flexible).'),
-  location: z.union([z.string(), z.object({
-    address: z.string().optional(),
-    lat: z.number().optional(),
-    lng: z.number().optional(),
-  })]).optional().describe('Address or location where service is needed.'),
-  specific_requirements: z.record(z.string(), z.any()).optional().describe('Job-type-specific details captured from the conversation.'),
-});
+function extractBudget(conversationData) {
+  // Only extract budget if user explicitly mentioned it
+  if (conversationData?.budget && typeof conversationData.budget === 'object') {
+    const b = conversationData.budget;
+    const min = b.min ?? b.budget_min;
+    const max = b.max ?? b.budget_max;
+    if (min != null || max != null) {
+      return { min: Number(min ?? 0), max: Number(max ?? 0) };
+    }
+  }
+  // Check for budget_min/max fields
+  const min = conversationData?.budget_min ?? conversationData?.budget_minimum;
+  const max = conversationData?.budget_max ?? conversationData?.budget_maximum;
+  if (min != null || max != null) {
+    return { min: Number(min ?? 0), max: Number(max ?? 0) };
+  }
+  // No budget mentioned - return null to indicate flexible/TBD
+  return null;
+}
 
 /**
  * Factory: creates buyer agent tools with buyerId and accessToken in closure.
  */
 export function createBuyerAgentTools({ buyerId, accessToken }) {
   const createJobTool = tool(
-    async ({
-      title,
-      description,
-      budget_min,
-      budget_max,
-      start_date,
-      end_date,
-      location,
-      specific_requirements,
-    }) => {
+    async ({ conversation_data }) => {
       try {
+        const data = conversation_data ?? {};
         const llm = new ChatOpenAI({
           model: 'gpt-4o-mini',
-          temperature: 0,
+          temperature: 0.7,
           openAIApiKey: OPENAI_API_KEY,
         });
 
-        const budgetMax = budget_max ?? (budget_min != null ? budget_min * 2 : 100);
-        const budgetMin = budget_min ?? (budget_max != null ? Math.floor(budget_max * 0.5) : 100);
-
         const buyerDetails = await getCustomerUserDetails(buyerId);
-
         const jobId = `job_${buyerId}_${Date.now()}`;
 
-        // Build collected info for LLM-based job post generation
-        const loc = normalizeLocation(location);
-        const collectedInfo = {
-          title_draft: title,
-          description_draft: description,
-          budget_min: budgetMin,
-          budget_max: budgetMax,
-          start_date: start_date || 'ASAP',
-          end_date: end_date || 'flexible',
-          location: loc?.address ?? (typeof location === 'string' ? location : null),
-          ...(specific_requirements && Object.keys(specific_requirements).length > 0 ? specific_requirements : {}),
-        };
+        const generated = await generateJobPostWithLLM(data, llm);
+        const budget = extractBudget(data) ?? { min: 0, max: 0 };
+        const location = normalizeLocation(data.location);
 
-        const hasRichData =
-          (specific_requirements && Object.keys(specific_requirements).length > 0) ||
-          (title && description) ||
-          (loc?.address && (budget_min != null || budget_max != null));
-
-        let finalTitle = title || 'Service Request';
-        let finalDescription = description || 'Service request';
-
-        if (hasRichData) {
-          const generated = await generateJobPostWithLLM(collectedInfo, llm);
-          if (generated) {
-            finalTitle = generated.title;
-            finalDescription = generated.description;
-          }
-        }
-
+        // Infer category name from conversation (no API matching needed)
         let serviceCategoryId = null;
         let serviceCategoryName = null;
+
         try {
-          const categories = await serviceCategoryManager.getCategoriesOrFetch(buyerId, accessToken);
-          const userInput = [finalTitle, finalDescription, specific_requirements && Object.keys(specific_requirements).length ? JSON.stringify(specific_requirements) : ''].filter(Boolean).join(' ');
-          if (categories?.length && userInput.trim()) {
-            const match = await serviceCategoryManager.findCategory(userInput.slice(0, 500), categories, llm);
-            if (match?.matched && (match.category_id != null || match.category_name)) {
-              serviceCategoryId = match.category_id ?? null;
-              serviceCategoryName = match.category_name ?? null;
-              console.log(`[create_job] Matched service category: id=${serviceCategoryId}, name=${serviceCategoryName}`);
-            }
-          }
+          const inferredCategory = await inferCategoryFromConversation(data, llm);
+          console.log(`[create_job] Inferred category: "${inferredCategory}"`);
+          
+          // Use the inferred category name directly (no API lookup/matching)
+          serviceCategoryName = inferredCategory;
+          console.log(`[create_job] Using inferred category: "${serviceCategoryName}"`);
         } catch (err) {
-          console.error('[create_job] Service category resolution failed:', err.message);
+          console.error('[create_job] Category inference failed:', err.message);
+          // Fallback to a generic category if inference fails
+          serviceCategoryName = 'General Services';
         }
 
         const payload = {
@@ -156,14 +160,14 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
           contactNumber: buyerDetails?.contactNumber ?? null,
           serviceCategoryId,
           serviceCategoryName,
-          title: finalTitle,
-          description: finalDescription,
-          budget: { min: budgetMin, max: budgetMax },
-          startDate: start_date || 'ASAP',
-          endDate: end_date || 'flexible',
-          location: loc,
+          title: generated.title,
+          description: generated.post,
+          budget,
+          startDate: data.start_date ?? data.start ?? 'ASAP',
+          endDate: data.end_date ?? data.deadline ?? 'flexible',
+          location,
           priorities: null,
-          specificRequirements: specific_requirements ?? null,
+          specificRequirements: data,
           status: 'open',
         };
 
@@ -176,13 +180,10 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
           buyer_id: created.buyerId,
           title: created.title,
           description: created.description,
-          service_category_id: created.serviceCategoryId,
-          service_category_name: created.serviceCategoryName,
           budget: created.budget,
           startDate: created.startDate,
           endDate: created.endDate,
           location: created.location,
-          priorities: created.priorities || [],
           created_at: created.createdAt,
         };
 
@@ -200,12 +201,10 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
     },
     {
       name: 'create_job',
-      description: `Create a job listing on the marketplace. Call this when you have gathered all relevant details and asked the questions you think are important for well-informed provider bids. Do NOT ask the user for confirmation—call this tool directly when ready.
-
-IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional job post from your data. You do NOT need to compose the description—just pass the structured data as key-value pairs that match what matters for the type of work.
-
-Also pass: budget_min, budget_max (use defaults if user said "flexible" or "reasonable"), start_date, end_date, location, title (optional), description (optional).`,
-      schema: createJobSchema,
+      description: 'Create a job listing. Call when you have gathered comprehensive information through conversation. Pass everything you collected as conversation_data - the system will generate an appropriate job post.',
+      schema: z.object({
+        conversation_data: z.record(z.string(), z.any()).describe('All information collected from the conversation as key-value pairs'),
+      }),
     }
   );
 

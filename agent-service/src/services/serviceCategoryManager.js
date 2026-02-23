@@ -98,8 +98,14 @@ User's request: "${userInput}"
 
 Instructions:
 1. Find the category that BEST matches what the user is looking for
-2. Consider synonyms and related terms (e.g., "house cleaning" = "Home Cleaning", "plumber" = "Plumbers")
-3. If no category matches well, return null
+2. Be FLEXIBLE with matching - consider synonyms, related terms, and broader categories
+3. Examples of good matches:
+   - "Technology Services" → "Computer Repair" or "IT Services" or "Electronics"
+   - "Pet Care" → "Pet Sitting" or "Dog Walking" or "Veterinary"
+   - "Art Services" → "Painting" or "Interior Design" or "Custom Art"
+   - "Home Improvement" → "Plumbing" or "Electrical" or "Handyman"
+4. Only return null if NO category is even remotely related
+5. When in doubt, pick the closest related category
 
 Reply ONLY with JSON:
 {
@@ -113,13 +119,17 @@ Reply ONLY with JSON:
 
     try {
       const res = await llm.invoke([
-        new SystemMessage('Only output valid JSON. Be accurate in matching.'),
+        new SystemMessage('Only output valid JSON. Be flexible and generous with matching.'),
         new HumanMessage(prompt),
       ]);
 
       let content = res.content.trim();
       content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-      return JSON.parse(content);
+      const result = JSON.parse(content);
+      
+      console.log(`[ServiceCategory] Match result for "${userInput}":`, result);
+      
+      return result;
     } catch (error) {
       console.error('[ServiceCategory] LLM matching error:', error.message);
       return null;

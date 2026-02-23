@@ -140,7 +140,7 @@ Job:
 - id: ${job.id ?? 'unknown'}
 - title: ${job.title ?? 'No title'}
 - description: ${job.description ?? 'None'}
-- service_category_name: ${job.service_category_name ?? 'Not set'}
+- service_category_name: ${job.service_category_name ?? 'No category (using description-based matching)'}
 - budget: ${budget}
 - startDate: ${job.startDate ?? 'Not set'}
 - endDate: ${job.endDate ?? 'Not set'}
@@ -574,10 +574,18 @@ export async function runProviderMatching(job) {
     let rankedIds;
 
     if (top40.length === 0) {
-      logHeader('FALLBACK: Tool-Based Matching');
-      console.log('  ⚠️  Semantic search returned 0 results (even after widening)');
-      rankedIds = await runFallbackProviderMatching(job);
-      console.log(`\n  ✅ Fallback returned ${rankedIds?.length ?? 0} seller IDs`);
+      // Check if we can use category-based fallback
+      if (job.service_category_name || job.service_category_id) {
+        logHeader('FALLBACK: Tool-Based Matching');
+        console.log('  ⚠️  Semantic search returned 0 results, trying category-based fallback');
+        rankedIds = await runFallbackProviderMatching(job);
+        console.log(`\n  ✅ Fallback returned ${rankedIds?.length ?? 0} seller IDs`);
+      } else {
+        logHeader('NO RESULTS');
+        console.log('  ⚠️  Semantic search returned 0 results and no category for fallback');
+        console.log('  💡  Suggestion: Improve job description or add more details');
+        rankedIds = [];
+      }
     } else {
       // ── Step 3: Rerank ─────────────────────────────────────────────────
       logHeader('STEP 3: Rerank with LLM');

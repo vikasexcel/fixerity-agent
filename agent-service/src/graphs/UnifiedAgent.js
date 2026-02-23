@@ -221,7 +221,7 @@ async function handleConversation(session, message, send) {
     await sessionService.updatePhase(sessionId, 'negotiation');
     await appendMessage(sessionId, { role: 'system', content: `Job created: ${result.job.title} (ID: ${result.job.id})` });
     send({ type: 'phase_transition', from: 'confirmation', to: 'negotiation', job: result.job });
-    send({ type: 'message', text: `Perfect! Now searching for the best ${result.collected.service_category_name} providers in your area...` });
+    send({ type: 'message', text: `Perfect! Now searching for the best ${result.collected?.service_category_name ?? result.job?.title ?? 'service'} providers in your area...` });
     await handleNegotiation(session, result.job, send);
   }
 }
@@ -234,7 +234,7 @@ async function handleConfirmAndProceed(session, message, send) {
     await sessionService.updateState(sessionId, { job: result.job });
     await sessionService.updatePhase(sessionId, 'negotiation');
     send({ type: 'phase_transition', from: 'confirmation', to: 'negotiation', job: result.job });
-    send({ type: 'message', text: `Excellent! Searching for the best ${result.collected.service_category_name} providers for you now...` });
+    send({ type: 'message', text: `Excellent! Searching for the best ${result.collected?.service_category_name ?? result.job?.title ?? 'service'} providers for you now...` });
     await handleNegotiation(session, result.job, send);
   } else {
     send({ type: 'message', text: result.response || "Let me know when you're ready to proceed!" });

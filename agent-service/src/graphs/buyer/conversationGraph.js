@@ -66,7 +66,7 @@ function formatJobCreatedResponse(job) {
     parts.push(`${job.description}\n`);
   }
   const budget = job.budget;
-  if (budget && (budget.min != null || budget.max != null)) {
+  if (budget && (budget.min > 0 || budget.max > 0)) {
     const min = Number(budget.min ?? 0);
     const max = Number(budget.max ?? 0);
     parts.push(`\n**Budget:** $${min.toLocaleString()} – $${max.toLocaleString()}`);
