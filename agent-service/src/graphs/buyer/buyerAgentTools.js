@@ -13,33 +13,21 @@ import { serviceCategoryManager } from '../../services/serviceCategoryManager.js
    ================================================================================ */
 
 /**
- * Uses LLM to generate a professional RFP-style job post from collected conversation info.
- * The RFP structure is determined dynamically by the LLM based on service type and available data—
- * no hardcoded templates. Architect gets project/program/style/site sections; plumber gets issue/urgency/access;
- * cleaning gets scope/frequency; etc.
+ * Uses LLM to generate a professional job post from collected conversation info.
+ * The AI decides structure, format, and organization based on the type of work—
+ * zero templates, zero constraints. Fully AI-native generation.
  */
 async function generateJobPostWithLLM(collectedInfo, llm) {
-  const prompt = `You are a professional job post writer for a service marketplace. Given collected information from a buyer conversation, generate a complete, professional job listing so providers can give accurate pricing and timelines.
+  const prompt = `You are a professional job post writer for a service marketplace. Create a job listing from this information that helps providers give accurate bids:
 
-COLLECTED INFORMATION (JSON):
 ${JSON.stringify(collectedInfo, null, 2)}
 
-CRITICAL - DYNAMIC STRUCTURE:
-Do NOT use a fixed template. Infer the appropriate structure from the data and what type of work is being requested. Use 3-6 sections with clear bold headers (**SECTION NAME**) that help providers understand the job and bid accurately.
-
-For any type of work, organize the information logically:
-- What needs to be done (scope, requirements, deliverables)
-- Where and when (location, timeline, urgency)
-- Context that matters (existing conditions, constraints, preferences)
-- Budget and timeline expectations
-- What providers should include in their response (quote, timeline, availability, credentials)
-
-Include ONLY sections where you have meaningful data. Format professionally with markdown.
+Write a clear, professional job post. Use whatever format and structure makes sense for this specific type of work.
 
 Output valid JSON only:
 {
-  "title": "<professional job title that describes the work>",
-  "description": "<full markdown-formatted job post with **SECTION** headers and content>"
+  "title": "<job title>",
+  "description": "<complete job post in markdown>"
 }`;
 
   try {
@@ -212,7 +200,7 @@ export function createBuyerAgentTools({ buyerId, accessToken }) {
     },
     {
       name: 'create_job',
-      description: `Create a job listing on the marketplace. Call when you have gathered enough info for providers to give accurate bids. Do NOT ask the user for confirmation—call this tool directly when ready.
+      description: `Create a job listing on the marketplace. Call this when you have gathered all relevant details and asked the questions you think are important for well-informed provider bids. Do NOT ask the user for confirmation—call this tool directly when ready.
 
 IMPORTANT: Pass ALL collected info in specific_requirements. The tool uses an LLM to generate a professional job post from your data. You do NOT need to compose the description—just pass the structured data as key-value pairs that match what matters for the type of work.
 
