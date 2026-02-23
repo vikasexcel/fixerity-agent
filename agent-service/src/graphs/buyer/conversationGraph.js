@@ -121,13 +121,7 @@ export async function runConversation(input) {
 
   const graph = createBuyerAgentGraph(tools);
 
-  const config = {
-    configurable: {
-      thread_id: sessionId,
-    },
-  };
-
-  const result = await graph.invoke({ messages: inputMessages }, config);
+  const result = await graph.invoke({ messages: inputMessages });
 
   const messages = result?.messages ?? [];
   const job = extractJobFromToolMessages(messages);

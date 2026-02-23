@@ -1,4 +1,4 @@
-import { StateGraph, START, END, MemorySaver, MessagesAnnotation } from '@langchain/langgraph';
+import { StateGraph, START, END, MessagesAnnotation } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import { SystemMessage } from '@langchain/core/messages';
@@ -53,8 +53,6 @@ Also pass: service_area, availability, pricing, credentials, experience_years, a
 
 Be friendly and concise. Use contractions. 1-2 short sentences per turn.`;
 
-const checkpointer = new MemorySaver();
-
 /**
  * Factory: creates the provider agent graph with the given tools.
  * Tools are created per invocation with sellerId/accessToken in closure.
@@ -101,5 +99,5 @@ export function createProviderAgentGraph(tools) {
     .addConditionalEdges('agent', toolsCondition, { tools: 'tools', [END]: END })
     .addEdge('tools', 'agent');
 
-  return workflow.compile({ checkpointer });
+  return workflow.compile();
 }

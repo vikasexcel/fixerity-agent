@@ -2,7 +2,6 @@ import { Annotation, StateGraph, START, END } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { OPENAI_API_KEY } from '../../config/index.js';
-import { MemorySaver } from '@langchain/langgraph';
 import { sessionService, messageService } from '../../services/index.js';
 import prisma from '../../prisma/client.js';
 import { getProviderBasicDetails } from '../../services/providerDetailsService.js';
@@ -997,8 +996,7 @@ const workflow = new StateGraph(SellerProfileState)
   .addEdge('build_profile', 'generate_response')
   .addEdge('generate_response', END);
 
-const checkpointer = new MemorySaver();
-export const sellerProfileGraph = workflow.compile({ checkpointer });
+export const sellerProfileGraph = workflow.compile();
 
 /* -------------------- RUNNER FUNCTION -------------------- */
 
@@ -1062,13 +1060,7 @@ export async function runSellerProfileConversation(input) {
     profile: sessionData.state?.profile || null,
   };
 
-  const config = {
-    configurable: {
-      thread_id: sessionId,
-    },
-  };
-
-  const result = await sellerProfileGraph.invoke(initialState, config);
+  const result = await sellerProfileGraph.invoke(initialState);
 
   // Save user message
   await messageService.addUserMessage(sessionId, message);

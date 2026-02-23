@@ -1,4 +1,4 @@
-import { StateGraph, START, END, MemorySaver, MessagesAnnotation, Command } from '@langchain/langgraph';
+import { StateGraph, START, END, MessagesAnnotation, Command } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
@@ -8,10 +8,8 @@ import { sellerTools } from './sellerTools.js';
 
 /* ================================================================================
    SELLER AGENT GRAPH - Tool-calling agent with human-in-the-loop
-   State: messages only. Thread identity: thread_id = sessionId. sellerId in config.
+   State: messages only. sellerId in config.
    ================================================================================ */
-
-const checkpointer = new MemorySaver();
 
 function buildSystemPrompt(sellerId, profileSessionScoped = false) {
   let base = `You are a helpful assistant for service providers (sellers) on a marketplace platform.
@@ -59,7 +57,7 @@ const workflow = new StateGraph(MessagesAnnotation)
   .addConditionalEdges('agent', toolsCondition, { tools: 'tools', [END]: END })
   .addEdge('tools', 'agent');
 
-export const sellerAgentGraph = workflow.compile({ checkpointer });
+export const sellerAgentGraph = workflow.compile();
 
 /**
  * Convert DB message format to LangChain BaseMessage.

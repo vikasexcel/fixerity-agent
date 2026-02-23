@@ -240,12 +240,6 @@ export async function runProviderProfileConversation(input) {
 
   const graph = createProviderAgentGraph(tools);
 
-  const config = {
-    configurable: {
-      thread_id: sessionId,
-    },
-  };
-
   logProviderConversation('graph_invoke', {
     sessionId,
     inputMessageCount: inputMessages.length,
@@ -254,7 +248,7 @@ export async function runProviderProfileConversation(input) {
     ),
   });
 
-  const result = await graph.invoke({ messages: inputMessages }, config);
+  const result = await graph.invoke({ messages: inputMessages });
 
   const messages = result?.messages ?? [];
   const profile = extractProfileFromToolMessages(messages);

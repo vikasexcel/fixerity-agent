@@ -1,4 +1,4 @@
-import { StateGraph, START, END, MemorySaver, MessagesAnnotation } from '@langchain/langgraph';
+import { StateGraph, START, END, MessagesAnnotation } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import { SystemMessage } from '@langchain/core/messages';
@@ -37,8 +37,6 @@ When calling create_job:
 
 Be friendly and concise. Use contractions. Keep responses to 1-2 sentences.`;
 
-const checkpointer = new MemorySaver();
-
 /**
  * Factory: creates the buyer agent graph with the given tools.
  * Tools are created per invocation with buyerId/accessToken in closure.
@@ -65,5 +63,5 @@ export function createBuyerAgentGraph(tools) {
     .addConditionalEdges('agent', toolsCondition, { tools: 'tools', [END]: END })
     .addEdge('tools', 'agent');
 
-  return workflow.compile({ checkpointer });
+  return workflow.compile();
 }
