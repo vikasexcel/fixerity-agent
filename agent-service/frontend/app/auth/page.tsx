@@ -32,7 +32,7 @@ export default function AuthPage() {
 
   useEffect(() => {
     if (session.isLoading) return;
-    if (session.user?.role === 'buyer') router.push('/buyer/dashboard');
+    if (session.user?.role === 'buyer') router.push('/buyer-agent');
     else if (session.user?.role === 'seller') router.push('/seller/dashboard');
   }, [session.isLoading, session.user, router]);
 
@@ -72,7 +72,7 @@ export default function AuthPage() {
       }
 
       if (role === 'buyer') {
-        router.push('/buyer/dashboard');
+        router.push('/buyer-agent');
       } else {
         router.push('/seller/dashboard');
       }
