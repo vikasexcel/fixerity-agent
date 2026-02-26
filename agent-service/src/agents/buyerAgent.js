@@ -1,5 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
+import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
+import { embedJobPost } from "../services/pinecone.js";
 
 const SYSTEM_PROMPT = `You are a world-class job post creator and domain expert across every industry and trade. Your job is to help a buyer create the most detailed, professional, and complete job post possible — one so thorough that service providers can respond with accurate pricing and timelines without needing to ask follow-up questions.
 
@@ -43,7 +45,7 @@ CRITICAL RULES:
    When you generate the final job post, start your message with exactly this marker on its own line:
    ---JOB_POST_READY---
    Then provide the complete job post below it.
-   After the job post, list any placeholders that need to be filled, and offer to update the post if they provide the missing info.
+   After the job post, ask the buyer to review it and let them know they can request changes or confirm it to publish.
 
 9. AFTER THE JOB POST IS GENERATED.
    If the buyer wants to change anything, update the post and show the full updated version (again with the ---JOB_POST_READY--- marker). If they provide missing placeholder info, fill it in and regenerate.
@@ -60,6 +62,11 @@ function createModel() {
 
 const JOB_POST_MARKER = "---JOB_POST_READY---";
 
+/**
+ * Node: gatherInfo
+ * Asks domain-specific questions and generates the job post draft.
+ * When the job post is ready, sets status to "reviewing" for human approval.
+ */
 async function gatherInfoNode(state) {
   const model = createModel();
 
@@ -88,7 +95,7 @@ async function gatherInfoNode(state) {
       messages: [new AIMessage(content)],
       jobPost: jobPostContent,
       placeholders: placeholders,
-      status: "done",
+      status: "reviewing",
       questionCount: state.questionCount,
     };
   }
@@ -101,8 +108,134 @@ async function gatherInfoNode(state) {
   };
 }
 
-function routeAfterGather() {
+/**
+ * Routing: after gatherInfo
+ * If the job post is ready → go to reviewJobPost node (human interrupt)
+ * Otherwise → END (wait for next user message)
+ */
+function routeAfterGather(state) {
+  if (state.status === "reviewing") {
+    return "reviewJobPost";
+  }
   return "__end__";
 }
 
-export { gatherInfoNode, routeAfterGather };
+/**
+ * Node: reviewJobPost
+ * This is the human-in-the-loop interrupt point.
+ * The graph will pause here and wait for the buyer's response.
+ * The buyer can either:
+ *   - Confirm → proceed to createJob
+ *   - Request changes → go back to gatherInfo
+ */
+async function reviewJobPostNode(state) {
+  // This node processes the buyer's response after the interrupt.
+  // The buyer's message has been added to state.messages by the route handler.
+  const lastMessage = state.messages[state.messages.length - 1];
+  const buyerResponse = lastMessage.content.toLowerCase().trim();
+
+  // Check if the buyer confirmed
+  const confirmPatterns = [
+    "confirm",
+    "yes",
+    "looks good",
+    "approve",
+    "publish",
+    "create",
+    "go ahead",
+    "perfect",
+    "submit",
+    "post it",
+    "that's good",
+    "that works",
+    "ok",
+    "okay",
+    "sure",
+    "do it",
+    "lgtm",
+    "good to go",
+    "ready",
+  ];
+
+  const isConfirmed = confirmPatterns.some((p) => buyerResponse.includes(p));
+
+  if (isConfirmed) {
+    return {
+      status: "confirmed",
+    };
+  }
+
+  // Buyer wants changes — go back to gathering with their feedback
+  return {
+    status: "gathering",
+  };
+}
+
+/**
+ * Routing: after reviewJobPost
+ * If confirmed → createJob
+ * If wants changes → gatherInfo (to regenerate the post)
+ */
+function routeAfterReview(state) {
+  if (state.status === "confirmed") {
+    return "createJob";
+  }
+  // Buyer wants changes — go back to gatherInfo to process their feedback
+  return "gatherInfo";
+}
+
+/**
+ * Node: createJob
+ * Embeds the finalized job post in Pinecone and marks the job as done.
+ * The buyer sees a confirmation message — they don't know about the embedding.
+ * @param {object} state - Graph state
+ * @param {object} [config] - Run config (from graph.invoke); holds configurable.thread_id
+ */
+async function createJobNode(state, config) {
+  const model = createModel();
+
+  // Thread ID is set by the route when invoking the graph (configurable.thread_id).
+  // Prefer config arg, then runnable config from async context, then fallback.
+  const runnableConfig = AsyncLocalStorageProviderSingleton.getRunnableConfig?.();
+  const threadId =
+    config?.configurable?.thread_id ??
+    runnableConfig?.configurable?.thread_id ??
+    state.messages?.[0]?.id ??
+    "unknown";
+
+  // Generate embedding in the background (buyer doesn't know)
+  let embeddingId = null;
+  let jobMetadata = null;
+
+  try {
+    const result = await embedJobPost(state.jobPost, threadId);
+    embeddingId = result.embeddingId;
+    jobMetadata = result.jobMetadata;
+  } catch (err) {
+    console.error("Failed to embed job post (non-blocking):", err.message);
+    // Don't fail the job creation if embedding fails — it's invisible to the buyer
+  }
+
+  // Generate a friendly confirmation message
+  const confirmPrompt = `The buyer has confirmed and the job post has been created successfully. Generate a brief, friendly confirmation message. Tell them their job post is now live and service providers will be able to see it. Keep it short and warm (2-3 sentences max). Do NOT include the job post again.`;
+
+  const response = await model.invoke([
+    new SystemMessage(confirmPrompt),
+  ]);
+
+  return {
+    messages: [new AIMessage(response.content)],
+    status: "done",
+    embeddingId: embeddingId,
+    jobMetadata: jobMetadata,
+  };
+}
+
+export {
+  gatherInfoNode,
+  routeAfterGather,
+  reviewJobPostNode,
+  routeAfterReview,
+  createJobNode,
+  JOB_POST_MARKER,
+};

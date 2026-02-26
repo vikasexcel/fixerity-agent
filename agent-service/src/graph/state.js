@@ -16,7 +16,9 @@ const BuyerAgentState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
-  // Current phase: "gathering" | "done"
+  // Current phase: "gathering" | "reviewing" | "confirmed" | "done"
+  // "reviewing" = job post generated, waiting for buyer confirmation
+  // "confirmed" = buyer confirmed, job created & embedded
   status: Annotation({
     reducer: (_prev, next) => next,
     default: () => "gathering",
@@ -25,6 +27,16 @@ const BuyerAgentState = Annotation.Root({
   questionCount: Annotation({
     reducer: (_prev, next) => next,
     default: () => 0,
+  }),
+  // Structured metadata extracted from the job post for embedding
+  jobMetadata: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  // Pinecone vector ID after embedding (null until embedded)
+  embeddingId: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
   }),
 });
 

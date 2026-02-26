@@ -13,18 +13,22 @@ function getAgentBaseUrl(): string {
   return url.replace(/\/$/, '');
 }
 
+export type BuyerStatus = 'gathering' | 'reviewing' | 'confirmed' | 'done';
+
 export type StartResponse = {
   threadId: string;
   message: string;
-  status?: string;
+  status?: BuyerStatus;
 };
 
 export type ChatResponse = {
   threadId: string;
   message: string;
-  status?: string;
-  jobPost?: Record<string, unknown>;
-  placeholders?: Record<string, unknown>;
+  status?: BuyerStatus;
+  /** Generated job post text (when status is "reviewing" or after "done") */
+  jobPost?: string;
+  /** Placeholder tokens found in the job post (e.g. "[SOME_FIELD]") */
+  placeholders?: string[];
 };
 
 export type ThreadMessage = {
@@ -35,10 +39,10 @@ export type ThreadMessage = {
 export type ThreadStateResponse = {
   threadId: string;
   messages: ThreadMessage[];
-  status?: string;
+  status?: BuyerStatus;
   questionCount?: number;
-  jobPost?: Record<string, unknown>;
-  placeholders?: Record<string, unknown>;
+  jobPost?: string;
+  placeholders?: string[];
 };
 
 export async function startConversation(message?: string): Promise<StartResponse> {

@@ -18,6 +18,13 @@ function cleanMessage(content) {
 }
 
 /**
+ * Helper to get the current graph state for a thread.
+ */
+async function getGraphState(threadId) {
+  return graph.getState({ configurable: { thread_id: threadId } });
+}
+
+/**
  * POST /buyer-agentv2/start
  * Start a new conversation. The buyer provides their initial description of what they need.
  * Body: { message } (optional — if omitted, a generic prompt is used)
@@ -53,8 +60,17 @@ router.post("/start", async (req, res) => {
 /**
  * POST /buyer-agentv2/chat
  * Continue a conversation.
+ * Handles both normal messages and human-in-the-loop resume.
+ *
+ * When status is "reviewing" (graph is interrupted before reviewJobPost):
+ *   - Adds buyer's message to state
+ *   - Resumes the graph by invoking with null (continues from interrupt)
+ *
+ * When status is "gathering" (normal flow):
+ *   - Sends message through the graph as usual
+ *
  * Body: { threadId, message }
- * Returns { threadId, message, status, jobPost, placeholders }
+ * Returns { threadId, message, status, jobPost?, placeholders? }
  */
 router.post("/chat", async (req, res) => {
   try {
@@ -67,12 +83,33 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const result = await graph.invoke(
-      {
-        messages: [new HumanMessage(message)],
-      },
-      { configurable: { thread_id: threadId } }
-    );
+    // Check current state to see if we're at an interrupt point
+    const currentState = await getGraphState(threadId);
+    const currentStatus = currentState?.values?.status;
+
+    let result;
+
+    if (currentStatus === "reviewing") {
+      // Graph is interrupted before reviewJobPost — resume with buyer's input.
+      // First, add the buyer's message to the state so reviewJobPostNode can see it
+      await graph.updateState(
+        { configurable: { thread_id: threadId } },
+        { messages: [new HumanMessage(message)] }
+      );
+
+      // Resume the graph from the interrupt point (invoke with null)
+      result = await graph.invoke(null, {
+        configurable: { thread_id: threadId },
+      });
+    } else {
+      // Normal flow — send the message through the graph
+      result = await graph.invoke(
+        {
+          messages: [new HumanMessage(message)],
+        },
+        { configurable: { thread_id: threadId } }
+      );
+    }
 
     const lastMessage = result.messages[result.messages.length - 1];
 
@@ -82,7 +119,7 @@ router.post("/chat", async (req, res) => {
       status: result.status,
     };
 
-    // Only include jobPost fields when a post has been generated
+    // Include jobPost fields when a post has been generated
     if (result.jobPost) {
       response.jobPost = result.jobPost;
       response.placeholders = result.placeholders;
@@ -103,9 +140,7 @@ router.get("/state/:threadId", async (req, res) => {
   try {
     const { threadId } = req.params;
 
-    const state = await graph.getState({
-      configurable: { thread_id: threadId },
-    });
+    const state = await getGraphState(threadId);
 
     if (!state || !state.values || !state.values.messages) {
       return res.status(404).json({ error: "Thread not found" });

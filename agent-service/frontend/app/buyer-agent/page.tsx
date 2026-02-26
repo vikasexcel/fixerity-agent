@@ -12,6 +12,7 @@ import {
   getThreadState,
   type ThreadMessage,
   type ChatResponse,
+  type BuyerStatus,
 } from '@/lib/buyer-agent-api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
@@ -51,8 +52,9 @@ export default function BuyerAgentPage() {
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jobPost, setJobPost] = useState<Record<string, unknown> | null>(null);
-  const [placeholders, setPlaceholders] = useState<Record<string, unknown> | null>(null);
+  const [status, setStatus] = useState<BuyerStatus | null>(null);
+  const [jobPost, setJobPost] = useState<string | null>(null);
+  const [placeholders, setPlaceholders] = useState<string[] | null>(null);
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
 
   const updateThreadList = useCallback((threadId: string, title: string) => {
@@ -72,9 +74,11 @@ export default function BuyerAgentPage() {
     setLoading(true);
     setJobPost(null);
     setPlaceholders(null);
+    setStatus(null);
     try {
       const res = await startConversation();
       setThreadId(res.threadId);
+      setStatus(res.status ?? null);
       setMessages([
         { role: 'user', content: 'I want to create a job post. Help me get started.' },
         { role: 'assistant', content: res.message },
@@ -94,12 +98,14 @@ export default function BuyerAgentPage() {
     setLoading(true);
     setJobPost(null);
     setPlaceholders(null);
+    setStatus(null);
     try {
       const state = await getThreadState(id);
       setThreadId(state.threadId);
+      setStatus(state.status ?? null);
       setMessages(state.messages ?? []);
-      if (state.jobPost) setJobPost(state.jobPost);
-      if (state.placeholders) setPlaceholders(state.placeholders);
+      if (state.jobPost != null) setJobPost(state.jobPost);
+      if (state.placeholders?.length) setPlaceholders(state.placeholders);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load conversation');
       setMessages([]);
@@ -129,8 +135,9 @@ export default function BuyerAgentPage() {
           ...prev,
           { role: 'assistant', content: res.message },
         ]);
-        if (res.jobPost) setJobPost(res.jobPost);
-        if (res.placeholders) setPlaceholders(res.placeholders ?? null);
+        setStatus(res.status ?? null);
+        if (res.jobPost != null) setJobPost(res.jobPost);
+        if (res.placeholders?.length) setPlaceholders(res.placeholders);
         const title = text.slice(0, 40) + (text.length > 40 ? '…' : '');
         updateThreadList(threadId, title);
       } catch (err) {
@@ -250,21 +257,33 @@ export default function BuyerAgentPage() {
               <p className="text-sm whitespace-pre-wrap break-words">{m.content}</p>
             </article>
           ))}
-          {jobPost && Object.keys(jobPost).length > 0 && (
+          {status === 'reviewing' && (
+            <p className="text-sm text-muted-foreground max-w-3xl" role="status">
+              Review the job post below. Reply to confirm or ask for changes.
+            </p>
+          )}
+          {jobPost && (
             <article
               className="rounded-lg border border-border bg-card p-4 max-w-3xl"
               aria-label="Generated job post"
             >
               <h2 className="text-sm font-semibold mb-2">Job post</h2>
               <pre className="text-xs overflow-x-auto whitespace-pre-wrap break-words font-sans">
-                {JSON.stringify(jobPost, null, 2)}
+                {jobPost}
               </pre>
-              {placeholders && Object.keys(placeholders).length > 0 && (
+              {placeholders && placeholders.length > 0 && (
                 <>
                   <h3 className="text-sm font-semibold mt-3 mb-1">Placeholders</h3>
-                  <pre className="text-xs overflow-x-auto whitespace-pre-wrap break-words font-sans">
-                    {JSON.stringify(placeholders, null, 2)}
-                  </pre>
+                  <ul className="flex flex-wrap gap-1.5 text-xs">
+                    {placeholders.map((p, i) => (
+                      <li
+                        key={i}
+                        className="rounded bg-muted px-2 py-0.5 font-mono"
+                      >
+                        {p}
+                      </li>
+                    ))}
+                  </ul>
                 </>
               )}
             </article>
