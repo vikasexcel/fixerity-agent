@@ -10,12 +10,16 @@ import {
   startConversation,
   sendMessage as sendMessageApi,
   getThreadState,
+  recordSellerDecision,
   type ThreadMessage,
   type ChatResponse,
   type BuyerStatus,
+  type MatchedSeller,
+  type MatchingStatus,
 } from '@/lib/buyer-agent-api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
+import { SellerMatchCard } from '@/components/seller-match-card';
 
 const THREADS_STORAGE_KEY = 'buyer_agent_threads';
 
@@ -55,6 +59,11 @@ export default function BuyerAgentPage() {
   const [status, setStatus] = useState<BuyerStatus | null>(null);
   const [jobPost, setJobPost] = useState<string | null>(null);
   const [placeholders, setPlaceholders] = useState<string[] | null>(null);
+  const [matchedSellers, setMatchedSellers] = useState<MatchedSeller[]>([]);
+  const [matchingStatus, setMatchingStatus] = useState<MatchingStatus>(null);
+  const [sellerDecisions, setSellerDecisions] = useState<
+    Record<string, 'approved' | 'rejected' | 'contacted'>
+  >({});
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
 
   const updateThreadList = useCallback((threadId: string, title: string) => {
@@ -75,6 +84,9 @@ export default function BuyerAgentPage() {
     setJobPost(null);
     setPlaceholders(null);
     setStatus(null);
+    setMatchedSellers([]);
+    setMatchingStatus(null);
+    setSellerDecisions({});
     try {
       const res = await startConversation();
       setThreadId(res.threadId);
@@ -106,6 +118,9 @@ export default function BuyerAgentPage() {
       setMessages(state.messages ?? []);
       if (state.jobPost != null) setJobPost(state.jobPost);
       if (state.placeholders?.length) setPlaceholders(state.placeholders);
+      setMatchedSellers(state.matchedSellers ?? []);
+      setMatchingStatus(state.matchingStatus ?? null);
+      setSellerDecisions(state.sellerDecisions ?? {});
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load conversation');
       setMessages([]);
@@ -138,6 +153,8 @@ export default function BuyerAgentPage() {
         setStatus(res.status ?? null);
         if (res.jobPost != null) setJobPost(res.jobPost);
         if (res.placeholders?.length) setPlaceholders(res.placeholders);
+        if (res.matchedSellers != null) setMatchedSellers(res.matchedSellers);
+        if (res.matchingStatus != null) setMatchingStatus(res.matchingStatus);
         const title = text.slice(0, 40) + (text.length > 40 ? '…' : '');
         updateThreadList(threadId, title);
       } catch (err) {
@@ -160,6 +177,17 @@ export default function BuyerAgentPage() {
       }
     },
     [handleSend]
+  );
+
+  const handleSellerDecision = useCallback(
+    (profileId: string, decision: 'approved' | 'rejected' | 'contacted') => {
+      if (!threadId) return;
+      setSellerDecisions((prev) => ({ ...prev, [profileId]: decision }));
+      recordSellerDecision(threadId, profileId, decision).catch((err) => {
+        setError(err instanceof Error ? err.message : 'Failed to save decision');
+      });
+    },
+    [threadId]
   );
 
   const messageListId = 'buyer-agent-messages';
@@ -287,6 +315,51 @@ export default function BuyerAgentPage() {
                 </>
               )}
             </article>
+          )}
+          {loading && status === 'reviewing' && (
+            <div
+              className="flex items-center gap-3 p-4 bg-muted rounded-lg max-w-3xl"
+              role="status"
+              aria-live="polite"
+            >
+              <div
+                className="h-5 w-5 shrink-0 rounded-full border-2 border-primary border-t-transparent animate-spin"
+                aria-hidden
+              />
+              <p className="text-sm text-muted-foreground">
+                Finding the best sellers for your job…
+              </p>
+            </div>
+          )}
+          {matchingStatus === 'error' && (
+            <p className="text-sm text-destructive max-w-3xl" role="alert">
+              Unable to find sellers at this time. Try again later.
+            </p>
+          )}
+          {matchingStatus === 'found' && matchedSellers.length > 0 && (
+            <div className="space-y-4 max-w-3xl" aria-label="Matched sellers">
+              <h2 className="text-sm font-semibold">Recommended sellers</h2>
+              <ul className="space-y-3 list-none p-0 m-0">
+                {matchedSellers.map((seller, index) => (
+                  <li key={seller.profileId}>
+                    <SellerMatchCard
+                      rank={index + 1}
+                      seller={seller}
+                      onApprove={() =>
+                        handleSellerDecision(seller.profileId, 'approved')
+                      }
+                      onReject={() =>
+                        handleSellerDecision(seller.profileId, 'rejected')
+                      }
+                      onMessage={() =>
+                        handleSellerDecision(seller.profileId, 'contacted')
+                      }
+                      decision={sellerDecisions[seller.profileId]}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </section>
 

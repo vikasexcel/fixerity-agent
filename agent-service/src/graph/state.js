@@ -38,6 +38,21 @@ const BuyerAgentState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
+  // Matched seller profiles after job is published (search → rerank → LLM score)
+  matchedSellers: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  // "found" | "error" (frontend uses loading state for "searching")
+  matchingStatus: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  // Buyer decisions per profile: { [profileId]: "approved" | "rejected" | "contacted" }
+  sellerDecisions: Annotation({
+    reducer: (prev, next) => (next ? { ...prev, ...next } : prev),
+    default: () => ({}),
+  }),
 });
 
 export { BuyerAgentState };

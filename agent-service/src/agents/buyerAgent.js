@@ -1,7 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedJobPost } from "../services/pinecone.js";
+import { embedJobPost, findMatchingSellers } from "../services/pinecone.js";
 
 const LOG_TAG = "[BuyerAgent]";
 
@@ -231,6 +231,26 @@ async function createJobNode(state, config) {
     console.error(LOG_TAG, "createJobNode embed failed (non-blocking):", err.message);
   }
 
+  let matchedSellers = null;
+  let matchingStatus = null;
+  if (state.jobPost && state.jobPost.trim().length > 0) {
+    console.log(LOG_TAG, "createJobNode starting seller matching", {
+      jobPostLength: state.jobPost.trim().length,
+      threadId,
+    });
+    try {
+      matchedSellers = await findMatchingSellers(state.jobPost);
+      matchingStatus = matchedSellers.length > 0 ? "found" : "found";
+      console.log(LOG_TAG, "createJobNode seller matching complete", {
+        matchingStatus,
+        matchedCount: matchedSellers?.length ?? 0,
+      });
+    } catch (err) {
+      console.error(LOG_TAG, "createJobNode findMatchingSellers failed (non-blocking):", err.message);
+      matchingStatus = "error";
+    }
+  }
+
   const confirmPrompt = `The buyer has confirmed and the job post has been created successfully. Generate a brief, friendly confirmation message. Tell them their job post is now live and service providers will be able to see it. Keep it short and warm (2-3 sentences max). Do NOT include the job post again.`;
 
   const response = await model.invoke([
@@ -244,6 +264,8 @@ async function createJobNode(state, config) {
     status: "done",
     embeddingId: embeddingId,
     jobMetadata: jobMetadata,
+    matchedSellers,
+    matchingStatus,
   };
 }
 

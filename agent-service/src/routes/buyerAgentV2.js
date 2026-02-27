@@ -125,6 +125,13 @@ router.post("/chat", async (req, res) => {
       response.placeholders = result.placeholders;
     }
 
+    if (result.matchedSellers != null) {
+      response.matchedSellers = result.matchedSellers;
+    }
+    if (result.matchingStatus != null) {
+      response.matchingStatus = result.matchingStatus;
+    }
+
     res.json(response);
   } catch (error) {
     console.error("Error in chat:", error);
@@ -162,11 +169,65 @@ router.get("/state/:threadId", async (req, res) => {
       response.jobPost = state.values.jobPost;
       response.placeholders = state.values.placeholders;
     }
+    if (state.values.matchedSellers != null) {
+      response.matchedSellers = state.values.matchedSellers;
+    }
+    if (state.values.matchingStatus != null) {
+      response.matchingStatus = state.values.matchingStatus;
+    }
+    if (state.values.sellerDecisions && Object.keys(state.values.sellerDecisions).length > 0) {
+      response.sellerDecisions = state.values.sellerDecisions;
+    }
 
     res.json(response);
   } catch (error) {
     console.error("Error getting state:", error);
     res.status(500).json({ error: "Failed to get conversation state" });
+  }
+});
+
+/**
+ * POST /buyer-agentv2/seller-decision
+ * Record buyer's decision for a matched seller (approved / rejected / contacted).
+ * Body: { threadId, profileId, decision: "approved" | "rejected" | "contacted" }
+ */
+router.post("/seller-decision", async (req, res) => {
+  try {
+    const { threadId, profileId, decision } = req.body;
+
+    if (!threadId || !profileId || !decision) {
+      return res.status(400).json({
+        error: "threadId, profileId, and decision are required",
+      });
+    }
+
+    const validDecisions = ["approved", "rejected", "contacted"];
+    if (!validDecisions.includes(decision)) {
+      return res.status(400).json({
+        error: `decision must be one of: ${validDecisions.join(", ")}`,
+      });
+    }
+
+    const state = await getGraphState(threadId);
+    if (!state?.values) {
+      return res.status(404).json({ error: "Thread not found" });
+    }
+
+    const current = state.values.sellerDecisions || {};
+    await graph.updateState(
+      { configurable: { thread_id: threadId } },
+      { sellerDecisions: { [profileId]: decision } }
+    );
+
+    res.json({
+      threadId,
+      profileId,
+      decision,
+      sellerDecisions: { ...current, [profileId]: decision },
+    });
+  } catch (error) {
+    console.error("Error recording seller decision:", error);
+    res.status(500).json({ error: "Failed to record decision" });
   }
 });
 

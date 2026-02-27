@@ -15,6 +15,21 @@ function getAgentBaseUrl(): string {
 
 export type BuyerStatus = 'gathering' | 'reviewing' | 'confirmed' | 'done';
 
+export type MatchedSeller = {
+  profileId: string;
+  sellerName: string;
+  profileText: string;
+  matchScore: number;
+  matchExplanation: string;
+  metadata?: {
+    location?: string;
+    rate?: string;
+    [key: string]: unknown;
+  };
+};
+
+export type MatchingStatus = 'searching' | 'found' | 'error' | null;
+
 export type StartResponse = {
   threadId: string;
   message: string;
@@ -29,6 +44,9 @@ export type ChatResponse = {
   jobPost?: string;
   /** Placeholder tokens found in the job post (e.g. "[SOME_FIELD]") */
   placeholders?: string[];
+  /** Matched seller profiles after job is published */
+  matchedSellers?: MatchedSeller[];
+  matchingStatus?: MatchingStatus;
 };
 
 export type ThreadMessage = {
@@ -43,6 +61,9 @@ export type ThreadStateResponse = {
   questionCount?: number;
   jobPost?: string;
   placeholders?: string[];
+  matchedSellers?: MatchedSeller[];
+  matchingStatus?: MatchingStatus;
+  sellerDecisions?: Record<string, 'approved' | 'rejected' | 'contacted'>;
 };
 
 export async function startConversation(message?: string): Promise<StartResponse> {
@@ -93,4 +114,23 @@ export async function getThreadState(threadId: string): Promise<ThreadStateRespo
     throw new Error(err);
   }
   return data as ThreadStateResponse;
+}
+
+export async function recordSellerDecision(
+  threadId: string,
+  profileId: string,
+  decision: 'approved' | 'rejected' | 'contacted'
+): Promise<void> {
+  const base = getAgentBaseUrl();
+  const url = `${base}/buyer-agentv2/seller-decision`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ threadId, profileId, decision }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = (data as { error?: string }).error ?? res.statusText;
+    throw new Error(err);
+  }
 }

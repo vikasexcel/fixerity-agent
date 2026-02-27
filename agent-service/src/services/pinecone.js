@@ -15,13 +15,20 @@ const CHUNK_SIZE = 500;
 const CHUNK_OVERLAP = 100;
 
 // ─── Clients (lazy-initialized) ──────────────────────────────────────────────
+let pineconeClient = null;
 let pineconeIndex = null;
 let openaiClient = null;
 
+function getPineconeClient() {
+  if (!pineconeClient) {
+    pineconeClient = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
+  }
+  return pineconeClient;
+}
+
 function getPineconeIndex() {
   if (!pineconeIndex) {
-    const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
-    pineconeIndex = pc.index(INDEX_NAME);
+    pineconeIndex = getPineconeClient().index(INDEX_NAME);
   }
   return pineconeIndex;
 }
@@ -425,6 +432,326 @@ async function embedSellerProfile(sellerProfile, threadId) {
   };
 }
 
+// ─── Seller search & rerank (for buyer agent) ────────────────────────────────
+
+const RERANK_MODEL = "bge-reranker-v2-m3";
+const SEARCH_TOP_K = 15;
+const RERANK_TOP_N = 5;
+
+const SELLER_MATCH_LOG_PREFIX = "[SellerMatch]";
+
+function logSection(title) {
+  console.log("\n" + "─".repeat(60));
+  console.log(`${SELLER_MATCH_LOG_PREFIX} ${title}`);
+  console.log("─".repeat(60));
+}
+
+function logLine(label, value) {
+  console.log(`  ${label}: ${value}`);
+}
+
+function truncate(text, maxLen = 120) {
+  if (text == null || typeof text !== "string") return String(text);
+  const t = text.trim();
+  return t.length <= maxLen ? t : t.slice(0, maxLen) + "…";
+}
+
+/**
+ * Search seller-profile namespace by job post (embed job, query by vector).
+ * Deduplicates by profileId and returns unique profiles with best chunk.
+ *
+ * @param {string} jobPost – Full job post text
+ * @param {number} [topK=10] – Max number of unique profiles to consider
+ * @returns {Promise<Array<{ profileId: string, profileText: string, metadata: object }>>}
+ */
+async function searchSellerProfiles(jobPost, topK = 10) {
+  logSection("1. SEARCH – Query & raw results");
+
+  if (jobPost == null || typeof jobPost !== "string" || jobPost.trim().length === 0) {
+    logLine("Status", "Skipped (empty job post)");
+    return [];
+  }
+
+  logLine("Query (job post preview)", truncate(jobPost, 200));
+  logLine("Namespace", SELLER_PROFILE_NAMESPACE);
+  logLine("TopK requested", SEARCH_TOP_K);
+
+  const [embedding] = await generateEmbeddings([jobPost.trim()]);
+  if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+    logLine("Status", "Skipped (no embedding)");
+    return [];
+  }
+
+  logLine("Embedding dimensions", embedding.length);
+
+  const index = getPineconeIndex();
+  const ns = index.namespace(SELLER_PROFILE_NAMESPACE);
+
+  const response = await ns.query({
+    vector: embedding,
+    topK: SEARCH_TOP_K,
+    includeMetadata: true,
+    includeValues: false,
+  });
+
+  const matches = response.matches || [];
+  logLine("Raw matches count", matches.length);
+
+  if (matches.length === 0) {
+    logLine("Status", "No matches – returning []");
+    return [];
+  }
+
+  console.log("\n  Raw hits (id, score):");
+  matches.forEach((m, i) => {
+    const pid = m.metadata?.profileId || (m.id && m.id.replace(/_chunk_\d+$/, "")) || m.id;
+    console.log(`    ${i + 1}. id=${m.id} profileId=${pid} score=${(m.score ?? 0).toFixed(4)}`);
+  });
+
+  const byProfile = new Map();
+  for (const m of matches) {
+    const profileId = m.metadata?.profileId || (m.id && m.id.replace(/_chunk_\d+$/, ""));
+    if (!profileId) continue;
+    const existing = byProfile.get(profileId);
+    const profileText = m.metadata?.fullProfile || m.metadata?.chunkText || "";
+    const score = m.score ?? 0;
+    if (!existing || score > (existing.score ?? 0)) {
+      byProfile.set(profileId, {
+        profileId,
+        profileText: profileText || existing?.profileText || "",
+        metadata: { ...m.metadata },
+        score,
+      });
+    } else if (existing && !existing.profileText && profileText) {
+      existing.profileText = profileText;
+    }
+  }
+
+  const list = Array.from(byProfile.values())
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, topK)
+    .map(({ profileId, profileText, metadata }) => ({
+      profileId,
+      profileText,
+      metadata: metadata || {},
+    }));
+
+  console.log("\n  After dedupe by profileId (best chunk per profile):");
+  logLine("Profiles kept", list.length);
+  list.forEach((p, i) => {
+    const title = (p.metadata?.title || (p.profileText || "").split("\n")[0] || "").slice(0, 50);
+    console.log(`    ${i + 1}. ${p.profileId}  "${truncate(title, 40)}"`);
+  });
+
+  return list;
+}
+
+/**
+ * Rerank profile results using Pinecone Inference (bge-reranker-v2-m3).
+ *
+ * @param {string} jobPost – Job post text (query for reranker)
+ * @param {Array<{ profileId: string, profileText: string, metadata: object }>} searchResults
+ * @param {number} [topN=5]
+ * @returns {Promise<Array<{ profileId: string, profileText: string, metadata: object }>>}
+ */
+async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N) {
+  logSection("2. RERANK – Pinecone Inference");
+
+  if (searchResults.length === 0) {
+    logLine("Status", "No input – returning []");
+    return [];
+  }
+
+  logLine("Query (job post preview)", truncate(jobPost, 150));
+  logLine("Model", RERANK_MODEL);
+  logLine("Input documents count", searchResults.length);
+  logLine("TopN", topN);
+
+  const documents = searchResults.map((r) => r.profileText || r.metadata?.chunkText || "");
+  if (documents.every((d) => !d)) {
+    logLine("Status", "No text to rerank – using search order");
+    return searchResults.slice(0, topN);
+  }
+
+  try {
+    const inference = getPineconeClient().inference;
+    const result = await inference.rerank({
+      model: RERANK_MODEL,
+      query: jobPost.trim(),
+      documents,
+      topN,
+      returnDocuments: true,
+      rankFields: ["text"],
+    });
+
+    const hits = result.data || result.results || result.hits || [];
+    logLine("Rerank API hits count", hits.length);
+
+    console.log("\n  Rerank result (original index → relevance score):");
+    hits.forEach((h, i) => {
+      const idx = typeof h.index === "number" ? h.index : parseInt(h.index, 10);
+      const score = (h.score != null ? h.score : 0).toFixed(4);
+      const profileId = searchResults[idx]?.profileId ?? "?";
+      console.log(`    ${i + 1}. index=${idx} profileId=${profileId} score=${score}`);
+    });
+
+    const order = hits.map((h) => (typeof h.index === "number" ? h.index : parseInt(h.index, 10)));
+    const reranked = order
+      .filter((i) => i >= 0 && i < searchResults.length)
+      .map((i) => searchResults[i]);
+
+    console.log("\n  Final reranked order (profileIds):");
+    reranked.forEach((p, i) => console.log(`    ${i + 1}. ${p.profileId}`));
+
+    return reranked;
+  } catch (err) {
+    console.error(`${SELLER_MATCH_LOG_PREFIX} Rerank failed, using search order:`, err.message);
+    logLine("Fallback", "Using original search order");
+    return searchResults.slice(0, topN);
+  }
+}
+
+/**
+ * Use OpenAI to score (0–100) and explain each seller match for the job.
+ *
+ * @param {string} jobPost – Job post text
+ * @param {Array<{ profileId: string, profileText: string, metadata: object }>} profiles
+ * @returns {Promise<Array<{ profileId: string, sellerName: string, profileText: string, matchScore: number, matchExplanation: string, metadata: object }>>}
+ */
+async function scoreWithLLM(jobPost, profiles) {
+  logSection("3. LLM SCORING – Match score & explanation");
+
+  if (profiles.length === 0) {
+    logLine("Status", "No profiles – returning []");
+    return [];
+  }
+
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  logLine("Model", model);
+  logLine("Profiles to score", profiles.length);
+  logLine("Job post length (chars)", jobPost.length);
+
+  const openai = getOpenAI();
+  const systemPrompt = `You are a job-matching expert. For each seller profile, analyze how well they match the job requirements. Respond with a JSON array of objects. Each object must have: "profileIndex" (0-based index of the profile), "matchScore" (number 0-100), "matchExplanation" (2-3 sentences). No other text.`;
+
+  const profileList = profiles
+    .map(
+      (p, i) =>
+        `[Profile ${i}] (profileId: ${p.profileId})\n${(p.profileText || "").slice(0, 2000)}`
+    )
+    .join("\n\n");
+
+  const userPrompt = `Job post:\n${jobPost.slice(0, 3000)}\n\nSeller profiles:\n${profileList}\n\nOutput JSON array with profileIndex, matchScore, matchExplanation for each profile.`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.3,
+    });
+
+    const content = (completion.choices?.[0]?.message?.content || "").trim();
+    logLine("LLM response length (chars)", content.length);
+
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    const arr = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    logLine("Parsed JSON array length", arr.length);
+
+    console.log("\n  LLM raw output (profileIndex, matchScore, matchExplanation preview):");
+    arr.forEach((o, i) => {
+      const score = o.matchScore != null ? o.matchScore : "?";
+      const expl = truncate(String(o.matchExplanation || ""), 80);
+      console.log(`    ${i + 1}. index=${o.profileIndex} score=${score}  "${expl}"`);
+    });
+
+    const byIndex = new Map(arr.map((o) => [Number(o.profileIndex), o]));
+
+    const result = profiles.map((p, i) => {
+      const meta = p.metadata || {};
+      const title = meta.title || (p.profileText || "").split("\n")[0] || "Seller";
+      const sellerName = title.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim() || "Seller";
+      const scored = byIndex.get(i) || {};
+      return {
+        profileId: p.profileId,
+        sellerName,
+        profileText: p.profileText || "",
+        matchScore: Math.min(100, Math.max(0, Number(scored.matchScore) ?? 50)),
+        matchExplanation: String(scored.matchExplanation || "Match analysis not available.").slice(0, 500),
+        metadata: {
+          location: meta.location,
+          rate: meta.rate,
+          ...meta,
+        },
+      };
+    });
+
+    return result;
+  } catch (err) {
+    console.error(`${SELLER_MATCH_LOG_PREFIX} LLM failed:`, err.message);
+    logLine("Fallback", "Using default score 50 for all");
+    return profiles.map((p) => {
+      const meta = p.metadata || {};
+      const title = meta.title || (p.profileText || "").split("\n")[0] || "Seller";
+      return {
+        profileId: p.profileId,
+        sellerName: title.replace(/^#+\s*/, "").trim() || "Seller",
+        profileText: p.profileText || "",
+        matchScore: 50,
+        matchExplanation: "Scoring unavailable.",
+        metadata: { location: meta.location, rate: meta.rate, ...meta },
+      };
+    });
+  }
+}
+
+/**
+ * Find best matching sellers for a job: search → rerank → LLM score.
+ *
+ * @param {string} jobPost – Full job post text
+ * @returns {Promise<Array<{ profileId, sellerName, profileText, matchScore, matchExplanation, metadata }>>}
+ */
+async function findMatchingSellers(jobPost) {
+  console.log("\n" + "═".repeat(60));
+  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – START`);
+  console.log("═".repeat(60));
+  logLine("Job post length", (jobPost || "").length);
+  logLine("Pipeline", "search → rerank → LLM score");
+
+  const searchResults = await searchSellerProfiles(jobPost, 10);
+  if (searchResults.length === 0) {
+    logSection("FINAL – No sellers matched");
+    logLine("Result", "[]");
+    console.log("");
+    return [];
+  }
+
+  const reranked = await rerankSellerProfiles(jobPost, searchResults, RERANK_TOP_N);
+  const result = await scoreWithLLM(jobPost, reranked);
+
+  logSection("4. FULL MATCH BREAKDOWN – Final ranked sellers");
+  logLine("Total returned", result.length);
+  console.log("");
+  result.forEach((s, i) => {
+    console.log(`  ┌─ Rank ${i + 1} ─────────────────────────────────`);
+    logLine("  │ profileId", s.profileId);
+    logLine("  │ sellerName", s.sellerName);
+    logLine("  │ matchScore", s.matchScore);
+    if (s.metadata?.location) logLine("  │ location", s.metadata.location);
+    if (s.metadata?.rate) logLine("  │ rate", s.metadata.rate);
+    console.log(`  │ matchExplanation: ${truncate(s.matchExplanation, 200)}`);
+    console.log("  └" + "─".repeat(40));
+  });
+
+  console.log("\n" + "═".repeat(60));
+  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – END (${result.length} sellers)`);
+  console.log("═".repeat(60) + "\n");
+
+  return result;
+}
+
 export {
   embedJobPost,
   embedSellerProfile,
@@ -432,6 +759,10 @@ export {
   extractMetadata,
   extractSellerMetadata,
   generateEmbeddings,
+  findMatchingSellers,
+  searchSellerProfiles,
+  rerankSellerProfiles,
+  scoreWithLLM,
   NAMESPACE,
   SELLER_PROFILE_NAMESPACE,
   INDEX_NAME,
