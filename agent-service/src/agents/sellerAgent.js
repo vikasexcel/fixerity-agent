@@ -1,5 +1,9 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
+import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
+import { embedSellerProfile } from "../services/pinecone.js";
+
+const LOG_TAG = "[SellerAgent]";
 
 const SYSTEM_PROMPT = `You are a domain-expert profile consultant who helps sellers create marketplace-ready profiles. You have deep knowledge of every industry, trade, and profession. You understand what clients in each specific field actually care about and what makes them hire one person over another.
 
@@ -126,6 +130,11 @@ function buildContextNudge(state) {
 }
 
 async function gatherSellerInfoNode(state) {
+  console.log(LOG_TAG, "gatherSellerInfoNode entry", {
+    questionCount: state.questionCount,
+    status: state.status,
+  });
+
   const model = createModel();
 
   const contextNudge = buildContextNudge(state);
@@ -138,15 +147,12 @@ async function gatherSellerInfoNode(state) {
   const response = await model.invoke(messagesForLLM);
   const content = response.content;
 
-  // Check if the AI generated a seller profile
   const isProfileReady = content.includes(PROFILE_MARKER);
 
   if (isProfileReady) {
-    // Extract the profile content (everything after the marker)
     const parts = content.split(PROFILE_MARKER);
     const profileContent = parts[1] ? parts[1].trim() : content;
 
-    // Find placeholders in the profile
     const placeholderRegex = /\[([A-Z][A-Z\s/\-_]*(?:\:.*?)?)\]/g;
     const placeholders = [];
     let match;
@@ -154,16 +160,24 @@ async function gatherSellerInfoNode(state) {
       placeholders.push(match[0]);
     }
 
+    console.log(LOG_TAG, "gatherSellerInfoNode profile ready", {
+      status: "reviewing",
+      placeholdersCount: placeholders.length,
+    });
+
     return {
       messages: [new AIMessage(content)],
       sellerProfile: profileContent,
       placeholders: placeholders,
-      status: "done",
+      status: "reviewing",
       questionCount: state.questionCount,
     };
   }
 
-  // Still gathering info — the AI asked a question
+  console.log(LOG_TAG, "gatherSellerInfoNode still gathering", {
+    questionCount: state.questionCount + 1,
+  });
+
   return {
     messages: [new AIMessage(content)],
     status: "gathering",
@@ -171,8 +185,126 @@ async function gatherSellerInfoNode(state) {
   };
 }
 
-function routeAfterGather() {
+/**
+ * Routing: after gatherSellerInfo
+ * If profile ready (status reviewing) → reviewSellerProfile
+ * Else → END (still gathering)
+ */
+function routeAfterGather(state) {
+  if (state.status === "reviewing") {
+    console.log(LOG_TAG, "routeAfterGather → reviewSellerProfile");
+    return "reviewSellerProfile";
+  }
+  console.log(LOG_TAG, "routeAfterGather → END");
   return "__end__";
 }
 
-export { gatherSellerInfoNode, routeAfterGather, PROFILE_MARKER };
+/**
+ * Node: reviewSellerProfile
+ * Human-in-the-loop: seller can confirm or request more details.
+ */
+async function reviewSellerProfileNode(state) {
+  const lastMessage = state.messages[state.messages.length - 1];
+  const sellerResponse = (lastMessage?.content ?? "").toLowerCase().trim();
+
+  console.log(LOG_TAG, "reviewSellerProfileNode entry", {
+    responseLength: sellerResponse.length,
+  });
+
+  const confirmPatterns = [
+    "confirm",
+    "yes",
+    "looks good",
+    "approve",
+    "create",
+    "go ahead",
+    "perfect",
+    "submit",
+    "that's good",
+    "that works",
+    "ok",
+    "okay",
+    "sure",
+    "do it",
+    "lgtm",
+    "good to go",
+    "ready",
+    "publish",
+    "post it",
+  ];
+
+  const isConfirmed = confirmPatterns.some((p) => sellerResponse.includes(p));
+
+  if (isConfirmed) {
+    console.log(LOG_TAG, "reviewSellerProfileNode confirmed");
+    return { status: "confirmed" };
+  }
+
+  console.log(LOG_TAG, "reviewSellerProfileNode wants more details → gathering");
+  return { status: "gathering" };
+}
+
+/**
+ * Routing: after reviewSellerProfile
+ * If confirmed → createProfile; else → gatherSellerInfo
+ */
+function routeAfterReview(state) {
+  if (state.status === "confirmed") {
+    console.log(LOG_TAG, "routeAfterReview → createProfile");
+    return "createProfile";
+  }
+  console.log(LOG_TAG, "routeAfterReview → gatherSellerInfo");
+  return "gatherSellerInfo";
+}
+
+/**
+ * Node: createProfile
+ * Embeds the seller profile in Pinecone (namespace seller-profile) and marks done.
+ */
+async function createProfileNode(state, config) {
+  console.log(LOG_TAG, "createProfileNode entry");
+
+  const runnableConfig = AsyncLocalStorageProviderSingleton.getRunnableConfig?.();
+  const threadId =
+    config?.configurable?.thread_id ??
+    runnableConfig?.configurable?.thread_id ??
+    state.messages?.[0]?.id ??
+    "unknown";
+
+  let embeddingId = null;
+  let profileMetadata = null;
+
+  try {
+    const result = await embedSellerProfile(state.sellerProfile, threadId);
+    embeddingId = result.embeddingId;
+    profileMetadata = result.profileMetadata;
+    console.log(LOG_TAG, "createProfileNode embed success", {
+      embeddingId,
+      chunkCount: result.chunkCount,
+    });
+  } catch (err) {
+    console.error(LOG_TAG, "createProfileNode embed failed (non-blocking):", err.message);
+  }
+
+  const model = createModel();
+  const confirmPrompt = `The seller has confirmed and their profile has been created successfully. Generate a brief, friendly confirmation message. Tell them their profile is now live and clients will be able to find them. Keep it short and warm (2-3 sentences max). Do NOT include the full profile again.`;
+  const response = await model.invoke([new SystemMessage(confirmPrompt)]);
+
+  console.log(LOG_TAG, "createProfileNode done", { status: "done" });
+
+  return {
+    messages: [new AIMessage(response.content)],
+    status: "done",
+    embeddingId,
+    profileMetadata,
+  };
+}
+
+export {
+  gatherSellerInfoNode,
+  routeAfterGather,
+  reviewSellerProfileNode,
+  routeAfterReview,
+  createProfileNode,
+  PROFILE_MARKER,
+};

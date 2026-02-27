@@ -16,7 +16,7 @@ const SellerAgentState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => [],
   }),
-  // Current phase: "gathering" | "done"
+  // Current phase: "gathering" | "reviewing" | "confirmed" | "done"
   status: Annotation({
     reducer: (_prev, next) => next,
     default: () => "gathering",
@@ -25,6 +25,16 @@ const SellerAgentState = Annotation.Root({
   questionCount: Annotation({
     reducer: (_prev, next) => next,
     default: () => 0,
+  }),
+  // Pinecone vector ID after embedding (null until embedded)
+  embeddingId: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  // Structured metadata for the embedded profile (for embedding)
+  profileMetadata: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
   }),
 });
 

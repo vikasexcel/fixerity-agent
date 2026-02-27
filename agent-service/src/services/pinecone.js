@@ -6,6 +6,7 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 // ─── Config ──────────────────────────────────────────────────────────────────
 const INDEX_NAME = "fixerity-agent";
 const NAMESPACE = "seller-jobs";
+const SELLER_PROFILE_NAMESPACE = "seller-profile";
 const EMBEDDING_MODEL = "text-embedding-3-large";
 const EMBEDDING_DIMENSIONS = 1024;
 
@@ -171,6 +172,35 @@ function extractMetadata(jobPost) {
   return metadata;
 }
 
+/**
+ * Extract structured metadata from seller profile text (for filtering in Pinecone).
+ * Used only for vector metadata; namespace stays SELLER_PROFILE_NAMESPACE.
+ */
+function extractSellerMetadata(profileText) {
+  const metadata = {};
+  const lines = profileText.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  if (lines.length > 0) {
+    metadata.title = lines[0].replace(/^#+\s*/, "").replace(/\*\*/g, "").trim();
+  }
+
+  const locationMatch = profileText.match(
+    /(?:service\s+area|location|city|area|region|based\s+in)[:\s-]+([^\n]+)/i
+  );
+  if (locationMatch) {
+    metadata.location = locationMatch[1].trim().replace(/^\*\*|\*\*$/g, "");
+  }
+
+  const rateMatch = profileText.match(
+    /(?:rate|price|hourly|fee)[:\s-]+([^\n]+)/i
+  );
+  if (rateMatch) {
+    metadata.rate = rateMatch[1].trim().replace(/^\*\*|\*\*$/g, "");
+  }
+
+  return metadata;
+}
+
 // ─── Embedding ───────────────────────────────────────────────────────────────
 
 /**
@@ -292,11 +322,117 @@ async function embedJobPost(jobPost, threadId) {
   };
 }
 
+/**
+ * Embed a seller profile into Pinecone (namespace seller-profile only).
+ * Job embeds and seller profile embeds stay in separate namespaces; do not mix.
+ *
+ * @param {string} sellerProfile – The full seller profile text
+ * @param {string} threadId – The conversation thread ID (used for grouping)
+ * @returns {{ embeddingId: string|null, profileMetadata: object, chunkCount: number }}
+ */
+async function embedSellerProfile(sellerProfile, threadId) {
+  const log = (msg, data = {}) =>
+    console.log("[Pinecone embedSellerProfile]", msg, Object.keys(data).length ? data : "");
+
+  if (sellerProfile == null || typeof sellerProfile !== "string") {
+    log("Skipping embed: seller profile is null or not a string", {
+      profileType: typeof sellerProfile,
+    });
+    return { embeddingId: null, profileMetadata: {}, chunkCount: 0 };
+  }
+  const trimmed = sellerProfile.trim();
+  if (trimmed.length === 0) {
+    log("Skipping embed: seller profile is empty or whitespace");
+    return { embeddingId: null, profileMetadata: {}, chunkCount: 0 };
+  }
+
+  log("Starting embed", {
+    profileLength: trimmed.length,
+    threadId,
+    namespace: SELLER_PROFILE_NAMESPACE,
+  });
+
+  const profileId = uuidv4();
+  const metadata = extractSellerMetadata(sellerProfile);
+  metadata.profileId = profileId;
+  metadata.threadId = threadId;
+  metadata.createdAt = new Date().toISOString();
+  metadata.source = "seller-agent";
+
+  const chunks = await chunkText(trimmed);
+  log("Chunking done", { chunkCount: chunks.length });
+
+  if (chunks.length === 0) {
+    log("Skipping upsert: no chunks produced");
+    return { embeddingId: null, profileMetadata: metadata, chunkCount: 0 };
+  }
+
+  const embeddings = await generateEmbeddings(chunks);
+  log("Embeddings generated", { embeddingCount: embeddings.length });
+
+  if (embeddings.length !== chunks.length) {
+    log("Mismatch: embeddings count != chunks count; skipping upsert", {
+      chunks: chunks.length,
+      embeddings: embeddings.length,
+    });
+    return { embeddingId: null, profileMetadata: metadata, chunkCount: chunks.length };
+  }
+
+  const vectors = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const val = embeddings[i];
+    if (val == null || !Array.isArray(val) || val.length === 0) {
+      log("Skipping chunk with invalid embedding", { chunkIndex: i });
+      continue;
+    }
+    vectors.push({
+      id: `${profileId}_chunk_${i}`,
+      values: val,
+      metadata: {
+        ...metadata,
+        chunkIndex: i,
+        totalChunks: chunks.length,
+        chunkText: chunks[i],
+        fullProfile: i === 0 ? sellerProfile : undefined,
+      },
+    });
+  }
+
+  if (vectors.length === 0) {
+    log("Skipping upsert: no valid vectors");
+    return { embeddingId: null, profileMetadata: metadata, chunkCount: chunks.length };
+  }
+
+  for (let i = 1; i < vectors.length; i++) {
+    delete vectors[i].metadata.fullProfile;
+  }
+
+  const index = getPineconeIndex();
+  const ns = index.namespace(SELLER_PROFILE_NAMESPACE);
+
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < vectors.length; i += BATCH_SIZE) {
+    const batch = vectors.slice(i, i + BATCH_SIZE);
+    await ns.upsert({ records: batch });
+    log("Upserted batch", { batchIndex: i / BATCH_SIZE, batchSize: batch.length });
+  }
+
+  log("Embed complete", { embeddingId: profileId, chunkCount: vectors.length });
+  return {
+    embeddingId: profileId,
+    profileMetadata: metadata,
+    chunkCount: vectors.length,
+  };
+}
+
 export {
   embedJobPost,
+  embedSellerProfile,
   chunkText,
   extractMetadata,
+  extractSellerMetadata,
   generateEmbeddings,
   NAMESPACE,
+  SELLER_PROFILE_NAMESPACE,
   INDEX_NAME,
 };

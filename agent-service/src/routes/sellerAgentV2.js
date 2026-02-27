@@ -8,6 +8,15 @@ const router = express.Router();
 
 const graph = buildSellerGraph();
 
+const LOG_TAG = "[SellerRoute]";
+
+/**
+ * Get current graph state for a thread.
+ */
+async function getGraphState(threadId) {
+  return graph.getState({ configurable: { thread_id: threadId } });
+}
+
 /**
  * Clean the AI response for the API consumer.
  * Removes the internal marker so the client gets clean text.
@@ -29,6 +38,8 @@ router.post("/start", async (req, res) => {
       req.body.message ||
       "I want to create a seller profile. Help me get started.";
 
+    console.log(LOG_TAG, "start", { threadId });
+
     const result = await graph.invoke(
       {
         messages: [new HumanMessage(userMessage)],
@@ -38,13 +49,15 @@ router.post("/start", async (req, res) => {
 
     const lastMessage = result.messages[result.messages.length - 1];
 
+    console.log(LOG_TAG, "start result", { threadId, status: result.status });
+
     res.json({
       threadId,
       message: cleanMessage(lastMessage.content),
       status: result.status,
     });
   } catch (error) {
-    console.error("Error starting seller conversation:", error);
+    console.error(LOG_TAG, "Error starting seller conversation:", error);
     res.status(500).json({ error: "Failed to start conversation" });
   }
 });
@@ -66,14 +79,34 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const result = await graph.invoke(
-      {
-        messages: [new HumanMessage(message)],
-      },
-      { configurable: { thread_id: threadId } }
-    );
+    const currentState = await getGraphState(threadId);
+    const currentStatus = currentState?.values?.status;
+
+    console.log(LOG_TAG, "chat", { threadId, statusBefore: currentStatus });
+
+    let result;
+
+    if (currentStatus === "reviewing") {
+      console.log(LOG_TAG, "chat resuming from interrupt (reviewing)");
+      await graph.updateState(
+        { configurable: { thread_id: threadId } },
+        { messages: [new HumanMessage(message)] }
+      );
+      result = await graph.invoke(null, {
+        configurable: { thread_id: threadId },
+      });
+    } else {
+      result = await graph.invoke(
+        {
+          messages: [new HumanMessage(message)],
+        },
+        { configurable: { thread_id: threadId } }
+      );
+    }
 
     const lastMessage = result.messages[result.messages.length - 1];
+
+    console.log(LOG_TAG, "chat result", { threadId, statusAfter: result.status });
 
     const response = {
       threadId,
@@ -81,7 +114,6 @@ router.post("/chat", async (req, res) => {
       status: result.status,
     };
 
-    // Only include sellerProfile fields when a profile has been generated
     if (result.sellerProfile) {
       response.sellerProfile = result.sellerProfile;
       response.placeholders = result.placeholders;
@@ -89,7 +121,7 @@ router.post("/chat", async (req, res) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error in seller chat:", error);
+    console.error(LOG_TAG, "Error in seller chat:", error);
     res.status(500).json({ error: "Failed to process message" });
   }
 });
@@ -129,7 +161,7 @@ router.get("/state/:threadId", async (req, res) => {
 
     res.json(response);
   } catch (error) {
-    console.error("Error getting seller state:", error);
+    console.error(LOG_TAG, "Error getting seller state:", error);
     res.status(500).json({ error: "Failed to get conversation state" });
   }
 });

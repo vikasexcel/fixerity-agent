@@ -3,6 +3,8 @@ import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { embedJobPost } from "../services/pinecone.js";
 
+const LOG_TAG = "[BuyerAgent]";
+
 const SYSTEM_PROMPT = `You are a world-class job post creator and domain expert across every industry and trade. Your job is to help a buyer create the most detailed, professional, and complete job post possible — one so thorough that service providers can respond with accurate pricing and timelines without needing to ask follow-up questions.
 
 CRITICAL RULES:
@@ -68,6 +70,11 @@ const JOB_POST_MARKER = "---JOB_POST_READY---";
  * When the job post is ready, sets status to "reviewing" for human approval.
  */
 async function gatherInfoNode(state) {
+  console.log(LOG_TAG, "gatherInfoNode entry", {
+    questionCount: state.questionCount,
+    status: state.status,
+  });
+
   const model = createModel();
 
   const messagesForLLM = [new SystemMessage(SYSTEM_PROMPT), ...state.messages];
@@ -75,21 +82,23 @@ async function gatherInfoNode(state) {
   const response = await model.invoke(messagesForLLM);
   const content = response.content;
 
-  // Check if the AI generated a job post
   const isJobPostReady = content.includes(JOB_POST_MARKER);
 
   if (isJobPostReady) {
-    // Extract the job post content (everything after the marker)
     const parts = content.split(JOB_POST_MARKER);
     const jobPostContent = parts[1] ? parts[1].trim() : content;
 
-    // Find placeholders in the job post
     const placeholderRegex = /\[([A-Z][A-Z\s/\-_]*(?:\:.*?)?)\]/g;
     const placeholders = [];
     let match;
     while ((match = placeholderRegex.exec(jobPostContent)) !== null) {
       placeholders.push(match[0]);
     }
+
+    console.log(LOG_TAG, "gatherInfoNode job post ready", {
+      status: "reviewing",
+      placeholdersCount: placeholders.length,
+    });
 
     return {
       messages: [new AIMessage(content)],
@@ -100,7 +109,10 @@ async function gatherInfoNode(state) {
     };
   }
 
-  // Still gathering info — the AI asked a question
+  console.log(LOG_TAG, "gatherInfoNode still gathering", {
+    questionCount: state.questionCount + 1,
+  });
+
   return {
     messages: [new AIMessage(content)],
     status: "gathering",
@@ -115,8 +127,10 @@ async function gatherInfoNode(state) {
  */
 function routeAfterGather(state) {
   if (state.status === "reviewing") {
+    console.log(LOG_TAG, "routeAfterGather → reviewJobPost");
     return "reviewJobPost";
   }
+  console.log(LOG_TAG, "routeAfterGather → END");
   return "__end__";
 }
 
@@ -129,12 +143,13 @@ function routeAfterGather(state) {
  *   - Request changes → go back to gatherInfo
  */
 async function reviewJobPostNode(state) {
-  // This node processes the buyer's response after the interrupt.
-  // The buyer's message has been added to state.messages by the route handler.
   const lastMessage = state.messages[state.messages.length - 1];
-  const buyerResponse = lastMessage.content.toLowerCase().trim();
+  const buyerResponse = (lastMessage?.content ?? "").toLowerCase().trim();
 
-  // Check if the buyer confirmed
+  console.log(LOG_TAG, "reviewJobPostNode entry", {
+    responseLength: buyerResponse.length,
+  });
+
   const confirmPatterns = [
     "confirm",
     "yes",
@@ -160,15 +175,12 @@ async function reviewJobPostNode(state) {
   const isConfirmed = confirmPatterns.some((p) => buyerResponse.includes(p));
 
   if (isConfirmed) {
-    return {
-      status: "confirmed",
-    };
+    console.log(LOG_TAG, "reviewJobPostNode confirmed");
+    return { status: "confirmed" };
   }
 
-  // Buyer wants changes — go back to gathering with their feedback
-  return {
-    status: "gathering",
-  };
+  console.log(LOG_TAG, "reviewJobPostNode wants changes → gathering");
+  return { status: "gathering" };
 }
 
 /**
@@ -178,9 +190,10 @@ async function reviewJobPostNode(state) {
  */
 function routeAfterReview(state) {
   if (state.status === "confirmed") {
+    console.log(LOG_TAG, "routeAfterReview → createJob");
     return "createJob";
   }
-  // Buyer wants changes — go back to gatherInfo to process their feedback
+  console.log(LOG_TAG, "routeAfterReview → gatherInfo");
   return "gatherInfo";
 }
 
@@ -192,10 +205,10 @@ function routeAfterReview(state) {
  * @param {object} [config] - Run config (from graph.invoke); holds configurable.thread_id
  */
 async function createJobNode(state, config) {
+  console.log(LOG_TAG, "createJobNode entry");
+
   const model = createModel();
 
-  // Thread ID is set by the route when invoking the graph (configurable.thread_id).
-  // Prefer config arg, then runnable config from async context, then fallback.
   const runnableConfig = AsyncLocalStorageProviderSingleton.getRunnableConfig?.();
   const threadId =
     config?.configurable?.thread_id ??
@@ -203,7 +216,6 @@ async function createJobNode(state, config) {
     state.messages?.[0]?.id ??
     "unknown";
 
-  // Generate embedding in the background (buyer doesn't know)
   let embeddingId = null;
   let jobMetadata = null;
 
@@ -211,17 +223,21 @@ async function createJobNode(state, config) {
     const result = await embedJobPost(state.jobPost, threadId);
     embeddingId = result.embeddingId;
     jobMetadata = result.jobMetadata;
+    console.log(LOG_TAG, "createJobNode embed success", {
+      embeddingId,
+      chunkCount: result.chunkCount,
+    });
   } catch (err) {
-    console.error("Failed to embed job post (non-blocking):", err.message);
-    // Don't fail the job creation if embedding fails — it's invisible to the buyer
+    console.error(LOG_TAG, "createJobNode embed failed (non-blocking):", err.message);
   }
 
-  // Generate a friendly confirmation message
   const confirmPrompt = `The buyer has confirmed and the job post has been created successfully. Generate a brief, friendly confirmation message. Tell them their job post is now live and service providers will be able to see it. Keep it short and warm (2-3 sentences max). Do NOT include the job post again.`;
 
   const response = await model.invoke([
     new SystemMessage(confirmPrompt),
   ]);
+
+  console.log(LOG_TAG, "createJobNode done", { status: "done" });
 
   return {
     messages: [new AIMessage(response.content)],
