@@ -15,6 +15,15 @@ function getAgentBaseUrl(): string {
 
 export type SellerStatus = 'gathering' | 'reviewing' | 'confirmed' | 'done';
 
+export type MatchedJob = {
+  jobId: string;
+  jobTitle: string;
+  jobText: string;
+  matchScore: number;
+  matchExplanation: string;
+  metadata: Record<string, unknown>;
+};
+
 export type StartResponse = {
   threadId: string;
   message: string;
@@ -29,6 +38,10 @@ export type ChatResponse = {
   sellerProfile?: string;
   /** Placeholder tokens found in the profile (e.g. "[YOUR CITY]") */
   placeholders?: string[];
+  /** Matched jobs for seller (after profile confirmed) */
+  matchedJobs?: MatchedJob[];
+  /** "found" | "error" | null */
+  jobMatchingStatus?: 'found' | 'error' | null;
 };
 
 export type ThreadMessage = {
@@ -43,6 +56,8 @@ export type ThreadStateResponse = {
   questionCount?: number;
   sellerProfile?: string;
   placeholders?: string[];
+  matchedJobs?: MatchedJob[];
+  jobMatchingStatus?: 'found' | 'error' | null;
 };
 
 export async function startConversation(message?: string): Promise<StartResponse> {

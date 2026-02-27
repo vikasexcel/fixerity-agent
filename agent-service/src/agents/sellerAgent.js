@@ -1,7 +1,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedSellerProfile } from "../services/pinecone.js";
+import { embedSellerProfile, findMatchingJobs } from "../services/pinecone.js";
 
 const LOG_TAG = "[SellerAgent]";
 
@@ -286,6 +286,22 @@ async function createProfileNode(state, config) {
     console.error(LOG_TAG, "createProfileNode embed failed (non-blocking):", err.message);
   }
 
+  let matchedJobs = null;
+  let jobMatchingStatus = null;
+  if (state.sellerProfile && state.sellerProfile.trim().length > 0) {
+    try {
+      matchedJobs = await findMatchingJobs(state.sellerProfile);
+      jobMatchingStatus = "found";
+      console.log(LOG_TAG, "createProfileNode job matching complete", {
+        jobMatchingStatus,
+        matchedCount: matchedJobs?.length ?? 0,
+      });
+    } catch (err) {
+      console.error(LOG_TAG, "createProfileNode findMatchingJobs failed (non-blocking):", err.message);
+      jobMatchingStatus = "error";
+    }
+  }
+
   const model = createModel();
   const confirmPrompt = `The seller has confirmed and their profile has been created successfully. Generate a brief, friendly confirmation message. Tell them their profile is now live and clients will be able to find them. Keep it short and warm (2-3 sentences max). Do NOT include the full profile again.`;
   const response = await model.invoke([new SystemMessage(confirmPrompt)]);
@@ -297,6 +313,8 @@ async function createProfileNode(state, config) {
     status: "done",
     embeddingId,
     profileMetadata,
+    matchedJobs,
+    jobMatchingStatus,
   };
 }
 

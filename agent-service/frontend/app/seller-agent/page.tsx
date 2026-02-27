@@ -13,9 +13,11 @@ import {
   type ThreadMessage,
   type ChatResponse,
   type SellerStatus,
+  type MatchedJob,
 } from '@/lib/seller-agent-api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
+import { JobMatchCard } from '@/components/job-match-card';
 
 const THREADS_STORAGE_KEY = 'seller_agent_threads';
 
@@ -55,6 +57,9 @@ export default function SellerAgentPage() {
   const [status, setStatus] = useState<SellerStatus | null>(null);
   const [sellerProfile, setSellerProfile] = useState<string | null>(null);
   const [placeholders, setPlaceholders] = useState<string[] | null>(null);
+  const [matchedJobs, setMatchedJobs] = useState<MatchedJob[] | null>(null);
+  const [jobMatchingStatus, setJobMatchingStatus] = useState<'found' | 'error' | null>(null);
+  const [jobDecisions, setJobDecisions] = useState<Record<string, 'interested' | 'skipped'>>({});
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
 
   const updateThreadList = useCallback((threadId: string, title: string) => {
@@ -75,6 +80,9 @@ export default function SellerAgentPage() {
     setSellerProfile(null);
     setPlaceholders(null);
     setStatus(null);
+    setMatchedJobs(null);
+    setJobMatchingStatus(null);
+    setJobDecisions({});
     try {
       const res = await startConversation();
       setThreadId(res.threadId);
@@ -99,6 +107,9 @@ export default function SellerAgentPage() {
     setSellerProfile(null);
     setPlaceholders(null);
     setStatus(null);
+    setMatchedJobs(null);
+    setJobMatchingStatus(null);
+    setJobDecisions({});
     try {
       const state = await getThreadState(id);
       setThreadId(state.threadId);
@@ -106,6 +117,8 @@ export default function SellerAgentPage() {
       setMessages(state.messages ?? []);
       if (state.sellerProfile != null) setSellerProfile(state.sellerProfile);
       if (state.placeholders?.length) setPlaceholders(state.placeholders);
+      if (state.matchedJobs != null) setMatchedJobs(state.matchedJobs);
+      if (state.jobMatchingStatus != null) setJobMatchingStatus(state.jobMatchingStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load conversation');
       setMessages([]);
@@ -138,6 +151,8 @@ export default function SellerAgentPage() {
         setStatus(res.status ?? null);
         if (res.sellerProfile != null) setSellerProfile(res.sellerProfile);
         if (res.placeholders?.length) setPlaceholders(res.placeholders);
+        if (res.matchedJobs != null) setMatchedJobs(res.matchedJobs);
+        if (res.jobMatchingStatus != null) setJobMatchingStatus(res.jobMatchingStatus);
         const title = text.slice(0, 40) + (text.length > 40 ? '…' : '');
         updateThreadList(threadId, title);
       } catch (err) {
@@ -287,6 +302,35 @@ export default function SellerAgentPage() {
                 </>
               )}
             </article>
+          )}
+          {loading && status === 'reviewing' && (
+            <p className="text-sm text-muted-foreground max-w-3xl flex items-center gap-2" role="status">
+              <span className="inline-block h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" aria-hidden />
+              Finding the best jobs for your profile…
+            </p>
+          )}
+          {jobMatchingStatus === 'found' && matchedJobs && matchedJobs.length > 0 && (
+            <div className="space-y-3 max-w-3xl">
+              <h2 className="text-sm font-semibold">Matched Jobs for Your Profile</h2>
+              <ul className="space-y-3 list-none p-0 m-0">
+                {matchedJobs.map((job, i) => (
+                  <li key={job.jobId}>
+                    <JobMatchCard
+                      rank={i + 1}
+                      job={job}
+                      onInterested={() => setJobDecisions((prev) => ({ ...prev, [job.jobId]: 'interested' }))}
+                      onSkip={() => setJobDecisions((prev) => ({ ...prev, [job.jobId]: 'skipped' }))}
+                      decision={jobDecisions[job.jobId]}
+                    />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {jobMatchingStatus === 'found' && (!matchedJobs || matchedJobs.length === 0) && (
+            <p className="text-sm text-muted-foreground max-w-3xl" role="status">
+              No matching jobs found yet. We&apos;ll notify you when new jobs are posted.
+            </p>
           )}
         </section>
 

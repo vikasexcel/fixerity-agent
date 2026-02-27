@@ -36,6 +36,16 @@ const SellerAgentState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
+  // Matched jobs for seller (after profile confirmed)
+  matchedJobs: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  // "found" | "error" | null
+  jobMatchingStatus: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
 });
 
 export { SellerAgentState };

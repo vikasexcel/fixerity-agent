@@ -752,6 +752,311 @@ async function findMatchingSellers(jobPost) {
   return result;
 }
 
+// ─── Job search & rerank (for seller agent) ───────────────────────────────────
+
+const JOB_MATCH_LOG_PREFIX = "[JobMatch]";
+
+function logJobSection(title) {
+  console.log("\n" + "─".repeat(60));
+  console.log(`${JOB_MATCH_LOG_PREFIX} ${title}`);
+  console.log("─".repeat(60));
+}
+
+/**
+ * Search seller-jobs namespace by seller profile (embed profile, query by vector).
+ * Deduplicates by jobId and returns unique jobs with best chunk.
+ *
+ * @param {string} sellerProfile – Full seller profile text
+ * @param {number} [topK=10] – Max number of unique jobs to consider
+ * @returns {Promise<Array<{ jobId: string, jobText: string, metadata: object }>>}
+ */
+async function searchJobsForSeller(sellerProfile, topK = 10) {
+  logJobSection("1. SEARCH – Query & raw results");
+
+  if (sellerProfile == null || typeof sellerProfile !== "string" || sellerProfile.trim().length === 0) {
+    logLine("Status", "Skipped (empty seller profile)");
+    return [];
+  }
+
+  logLine("Query (seller profile preview)", truncate(sellerProfile, 200));
+  logLine("Namespace", NAMESPACE);
+  logLine("TopK requested", SEARCH_TOP_K);
+
+  const [embedding] = await generateEmbeddings([sellerProfile.trim()]);
+  if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+    logLine("Status", "Skipped (no embedding)");
+    return [];
+  }
+
+  logLine("Embedding dimensions", embedding.length);
+
+  const index = getPineconeIndex();
+  const ns = index.namespace(NAMESPACE);
+
+  const response = await ns.query({
+    vector: embedding,
+    topK: SEARCH_TOP_K,
+    includeMetadata: true,
+    includeValues: false,
+  });
+
+  const matches = response.matches || [];
+  logLine("Raw matches count", matches.length);
+
+  if (matches.length === 0) {
+    logLine("Status", "No matches – returning []");
+    return [];
+  }
+
+  console.log("\n  Raw hits (id, jobId, score):");
+  matches.forEach((m, i) => {
+    const jid = m.metadata?.jobId || (m.id && m.id.replace(/_chunk_\d+$/, "")) || m.id;
+    console.log(`    ${i + 1}. id=${m.id} jobId=${jid} score=${(m.score ?? 0).toFixed(4)}`);
+  });
+
+  const byJob = new Map();
+  for (const m of matches) {
+    const jobId = m.metadata?.jobId || (m.id && m.id.replace(/_chunk_\d+$/, ""));
+    if (!jobId) continue;
+    const existing = byJob.get(jobId);
+    const jobText = m.metadata?.fullJobPost || m.metadata?.chunkText || "";
+    const score = m.score ?? 0;
+    if (!existing || score > (existing.score ?? 0)) {
+      byJob.set(jobId, {
+        jobId,
+        jobText: jobText || existing?.jobText || "",
+        metadata: { ...m.metadata },
+        score,
+      });
+    } else if (existing && !existing.jobText && jobText) {
+      existing.jobText = jobText;
+    }
+  }
+
+  const list = Array.from(byJob.values())
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, topK)
+    .map(({ jobId, jobText, metadata }) => ({
+      jobId,
+      jobText,
+      metadata: metadata || {},
+    }));
+
+  console.log("\n  After dedupe by jobId (best chunk per job):");
+  logLine("Jobs kept", list.length);
+  list.forEach((j, i) => {
+    const title = (j.metadata?.title || (j.jobText || "").split("\n")[0] || "").slice(0, 50);
+    console.log(`    ${i + 1}. ${j.jobId}  "${truncate(title, 40)}"`);
+  });
+
+  return list;
+}
+
+/**
+ * Rerank job results using Pinecone Inference (bge-reranker-v2-m3).
+ *
+ * @param {string} sellerProfile – Seller profile text (query for reranker)
+ * @param {Array<{ jobId: string, jobText: string, metadata: object }>} searchResults
+ * @param {number} [topN=5]
+ * @returns {Promise<Array<{ jobId: string, jobText: string, metadata: object }>>}
+ */
+async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N) {
+  logJobSection("2. RERANK – Pinecone Inference");
+
+  if (searchResults.length === 0) {
+    logLine("Status", "No input – returning []");
+    return [];
+  }
+
+  logLine("Query (seller profile preview)", truncate(sellerProfile, 150));
+  logLine("Model", RERANK_MODEL);
+  logLine("Input documents count", searchResults.length);
+  logLine("TopN", topN);
+
+  const documents = searchResults.map((r) => r.jobText || r.metadata?.chunkText || "");
+  if (documents.every((d) => !d)) {
+    logLine("Status", "No text to rerank – using search order");
+    return searchResults.slice(0, topN);
+  }
+
+  try {
+    const inference = getPineconeClient().inference;
+    const result = await inference.rerank({
+      model: RERANK_MODEL,
+      query: sellerProfile.trim(),
+      documents,
+      topN,
+      returnDocuments: true,
+      rankFields: ["text"],
+    });
+
+    const hits = result.data || result.results || result.hits || [];
+    logLine("Rerank API hits count", hits.length);
+
+    console.log("\n  Rerank result (original index → relevance score):");
+    hits.forEach((h, i) => {
+      const idx = typeof h.index === "number" ? h.index : parseInt(h.index, 10);
+      const score = (h.score != null ? h.score : 0).toFixed(4);
+      const jobId = searchResults[idx]?.jobId ?? "?";
+      console.log(`    ${i + 1}. index=${idx} jobId=${jobId} score=${score}`);
+    });
+
+    const order = hits.map((h) => (typeof h.index === "number" ? h.index : parseInt(h.index, 10)));
+    const reranked = order
+      .filter((i) => i >= 0 && i < searchResults.length)
+      .map((i) => searchResults[i]);
+
+    console.log("\n  Final reranked order (jobIds):");
+    reranked.forEach((j, i) => console.log(`    ${i + 1}. ${j.jobId}`));
+
+    return reranked;
+  } catch (err) {
+    console.error(`${JOB_MATCH_LOG_PREFIX} Rerank failed, using search order:`, err.message);
+    logLine("Fallback", "Using original search order");
+    return searchResults.slice(0, topN);
+  }
+}
+
+/**
+ * Use OpenAI to score (0–100) and explain each job match for the seller profile.
+ *
+ * @param {string} sellerProfile – Seller profile text
+ * @param {Array<{ jobId: string, jobText: string, metadata: object }>} jobs
+ * @returns {Promise<Array<{ jobId: string, jobTitle: string, jobText: string, matchScore: number, matchExplanation: string, metadata: object }>>}
+ */
+async function scoreJobsWithLLM(sellerProfile, jobs) {
+  logJobSection("3. LLM SCORING – Job match score & explanation");
+
+  if (jobs.length === 0) {
+    logLine("Status", "No jobs – returning []");
+    return [];
+  }
+
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  logLine("Model", model);
+  logLine("Jobs to score", jobs.length);
+  logLine("Seller profile length (chars)", sellerProfile.length);
+
+  const openai = getOpenAI();
+  const systemPrompt = `You are a job-matching expert. For each job post, analyze how well it matches the seller's profile (skills, experience, location, availability, rate). Respond with a JSON array of objects. Each object must have: "jobIndex" (0-based index), "matchScore" (number 0-100), "matchExplanation" (2-3 sentences). No other text.`;
+
+  const jobList = jobs
+    .map(
+      (j, i) =>
+        `[Job ${i}] (jobId: ${j.jobId})\n${(j.jobText || "").slice(0, 2000)}`
+    )
+    .join("\n\n");
+
+  const userPrompt = `Seller profile:\n${sellerProfile.slice(0, 3000)}\n\nJobs:\n${jobList}\n\nOutput JSON array with jobIndex, matchScore, matchExplanation for each job.`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.3,
+    });
+
+    const content = (completion.choices?.[0]?.message?.content || "").trim();
+    logLine("LLM response length (chars)", content.length);
+
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    const arr = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    logLine("Parsed JSON array length", arr.length);
+
+    console.log("\n  LLM raw output (jobIndex, matchScore, matchExplanation preview):");
+    arr.forEach((o, i) => {
+      const score = o.matchScore != null ? o.matchScore : "?";
+      const expl = truncate(String(o.matchExplanation || ""), 80);
+      console.log(`    ${i + 1}. index=${o.jobIndex} score=${score}  "${expl}"`);
+    });
+
+    const byIndex = new Map(arr.map((o) => [Number(o.jobIndex), o]));
+
+    return jobs.map((j, i) => {
+      const meta = j.metadata || {};
+      const title = meta.title || (j.jobText || "").split("\n")[0] || "Job";
+      const jobTitle = title.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim() || "Job";
+      const scored = byIndex.get(i) || {};
+      return {
+        jobId: j.jobId,
+        jobTitle,
+        jobText: j.jobText || "",
+        matchScore: Math.min(100, Math.max(0, Number(scored.matchScore) ?? 50)),
+        matchExplanation: String(scored.matchExplanation || "Match analysis not available.").slice(0, 500),
+        metadata: {
+          budget: meta.budget,
+          location: meta.location,
+          timeline: meta.timeline,
+          ...meta,
+        },
+      };
+    });
+  } catch (err) {
+    console.error(`${JOB_MATCH_LOG_PREFIX} LLM failed:`, err.message);
+    return jobs.map((j) => {
+      const meta = j.metadata || {};
+      const title = meta.title || (j.jobText || "").split("\n")[0] || "Job";
+      return {
+        jobId: j.jobId,
+        jobTitle: title.replace(/^#+\s*/, "").trim() || "Job",
+        jobText: j.jobText || "",
+        matchScore: 50,
+        matchExplanation: "Scoring unavailable.",
+        metadata: { budget: meta.budget, location: meta.location, timeline: meta.timeline, ...meta },
+      };
+    });
+  }
+}
+
+/**
+ * Find best matching jobs for a seller: search → rerank → LLM score.
+ *
+ * @param {string} sellerProfile – Full seller profile text
+ * @returns {Promise<Array<{ jobId, jobTitle, jobText, matchScore, matchExplanation, metadata }>>}
+ */
+async function findMatchingJobs(sellerProfile) {
+  console.log("\n" + "═".repeat(60));
+  console.log(`${JOB_MATCH_LOG_PREFIX} FIND MATCHING JOBS – START`);
+  console.log("═".repeat(60));
+  logLine("Seller profile length", (sellerProfile || "").length);
+  logLine("Pipeline", "search → rerank → LLM score");
+
+  const searchResults = await searchJobsForSeller(sellerProfile, 10);
+  if (searchResults.length === 0) {
+    logJobSection("FINAL – No jobs matched");
+    logLine("Result", "[]");
+    console.log("");
+    return [];
+  }
+
+  const reranked = await rerankJobs(sellerProfile, searchResults, RERANK_TOP_N);
+  const result = await scoreJobsWithLLM(sellerProfile, reranked);
+
+  logJobSection("4. FULL MATCH BREAKDOWN – Final ranked jobs");
+  logLine("Total returned", result.length);
+  console.log("");
+  result.forEach((job, i) => {
+    console.log(`  ┌─ Rank ${i + 1} ─────────────────────────────────`);
+    logLine("  │ jobId", job.jobId);
+    logLine("  │ jobTitle", truncate(job.jobTitle, 60));
+    logLine("  │ matchScore", job.matchScore);
+    if (job.metadata?.budget) logLine("  │ budget", job.metadata.budget);
+    if (job.metadata?.location) logLine("  │ location", job.metadata.location);
+    if (job.metadata?.timeline) logLine("  │ timeline", job.metadata.timeline);
+    console.log(`  │ matchExplanation: ${truncate(job.matchExplanation, 200)}`);
+    console.log("  └" + "─".repeat(40));
+  });
+
+  console.log("\n" + "═".repeat(60));
+  console.log(`${JOB_MATCH_LOG_PREFIX} FIND MATCHING JOBS – END (${result.length} jobs)`);
+  console.log("═".repeat(60) + "\n");
+
+  return result;
+}
+
 export {
   embedJobPost,
   embedSellerProfile,
@@ -763,6 +1068,10 @@ export {
   searchSellerProfiles,
   rerankSellerProfiles,
   scoreWithLLM,
+  findMatchingJobs,
+  searchJobsForSeller,
+  rerankJobs,
+  scoreJobsWithLLM,
   NAMESPACE,
   SELLER_PROFILE_NAMESPACE,
   INDEX_NAME,

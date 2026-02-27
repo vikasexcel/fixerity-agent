@@ -118,6 +118,12 @@ router.post("/chat", async (req, res) => {
       response.sellerProfile = result.sellerProfile;
       response.placeholders = result.placeholders;
     }
+    if (result.matchedJobs != null) {
+      response.matchedJobs = result.matchedJobs;
+    }
+    if (result.jobMatchingStatus != null) {
+      response.jobMatchingStatus = result.jobMatchingStatus;
+    }
 
     res.json(response);
   } catch (error) {
@@ -157,6 +163,12 @@ router.get("/state/:threadId", async (req, res) => {
     if (state.values.sellerProfile) {
       response.sellerProfile = state.values.sellerProfile;
       response.placeholders = state.values.placeholders;
+    }
+    if (state.values.matchedJobs != null) {
+      response.matchedJobs = state.values.matchedJobs;
+    }
+    if (state.values.jobMatchingStatus != null) {
+      response.jobMatchingStatus = state.values.jobMatchingStatus;
     }
 
     res.json(response);
