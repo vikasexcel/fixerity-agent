@@ -28,6 +28,22 @@ const BuyerAgentState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => 0,
   }),
+  // Number of exchanges classified as domain (no profile question matched)
+  domainQuestionCount: Annotation({
+    reducer: (prev, next) => (next != null ? (prev ?? 0) + next : prev ?? 0),
+    default: () => 0,
+  }),
+  // True once we have asked enough domain questions (Phase 2 started)
+  domainPhaseComplete: Annotation({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
+  // Profile question answers/skips: { [questionId]: string | "skip" }
+  // Used to avoid re-asking and to fill skipped items when generating the job post
+  profileAnswers: Annotation({
+    reducer: (prev, next) => (next ? { ...prev, ...next } : prev),
+    default: () => ({}),
+  }),
   // Structured metadata extracted from the job post for embedding
   jobMetadata: Annotation({
     reducer: (_prev, next) => next,
