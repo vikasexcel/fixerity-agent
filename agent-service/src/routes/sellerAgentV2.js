@@ -124,6 +124,9 @@ router.post("/chat", async (req, res) => {
     if (result.jobMatchingStatus != null) {
       response.jobMatchingStatus = result.jobMatchingStatus;
     }
+    if (result.embeddingId != null) {
+      response.embeddingId = result.embeddingId;
+    }
 
     res.json(response);
   } catch (error) {
@@ -158,6 +161,8 @@ router.get("/state/:threadId", async (req, res) => {
       messages,
       status: state.values.status,
       questionCount: state.values.questionCount,
+      profileAnswers: state.values.profileAnswers ?? {},
+      domainPhaseComplete: state.values.domainPhaseComplete === true,
     };
 
     if (state.values.sellerProfile) {
@@ -169,6 +174,12 @@ router.get("/state/:threadId", async (req, res) => {
     }
     if (state.values.jobMatchingStatus != null) {
       response.jobMatchingStatus = state.values.jobMatchingStatus;
+    }
+    if (state.values.embeddingId != null) {
+      response.embeddingId = state.values.embeddingId;
+    }
+    if (state.values.profileMetadata != null) {
+      response.profileMetadata = state.values.profileMetadata;
     }
 
     res.json(response);

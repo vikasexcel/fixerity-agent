@@ -6,6 +6,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:buyer": "node scripts/test-buyer-agent.js",
+    "test:seller-profile": "node scripts/test-seller-profile.js",
+    "test:seller-classifier": "node scripts/test-seller-classifier.js",
+    "test:seller-e2e": "node scripts/test-seller-flow-e2e.js",
     "dev": "node --watch src/index.js",
     "start": "node src/index.js"
   },
