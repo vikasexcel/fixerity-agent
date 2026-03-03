@@ -361,6 +361,11 @@ export default function BuyerAgentPage() {
               </ul>
             </div>
           )}
+          {matchingStatus === 'found' && matchedSellers.length === 0 && (
+            <p className="text-sm text-muted-foreground max-w-3xl" role="status">
+              We weren&apos;t able to find sellers for this job right now.
+            </p>
+          )}
         </section>
 
         {error && (

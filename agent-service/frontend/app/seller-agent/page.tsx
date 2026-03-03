@@ -329,7 +329,7 @@ export default function SellerAgentPage() {
           )}
           {jobMatchingStatus === 'found' && (!matchedJobs || matchedJobs.length === 0) && (
             <p className="text-sm text-muted-foreground max-w-3xl" role="status">
-              No matching jobs found yet. We&apos;ll notify you when new jobs are posted.
+              We weren&apos;t able to find jobs for you right now.
             </p>
           )}
         </section>
