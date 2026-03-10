@@ -70,9 +70,9 @@ export function SellerMatchCard({
             'rounded-md border px-2 py-0.5 text-xs font-medium',
             scoreColor(seller.matchScore)
           )}
-          aria-label={`Match score: ${seller.matchScore} out of 100`}
+          aria-label={`Match: ${seller.matchScore}%`}
         >
-          {seller.matchScore}
+          {seller.matchScore}%
         </span>
       </header>
 

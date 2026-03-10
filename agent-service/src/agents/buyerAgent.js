@@ -235,44 +235,8 @@ async function gatherInfoNode(state) {
   const isJobPostReady = content.includes(JOB_POST_MARKER);
 
   if (isJobPostReady) {
-    let jobPostContent = content.split(JOB_POST_MARKER)[1] ? content.split(JOB_POST_MARKER)[1].trim() : content;
-    const missingFields = getMissingJobPostFields(jobPostContent);
-
-    if (missingFields.length > 0) {
-      console.log(LOG_TAG, "gatherInfoNode job post missing fields, repairing", { missingFields });
-      const profileAnswers = state.profileAnswers ?? {};
-      const answersList = PROFILE_QUESTION_IDS.map((id) => {
-        const label = PROFILE_QUESTIONS.find((q) => q.id === id)?.label ?? id;
-        const val = profileAnswers[id];
-        const text = val == null ? "(not provided)" : val === "skip" ? "(skipped)" : val;
-        return `- ${label}: ${text}`;
-      }).join("\n");
-      const requiredSections = [
-        "Job Title",
-        ...PROFILE_QUESTIONS.map((q) => q.label),
-      ].join(", ");
-      const repairPrompt = `You are repairing a job post so it includes all required sections. CRITICAL: Keep the job exactly the same — same topic, same project, same buyer details. Do not change the type of service or invent a different project; only add or relabel sections so every required field is present.
-
-Use these PROFILE ANSWERS from the conversation to fill each section. For "(skipped)" or "(not provided)", use a sensible default: for budget, infer a reasonable range from your knowledge of this service type (e.g. typical cost for this kind of job); for photos → "No photos provided at this time"; for location, use whatever the buyer provided (city name alone is fine).
-
-${answersList}
-
-Required sections in this order (use **Section Name:** format): ${requiredSections}
-
-Current job post (preserve its topic and all details; only add or relabel sections to match the required list):
----
-${jobPostContent}
----
-
-Output ONLY the complete repaired job post (no ---JOB_POST_READY--- marker). Same project as above, every required section filled from the profile answers or a sensible default for this project type.`;
-      try {
-        const repairResponse = await model.invoke([new SystemMessage(repairPrompt)]);
-        const repaired = (repairResponse.content ?? "").trim();
-        if (repaired) jobPostContent = repaired;
-      } catch (err) {
-        console.warn(LOG_TAG, "gatherInfoNode repair failed", err.message);
-      }
-    }
+    // Use the exact job post from the assistant message — do not repair or rewrite (so "Job post" card matches chat).
+    const jobPostContent = content.split(JOB_POST_MARKER)[1] ? content.split(JOB_POST_MARKER)[1].trim() : content;
 
     const placeholderRegex = /\[([A-Z][A-Z\s/\-_]*(?:\:.*?)?)\]/g;
     const placeholders = [];

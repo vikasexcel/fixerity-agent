@@ -48,6 +48,28 @@ function addOrUpdateThread(list: ThreadMeta[], threadId: string, title: string):
   return [{ threadId, title: title || 'New conversation', updatedAt: now }, ...filtered];
 }
 
+/** Render job post text so **Label:** is bold and the value shows clearly (like in the reference image). */
+function renderJobPostWithValues(text: string) {
+  return text.split(/\r?\n/).map((line, i) => {
+    const match = line.match(/^(\*\*[^*]+\*\*)\s*(.*)$/);
+    if (match) {
+      const [, label, value] = match;
+      const labelClean = label.replace(/\*\*/g, '');
+      return (
+        <p key={i} className="text-xs text-foreground mb-1.5 last:mb-0">
+          <strong className="font-semibold">{labelClean}</strong>
+          {value ? ` ${value}` : ''}
+        </p>
+      );
+    }
+    return (
+      <p key={i} className="text-xs text-foreground mb-1.5 last:mb-0 whitespace-pre-wrap">
+        {line || '\u00A0'}
+      </p>
+    );
+  });
+}
+
 export default function BuyerAgentPage() {
   const { session, logout } = useAuth();
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -296,9 +318,9 @@ export default function BuyerAgentPage() {
               aria-label="Generated job post"
             >
               <h2 className="text-sm font-semibold mb-2">Job post</h2>
-              <pre className="text-xs overflow-x-auto whitespace-pre-wrap break-words font-sans">
-                {jobPost}
-              </pre>
+              <div className="overflow-x-auto font-sans space-y-0">
+                {renderJobPostWithValues(jobPost)}
+              </div>
               {placeholders && placeholders.length > 0 && (
                 <>
                   <h3 className="text-sm font-semibold mt-3 mb-1">Placeholders</h3>

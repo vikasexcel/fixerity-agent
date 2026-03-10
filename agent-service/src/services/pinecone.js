@@ -731,7 +731,7 @@ async function findMatchingSellers(jobPost) {
   const reranked = await rerankSellerProfiles(jobPost, searchResults, RERANK_TOP_N);
   const result = await scoreWithLLM(jobPost, reranked);
 
-  const MIN_MATCH_SCORE = 60;
+  const MIN_MATCH_SCORE = 25;
   const filtered = result
     .filter((s) => (s.matchScore ?? 0) > MIN_MATCH_SCORE)
     .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
@@ -1041,7 +1041,7 @@ async function findMatchingJobs(sellerProfile) {
   const reranked = await rerankJobs(sellerProfile, searchResults, RERANK_TOP_N);
   const result = await scoreJobsWithLLM(sellerProfile, reranked);
 
-  const MIN_MATCH_SCORE = 60;
+  const MIN_MATCH_SCORE = 25;
   const filtered = result
     .filter((job) => (job.matchScore ?? 0) > MIN_MATCH_SCORE)
     .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));

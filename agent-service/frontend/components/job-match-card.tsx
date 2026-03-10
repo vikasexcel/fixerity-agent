@@ -71,9 +71,9 @@ export function JobMatchCard({
             'rounded-md border px-2 py-0.5 text-xs font-medium',
             scoreColor(job.matchScore)
           )}
-          aria-label={`Match score: ${job.matchScore} out of 100`}
+          aria-label={`Match: ${job.matchScore}%`}
         >
-          {job.matchScore}
+          {job.matchScore}%
         </span>
       </header>
 
