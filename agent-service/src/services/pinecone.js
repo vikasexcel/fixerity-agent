@@ -435,8 +435,9 @@ async function embedSellerProfile(sellerProfile, threadId) {
 // ─── Seller search & rerank (for buyer agent) ────────────────────────────────
 
 const RERANK_MODEL = "bge-reranker-v2-m3";
-const SEARCH_TOP_K = 15;
+const SEARCH_TOP_K = 50;
 const RERANK_TOP_N = 5;
+const MIN_MATCH_SCORE = 25;
 
 const SELLER_MATCH_LOG_PREFIX = "[SellerMatch]";
 
@@ -720,7 +721,7 @@ async function findMatchingSellers(jobPost) {
   logLine("Job post length", (jobPost || "").length);
   logLine("Pipeline", "search → rerank → LLM score");
 
-  const searchResults = await searchSellerProfiles(jobPost, 10);
+  const searchResults = await searchSellerProfiles(jobPost, SEARCH_TOP_K);
   if (searchResults.length === 0) {
     logSection("FINAL – No sellers matched");
     logLine("Result", "[]");
@@ -728,19 +729,18 @@ async function findMatchingSellers(jobPost) {
     return [];
   }
 
-  const reranked = await rerankSellerProfiles(jobPost, searchResults, RERANK_TOP_N);
+  const reranked = await rerankSellerProfiles(jobPost, searchResults, searchResults.length);
   const result = await scoreWithLLM(jobPost, reranked);
 
-  const MIN_MATCH_SCORE = 25;
-  const filtered = result
-    .filter((s) => (s.matchScore ?? 0) > MIN_MATCH_SCORE)
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
+  const sorted = result
+    .slice()
+    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0))
+    .filter((s) => (s.matchScore ?? 0) > MIN_MATCH_SCORE);
 
-  logSection("4. FULL MATCH BREAKDOWN – Final ranked sellers (score > " + MIN_MATCH_SCORE + ")");
-  logLine("Total scored", result.length);
-  logLine("Shown (score > " + MIN_MATCH_SCORE + ")", filtered.length);
+  logSection("4. FULL MATCH BREAKDOWN – All sellers by score (descending)");
+  logLine("Total shown", sorted.length);
   console.log("");
-  filtered.forEach((s, i) => {
+  sorted.forEach((s, i) => {
     console.log(`  ┌─ Rank ${i + 1} ─────────────────────────────────`);
     logLine("  │ profileId", s.profileId);
     logLine("  │ sellerName", s.sellerName);
@@ -752,10 +752,10 @@ async function findMatchingSellers(jobPost) {
   });
 
   console.log("\n" + "═".repeat(60));
-  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – END (${filtered.length} sellers)`);
+  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – END (${sorted.length} sellers)`);
   console.log("═".repeat(60) + "\n");
 
-  return filtered;
+  return sorted;
 }
 
 // ─── Job search & rerank (for seller agent) ───────────────────────────────────
@@ -1030,7 +1030,7 @@ async function findMatchingJobs(sellerProfile) {
   logLine("Seller profile length", (sellerProfile || "").length);
   logLine("Pipeline", "search → rerank → LLM score");
 
-  const searchResults = await searchJobsForSeller(sellerProfile, 10);
+  const searchResults = await searchJobsForSeller(sellerProfile, SEARCH_TOP_K);
   if (searchResults.length === 0) {
     logJobSection("FINAL – No jobs matched");
     logLine("Result", "[]");
@@ -1038,19 +1038,18 @@ async function findMatchingJobs(sellerProfile) {
     return [];
   }
 
-  const reranked = await rerankJobs(sellerProfile, searchResults, RERANK_TOP_N);
+  const reranked = await rerankJobs(sellerProfile, searchResults, searchResults.length);
   const result = await scoreJobsWithLLM(sellerProfile, reranked);
 
-  const MIN_MATCH_SCORE = 25;
-  const filtered = result
-    .filter((job) => (job.matchScore ?? 0) > MIN_MATCH_SCORE)
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
+  const sorted = result
+    .slice()
+    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0))
+    .filter((job) => (job.matchScore ?? 0) > MIN_MATCH_SCORE);
 
-  logJobSection("4. FULL MATCH BREAKDOWN – Final ranked jobs (score > " + MIN_MATCH_SCORE + ")");
-  logLine("Total scored", result.length);
-  logLine("Shown (score > " + MIN_MATCH_SCORE + ")", filtered.length);
+  logJobSection("4. FULL MATCH BREAKDOWN – All jobs by score (descending)");
+  logLine("Total shown", sorted.length);
   console.log("");
-  filtered.forEach((job, i) => {
+  sorted.forEach((job, i) => {
     console.log(`  ┌─ Rank ${i + 1} ─────────────────────────────────`);
     logLine("  │ jobId", job.jobId);
     logLine("  │ jobTitle", truncate(job.jobTitle, 60));
@@ -1063,10 +1062,10 @@ async function findMatchingJobs(sellerProfile) {
   });
 
   console.log("\n" + "═".repeat(60));
-  console.log(`${JOB_MATCH_LOG_PREFIX} FIND MATCHING JOBS – END (${filtered.length} jobs)`);
+  console.log(`${JOB_MATCH_LOG_PREFIX} FIND MATCHING JOBS – END (${sorted.length} jobs)`);
   console.log("═".repeat(60) + "\n");
 
-  return filtered;
+  return sorted;
 }
 
 export {
