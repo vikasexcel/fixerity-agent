@@ -437,7 +437,6 @@ async function embedSellerProfile(sellerProfile, threadId) {
 const RERANK_MODEL = "bge-reranker-v2-m3";
 const SEARCH_TOP_K = 50;
 const RERANK_TOP_N = 5;
-const MIN_MATCH_SCORE = 25;
 
 const SELLER_MATCH_LOG_PREFIX = "[SellerMatch]";
 
@@ -734,8 +733,7 @@ async function findMatchingSellers(jobPost) {
 
   const sorted = result
     .slice()
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0))
-    .filter((s) => (s.matchScore ?? 0) > MIN_MATCH_SCORE);
+    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
 
   logSection("4. FULL MATCH BREAKDOWN – All sellers by score (descending)");
   logLine("Total shown", sorted.length);
@@ -1043,8 +1041,7 @@ async function findMatchingJobs(sellerProfile) {
 
   const sorted = result
     .slice()
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0))
-    .filter((job) => (job.matchScore ?? 0) > MIN_MATCH_SCORE);
+    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
 
   logJobSection("4. FULL MATCH BREAKDOWN – All jobs by score (descending)");
   logLine("Total shown", sorted.length);

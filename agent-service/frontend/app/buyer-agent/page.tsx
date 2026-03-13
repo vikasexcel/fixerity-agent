@@ -86,7 +86,13 @@ export default function BuyerAgentPage() {
   const [sellerDecisions, setSellerDecisions] = useState<
     Record<string, 'approved' | 'rejected' | 'contacted'>
   >({});
+  const [sellersPage, setSellersPage] = useState(1);
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
+
+  const MATCHES_PAGE_SIZE = 10;
+  const sellersTotalPages = Math.max(1, Math.ceil(matchedSellers.length / MATCHES_PAGE_SIZE));
+  const sellersStart = (sellersPage - 1) * MATCHES_PAGE_SIZE;
+  const paginatedSellers = matchedSellers.slice(sellersStart, sellersStart + MATCHES_PAGE_SIZE);
 
   const updateThreadList = useCallback((threadId: string, title: string) => {
     setThreadList((prev) => {
@@ -100,6 +106,10 @@ export default function BuyerAgentPage() {
     setThreadList(loadThreadList());
   }, []);
 
+  useEffect(() => {
+    setSellersPage(1);
+  }, [matchedSellers.length]);
+
   const startNewChat = useCallback(async () => {
     setError(null);
     setLoading(true);
@@ -109,6 +119,7 @@ export default function BuyerAgentPage() {
     setMatchedSellers([]);
     setMatchingStatus(null);
     setSellerDecisions({});
+    setSellersPage(1);
     try {
       const res = await startConversation();
       setThreadId(res.threadId);
@@ -361,11 +372,14 @@ export default function BuyerAgentPage() {
           {matchingStatus === 'found' && matchedSellers.length > 0 && (
             <div className="space-y-4 max-w-3xl" aria-label="Matched sellers">
               <h2 className="text-sm font-semibold">Recommended sellers</h2>
+              <p className="text-xs text-muted-foreground">
+                Showing {sellersStart + 1}–{Math.min(sellersStart + MATCHES_PAGE_SIZE, matchedSellers.length)} of {matchedSellers.length} (sorted by match score)
+              </p>
               <ul className="space-y-3 list-none p-0 m-0">
-                {matchedSellers.map((seller, index) => (
+                {paginatedSellers.map((seller, index) => (
                   <li key={seller.profileId}>
                     <SellerMatchCard
-                      rank={index + 1}
+                      rank={sellersStart + index + 1}
                       seller={seller}
                       onApprove={() =>
                         handleSellerDecision(seller.profileId, 'approved')
@@ -381,6 +395,32 @@ export default function BuyerAgentPage() {
                   </li>
                 ))}
               </ul>
+              {matchedSellers.length > MATCHES_PAGE_SIZE && (
+                <nav
+                  className="flex items-center justify-between gap-2 pt-2 border-t border-border"
+                  aria-label="Sellers pagination"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSellersPage((p) => Math.max(1, p - 1))}
+                    disabled={sellersPage <= 1}
+                    className="rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-sm text-muted-foreground">
+                    Page {sellersPage} of {sellersTotalPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSellersPage((p) => Math.min(sellersTotalPages, p + 1))}
+                    disabled={sellersPage >= sellersTotalPages}
+                    className="rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    Next
+                  </button>
+                </nav>
+              )}
             </div>
           )}
           {matchingStatus === 'found' && matchedSellers.length === 0 && (

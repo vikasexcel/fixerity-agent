@@ -60,7 +60,14 @@ export default function SellerAgentPage() {
   const [matchedJobs, setMatchedJobs] = useState<MatchedJob[] | null>(null);
   const [jobMatchingStatus, setJobMatchingStatus] = useState<'found' | 'error' | null>(null);
   const [jobDecisions, setJobDecisions] = useState<Record<string, 'interested' | 'skipped'>>({});
+  const [jobsPage, setJobsPage] = useState(1);
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
+
+  const MATCHES_PAGE_SIZE = 10;
+  const jobsList = matchedJobs ?? [];
+  const jobsTotalPages = Math.max(1, Math.ceil(jobsList.length / MATCHES_PAGE_SIZE));
+  const jobsStart = (jobsPage - 1) * MATCHES_PAGE_SIZE;
+  const paginatedJobs = jobsList.slice(jobsStart, jobsStart + MATCHES_PAGE_SIZE);
 
   const updateThreadList = useCallback((threadId: string, title: string) => {
     setThreadList((prev) => {
@@ -74,6 +81,10 @@ export default function SellerAgentPage() {
     setThreadList(loadThreadList());
   }, []);
 
+  useEffect(() => {
+    setJobsPage(1);
+  }, [jobsList.length]);
+
   const startNewChat = useCallback(async () => {
     setError(null);
     setLoading(true);
@@ -83,6 +94,7 @@ export default function SellerAgentPage() {
     setMatchedJobs(null);
     setJobMatchingStatus(null);
     setJobDecisions({});
+    setJobsPage(1);
     try {
       const res = await startConversation();
       setThreadId(res.threadId);
@@ -110,6 +122,7 @@ export default function SellerAgentPage() {
     setMatchedJobs(null);
     setJobMatchingStatus(null);
     setJobDecisions({});
+    setJobsPage(1);
     try {
       const state = await getThreadState(id);
       setThreadId(state.threadId);
@@ -309,14 +322,17 @@ export default function SellerAgentPage() {
               Finding the best jobs for your profile…
             </p>
           )}
-          {jobMatchingStatus === 'found' && matchedJobs && matchedJobs.length > 0 && (
+          {jobMatchingStatus === 'found' && jobsList.length > 0 && (
             <div className="space-y-3 max-w-3xl">
               <h2 className="text-sm font-semibold">Matched Jobs for Your Profile</h2>
+              <p className="text-xs text-muted-foreground">
+                Showing {jobsStart + 1}–{Math.min(jobsStart + MATCHES_PAGE_SIZE, jobsList.length)} of {jobsList.length} (sorted by match score)
+              </p>
               <ul className="space-y-3 list-none p-0 m-0">
-                {matchedJobs.map((job, i) => (
+                {paginatedJobs.map((job, i) => (
                   <li key={job.jobId}>
                     <JobMatchCard
-                      rank={i + 1}
+                      rank={jobsStart + i + 1}
                       job={job}
                       onInterested={() => setJobDecisions((prev) => ({ ...prev, [job.jobId]: 'interested' }))}
                       onSkip={() => setJobDecisions((prev) => ({ ...prev, [job.jobId]: 'skipped' }))}
@@ -325,6 +341,32 @@ export default function SellerAgentPage() {
                   </li>
                 ))}
               </ul>
+              {jobsList.length > MATCHES_PAGE_SIZE && (
+                <nav
+                  className="flex items-center justify-between gap-2 pt-2 border-t border-border"
+                  aria-label="Jobs pagination"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setJobsPage((p) => Math.max(1, p - 1))}
+                    disabled={jobsPage <= 1}
+                    className="rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-sm text-muted-foreground">
+                    Page {jobsPage} of {jobsTotalPages}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setJobsPage((p) => Math.min(jobsTotalPages, p + 1))}
+                    disabled={jobsPage >= jobsTotalPages}
+                    className="rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium hover:bg-muted disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    Next
+                  </button>
+                </nav>
+              )}
             </div>
           )}
           {jobMatchingStatus === 'found' && (!matchedJobs || matchedJobs.length === 0) && (
