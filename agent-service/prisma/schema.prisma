@@ -64,6 +64,8 @@ model SellerThreadState {
   profileAnswers      Json
   sellerProfile       String?  @db.Text
   placeholders        Json
+  matchedJobs         Json?
+  matchingStatus      String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 }

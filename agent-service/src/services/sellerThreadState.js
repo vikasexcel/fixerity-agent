@@ -52,6 +52,8 @@ export async function saveSellerThreadState(threadId, graph) {
       profileAnswers: values.profileAnswers ?? {},
       sellerProfile: typeof values.sellerProfile === "string" ? values.sellerProfile : null,
       placeholders: values.placeholders ?? [],
+      matchedJobs: Array.isArray(values.matchedJobs) ? values.matchedJobs : null,
+      matchingStatus: values.jobMatchingStatus ?? null,
     };
 
     await prisma.sellerThreadState.upsert({
@@ -102,6 +104,8 @@ export async function loadSellerThreadStateIntoGraph(threadId, graph) {
         profileAnswers: record.profileAnswers ?? {},
         sellerProfile: record.sellerProfile ?? null,
         placeholders: record.placeholders ?? [],
+        matchedJobs: Array.isArray(record.matchedJobs) ? record.matchedJobs : null,
+        jobMatchingStatus: record.matchingStatus ?? null,
       }
     );
 

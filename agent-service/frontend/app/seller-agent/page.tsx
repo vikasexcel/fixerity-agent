@@ -370,9 +370,12 @@ export default function SellerAgentPage() {
             </div>
           )}
           {jobMatchingStatus === 'found' && (!matchedJobs || matchedJobs.length === 0) && (
-            <p className="text-sm text-muted-foreground max-w-3xl" role="status">
-              We weren&apos;t able to find jobs for you right now.
-            </p>
+            <div className="max-w-3xl space-y-2 rounded-lg border border-border bg-card p-4" role="status">
+              <p className="text-sm font-medium">No matches yet</p>
+              <p className="text-sm text-muted-foreground">
+                We searched all available jobs against your profile — none fit well right now. Your profile is live and visible to buyers. New jobs are added regularly — check back later, or update your profile to broaden your options.
+              </p>
+            </div>
           )}
         </section>
 

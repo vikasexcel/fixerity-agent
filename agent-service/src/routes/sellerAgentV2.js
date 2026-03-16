@@ -30,6 +30,14 @@ function cleanMessage(content) {
 }
 
 /**
+ * Filter out zero-score matches before returning to the client (matches buyer pattern).
+ */
+function getVisibleMatchedJobs(matchedJobs) {
+  if (!Array.isArray(matchedJobs)) return matchedJobs;
+  return matchedJobs.filter((job) => Number(job?.matchScore) > 0);
+}
+
+/**
  * POST /seller-agentv2/start
  * Start a new conversation. The seller provides their initial description of what they offer.
  * Body: { message } (optional — if omitted, a generic prompt is used)
@@ -133,6 +141,12 @@ router.post("/chat", async (req, res) => {
       response.sellerProfile = result.sellerProfile;
       response.placeholders = result.placeholders;
     }
+    if (result.matchedJobs != null) {
+      response.matchedJobs = getVisibleMatchedJobs(result.matchedJobs);
+    }
+    if (result.jobMatchingStatus != null) {
+      response.jobMatchingStatus = result.jobMatchingStatus;
+    }
 
     res.json(response);
   } catch (error) {
@@ -179,6 +193,12 @@ router.get("/state/:threadId", async (req, res) => {
     if (state.values.sellerProfile) {
       response.sellerProfile = state.values.sellerProfile;
       response.placeholders = state.values.placeholders;
+    }
+    if (state.values.matchedJobs != null) {
+      response.matchedJobs = getVisibleMatchedJobs(state.values.matchedJobs);
+    }
+    if (state.values.jobMatchingStatus != null) {
+      response.jobMatchingStatus = state.values.jobMatchingStatus;
     }
 
     res.json(response);

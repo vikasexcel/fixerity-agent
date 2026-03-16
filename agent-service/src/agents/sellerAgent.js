@@ -3,6 +3,7 @@ import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
 import { prisma } from "../lib/prisma.js";
 import { buildStructuredSellerProfile } from "../services/sellerMatching.js";
+import { scoreJobsForSeller } from "../services/sellerJobMatching.js";
 import { SELLER_PROFILE_QUESTIONS, SELLER_PROFILE_QUESTION_IDS } from "../data/sellerProfileQuestions.js";
 
 const LOG_TAG = "[SellerAgent]";
@@ -604,6 +605,25 @@ async function createProfileNode(state, config) {
     }
   }
 
+  let matchedJobs = [];
+  let jobMatchingStatus = null;
+  if (sellerProfile) {
+    try {
+      const result = await scoreJobsForSeller(sellerProfile);
+      matchedJobs = result.matchedJobs ?? [];
+      jobMatchingStatus = result.jobMatchingStatus ?? "found";
+      console.log(LOG_TAG, "createProfileNode: job matching complete", {
+        matchedCount: matchedJobs.length,
+        jobMatchingStatus,
+      });
+    } catch (err) {
+      console.error(LOG_TAG, "createProfileNode: job matching failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      jobMatchingStatus = "error";
+    }
+  }
+
   const model = createModel();
   const confirmPrompt = `The seller has confirmed and their profile has been created successfully. Generate a brief, friendly confirmation message. Tell them their profile is now live and clients will be able to find them. Keep it short and warm (2-3 sentences max). Do NOT include the full profile again.`;
   const response = await model.invoke([new SystemMessage(confirmPrompt)]);
@@ -613,6 +633,8 @@ async function createProfileNode(state, config) {
   return {
     messages: [new AIMessage(response.content)],
     status: "done",
+    matchedJobs,
+    jobMatchingStatus,
   };
 }
 
