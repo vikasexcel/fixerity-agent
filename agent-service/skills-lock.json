@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "prisma-expert": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "1f638daa21876d30497d5474c55fa3c67044708f03554093c6f4cc9a7dd5bc33"
+    }
+  }
+}

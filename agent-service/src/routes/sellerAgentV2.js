@@ -3,6 +3,10 @@ import { v4 as uuidv4 } from "uuid";
 import { HumanMessage } from "@langchain/core/messages";
 import { buildSellerGraph } from "../graph/sellerGraph.js";
 import { PROFILE_MARKER } from "../agents/sellerAgent.js";
+import {
+  saveSellerThreadState,
+  loadSellerThreadStateIntoGraph,
+} from "../services/sellerThreadState.js";
 
 const router = express.Router();
 
@@ -49,6 +53,8 @@ router.post("/start", async (req, res) => {
 
     const lastMessage = result.messages[result.messages.length - 1];
 
+    await saveSellerThreadState(threadId, graph);
+
     console.log(LOG_TAG, "start result", { threadId, status: result.status });
 
     res.json({
@@ -79,7 +85,14 @@ router.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const currentState = await getGraphState(threadId);
+    let currentState = await getGraphState(threadId);
+
+    if (!currentState?.values) {
+      const restored = await loadSellerThreadStateIntoGraph(threadId, graph);
+      if (restored) {
+        currentState = await getGraphState(threadId);
+      }
+    }
     const currentStatus = currentState?.values?.status;
 
     console.log(LOG_TAG, "chat", { threadId, statusBefore: currentStatus });
@@ -106,6 +119,8 @@ router.post("/chat", async (req, res) => {
 
     const lastMessage = result.messages[result.messages.length - 1];
 
+    await saveSellerThreadState(threadId, graph);
+
     console.log(LOG_TAG, "chat result", { threadId, statusAfter: result.status });
 
     const response = {
@@ -117,15 +132,6 @@ router.post("/chat", async (req, res) => {
     if (result.sellerProfile) {
       response.sellerProfile = result.sellerProfile;
       response.placeholders = result.placeholders;
-    }
-    if (result.matchedJobs != null) {
-      response.matchedJobs = result.matchedJobs;
-    }
-    if (result.jobMatchingStatus != null) {
-      response.jobMatchingStatus = result.jobMatchingStatus;
-    }
-    if (result.embeddingId != null) {
-      response.embeddingId = result.embeddingId;
     }
 
     res.json(response);
@@ -143,9 +149,14 @@ router.get("/state/:threadId", async (req, res) => {
   try {
     const { threadId } = req.params;
 
-    const state = await graph.getState({
-      configurable: { thread_id: threadId },
-    });
+    let state = await getGraphState(threadId);
+
+    if (!state?.values) {
+      const restored = await loadSellerThreadStateIntoGraph(threadId, graph);
+      if (restored) {
+        state = await getGraphState(threadId);
+      }
+    }
 
     if (!state || !state.values || !state.values.messages) {
       return res.status(404).json({ error: "Thread not found" });
@@ -168,18 +179,6 @@ router.get("/state/:threadId", async (req, res) => {
     if (state.values.sellerProfile) {
       response.sellerProfile = state.values.sellerProfile;
       response.placeholders = state.values.placeholders;
-    }
-    if (state.values.matchedJobs != null) {
-      response.matchedJobs = state.values.matchedJobs;
-    }
-    if (state.values.jobMatchingStatus != null) {
-      response.jobMatchingStatus = state.values.jobMatchingStatus;
-    }
-    if (state.values.embeddingId != null) {
-      response.embeddingId = state.values.embeddingId;
-    }
-    if (state.values.profileMetadata != null) {
-      response.profileMetadata = state.values.profileMetadata;
     }
 
     res.json(response);

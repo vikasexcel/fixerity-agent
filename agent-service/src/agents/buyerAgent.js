@@ -1,7 +1,9 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedJobPost, findMatchingSellers } from "../services/pinecone.js";
+import { extractMetadata } from "../services/pinecone.js";
+import { prisma } from "../lib/prisma.js";
+import { cleanJobPostText, scoreSellersForJob } from "../services/sellerMatching.js";
 import { PROFILE_QUESTIONS, PROFILE_QUESTION_IDS } from "../data/profileQuestions.js";
 
 const LOG_TAG = "[BuyerAgent]";
@@ -395,8 +397,8 @@ function routeAfterReview(state) {
 
 /**
  * Node: createJob
- * Embeds the finalized job post in Pinecone and marks the job as done.
- * The buyer sees a confirmation message — they don't know about the embedding.
+ * Persists the finalized job post in Postgres (Job table) and marks the job as done.
+ * The buyer sees a confirmation message — they don't know about the persistence details.
  * @param {object} state - Graph state
  * @param {object} [config] - Run config (from graph.invoke); holds configurable.thread_id
  */
@@ -412,38 +414,68 @@ async function createJobNode(state, config) {
     state.messages?.[0]?.id ??
     "unknown";
 
-  let embeddingId = null;
-  let jobMetadata = null;
-
-  try {
-    const result = await embedJobPost(state.jobPost, threadId);
-    embeddingId = result.embeddingId;
-    jobMetadata = result.jobMetadata;
-    console.log(LOG_TAG, "createJobNode embed success", {
-      embeddingId,
-      chunkCount: result.chunkCount,
-    });
-  } catch (err) {
-    console.error(LOG_TAG, "createJobNode embed failed (non-blocking):", err.message);
-  }
+  const rawJobPost = state.jobPost ?? "";
+  const jobPost = typeof rawJobPost === "string" ? rawJobPost.trim() : "";
 
   let matchedSellers = null;
   let matchingStatus = null;
-  if (state.jobPost && state.jobPost.trim().length > 0) {
-    console.log(LOG_TAG, "createJobNode starting seller matching", {
-      jobPostLength: state.jobPost.trim().length,
+
+  if (!jobPost) {
+    console.warn(LOG_TAG, "createJobNode: jobPost is empty, skipping Job insert", {
       threadId,
     });
+  } else {
+    console.log(LOG_TAG, "[BuyerMatch] Step 1/7 Persist job", {
+      threadId,
+      jobPostLength: jobPost.length,
+    });
+
+    const cleanText = cleanJobPostText(jobPost);
+    const jobMetadata = extractMetadata(cleanText) ?? {};
+
     try {
-      matchedSellers = await findMatchingSellers(state.jobPost);
-      matchingStatus = matchedSellers.length > 0 ? "found" : "found";
-      console.log(LOG_TAG, "createJobNode seller matching complete", {
-        matchingStatus,
-        matchedCount: matchedSellers?.length ?? 0,
+      const created = await prisma.job.create({
+        data: {
+          threadId,
+          jobPost: cleanText,
+          jobMetadata,
+          status: "created",
+        },
       });
+
+      console.log(LOG_TAG, "createJobNode: Job persisted successfully", {
+        jobId: created.id,
+        threadId: created.threadId,
+        status: created.status,
+      });
+
+      try {
+        console.log(LOG_TAG, "[BuyerMatch] Step 2/7 Build job scoring payload", {
+          threadId,
+        });
+        const { matchedSellers: scored } = await scoreSellersForJob(cleanText);
+        matchedSellers = scored;
+        matchingStatus = "found";
+        console.log(LOG_TAG, "[BuyerMatch] Step 7/7 Persist state + return response", {
+          threadId,
+          matchedCount: matchedSellers.length,
+        });
+      } catch (err) {
+        console.error(
+          LOG_TAG,
+          "[BuyerMatch] Matching failed, returning error status",
+          {
+            threadId,
+            error: err instanceof Error ? err.message : String(err),
+          }
+        );
+        matchingStatus = "error";
+      }
     } catch (err) {
-      console.error(LOG_TAG, "createJobNode findMatchingSellers failed (non-blocking):", err.message);
-      matchingStatus = "error";
+      console.error(LOG_TAG, "createJobNode: failed to persist Job", {
+        threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -453,16 +485,25 @@ async function createJobNode(state, config) {
     new SystemMessage(confirmPrompt),
   ]);
 
-  console.log(LOG_TAG, "createJobNode done", { status: "done" });
+  console.log(LOG_TAG, "createJobNode done", {
+    status: "done",
+    hasMatches: Array.isArray(matchedSellers) ? matchedSellers.length : 0,
+    matchingStatus,
+  });
 
-  return {
+  const result = {
     messages: [new AIMessage(response.content)],
     status: "done",
-    embeddingId: embeddingId,
-    jobMetadata: jobMetadata,
-    matchedSellers,
-    matchingStatus,
   };
+
+  if (matchedSellers != null) {
+    result.matchedSellers = matchedSellers;
+  }
+  if (matchingStatus != null) {
+    result.matchingStatus = matchingStatus;
+  }
+
+  return result;
 }
 
 export {

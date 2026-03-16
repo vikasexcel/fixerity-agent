@@ -1,0 +1,69 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Job {
+  id          String   @id @default(cuid())
+  threadId    String
+  jobPost     String   @db.Text
+  jobMetadata Json
+  status      String   @default("created")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([threadId])
+}
+
+model BuyerThreadState {
+  id                 String   @id @default(cuid())
+  threadId           String   @unique
+  status             String
+  messages           Json
+  questionCount      Int
+  domainQuestionCount Int
+  domainPhaseComplete Boolean
+  profileAnswers     Json
+  jobPost            String?  @db.Text
+  placeholders       Json
+  sellerDecisions    Json
+  matchedSellers     Json?
+  matchingStatus     String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model SellerProfile {
+  id             String   @id @default(cuid())
+  threadId       String
+  sellerProfile  String   @db.Text
+  profileMetadata Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([threadId])
+}
+
+model SellerThreadState {
+  id                  String   @id @default(cuid())
+  threadId            String   @unique
+  status              String
+  messages            Json
+  questionCount       Int
+  domainQuestionCount Int
+  domainPhaseComplete Boolean
+  profileAnswers      Json
+  sellerProfile       String?  @db.Text
+  placeholders        Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}

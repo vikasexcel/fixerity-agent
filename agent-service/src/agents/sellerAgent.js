@@ -1,7 +1,8 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedSellerProfile, findMatchingJobs } from "../services/pinecone.js";
+import { prisma } from "../lib/prisma.js";
+import { buildStructuredSellerProfile } from "../services/sellerMatching.js";
 import { SELLER_PROFILE_QUESTIONS, SELLER_PROFILE_QUESTION_IDS } from "../data/sellerProfileQuestions.js";
 
 const LOG_TAG = "[SellerAgent]";
@@ -192,19 +193,63 @@ function buildProfileStateSummary(profileAnswers, domainPhaseComplete = false, d
   return "PROFILE STATE:\n" + lines.join("\n");
 }
 
+function getMissingProfileQuestionIds(profileAnswers = {}) {
+  return SELLER_PROFILE_QUESTION_IDS.filter((id) => profileAnswers[id] == null);
+}
+
+function getProfileQuestionById(questionId) {
+  return SELLER_PROFILE_QUESTIONS.find((question) => question.id === questionId) ?? null;
+}
+
+async function generateMissingProfileQuestion(model, messages, profileAnswers, questionId) {
+  const question = getProfileQuestionById(questionId);
+  if (!question) return null;
+
+  const prompt = `You are continuing a seller onboarding conversation.
+
+The seller profile was generated too early, so you must resume the interview by asking exactly ONE missing profile question.
+
+Missing question:
+- id: ${question.id}
+- label: ${question.label}
+- short prompt intent: ${question.shortPrompt ?? "N/A"}
+- exact question intent: ${question.exactQuestion ?? "N/A"}
+
+Current profile state:
+${buildProfileStateSummary(profileAnswers, true, 0)}
+
+Rules:
+- Ask exactly one question in one sentence.
+- Do NOT generate the profile.
+- Do NOT mention internal phases, missing fields, IDs, or that anything went wrong.
+- Phrase the question naturally based on the conversation history.
+- If the seller already gave part of the answer, ask only for the missing detail.
+- Return only the question text.`;
+
+  try {
+    const response = await model.invoke([new SystemMessage(prompt), ...messages]);
+    const content = typeof response.content === "string" ? response.content.trim() : "";
+    if (content) return content;
+  } catch (err) {
+    console.error(LOG_TAG, "generateMissingProfileQuestion error:", err.message);
+  }
+
+  return question.shortPrompt ?? question.exactQuestion ?? null;
+}
+
 /**
  * Build a question-intent reference for the classifier so it can match natural phrasings
- * to the correct profile question ID (fixes under-recognition of "languages" and "additionalInfo").
+ * to the correct profile question ID.
  * @returns {string}
  */
 function buildClassifierQuestionIntents() {
   const lines = SELLER_PROFILE_QUESTIONS.map((q) => {
-    const intent = [q.label, q.shortPrompt].filter(Boolean).join(" — ");
+    const intent = [q.label, q.shortPrompt, q.exactQuestion].filter(Boolean).join(" — ");
     return `- ${q.id}: ${intent}`;
   });
-  // Explicit intent hints for the two most commonly missed questions (natural phrasings)
+
   const hints = `
-SPECIAL: Map to "languages" if the AI asked about languages spoken, communication languages, speaking other languages, serving non-English-speaking clients, or what languages the seller uses. Map to "additionalInfo" if the AI asked a catch-all like "anything else?", "what else should clients know?", "one last thing?", "what sets you apart?", or "any final thoughts for clients?".`;
+SPECIAL: Map to "languages" if the AI asked about languages spoken, communication languages, speaking other languages, serving non-English-speaking clients, or what languages the seller uses. Map to "additionalInfo" if the AI asked a catch-all like "anything else?", "what else should clients know?", "one last thing?", "what sets you apart?", or "any final thoughts for clients?". Map to "projectArrangement" if the AI asked whether this is full-time work, a side business, or part-time. Map to "businessStructure" if the AI asked whether the seller operates as an individual, company, corporation, LLC, or partnership. Map to "paymentMethods" if the AI asked how clients can pay, accepted payment options, or whether they take cash/cards/apps. Map to "reviews" if the AI asked about Google/Yelp/online reviews, testimonials, or ratings.`;
   return "Profile questions (match the AI's question to exactly one ID by topic):\n" + lines.join("\n") + hints;
 }
 
@@ -248,7 +293,7 @@ Last AI message:\n${lastAiContent.slice(0, 1500)}\n\nUser reply:\n${lastUserCont
     if (parsed.questionId == null || parsed.value == null) return null;
     if (!SELLER_PROFILE_QUESTION_IDS.includes(parsed.questionId)) return null;
     const value = parsed.value === "skip" ? "skip" : String(parsed.value).trim();
-    return { questionId: parsed.questionId, value };
+    return { questionId: parsed.questionId, value: value || "skip" };
   } catch (err) {
     console.error(LOG_TAG, "extractProfileUpdate error:", err.message);
     return null;
@@ -310,24 +355,37 @@ async function gatherSellerInfoNode(state) {
       }
     }
 
-    const answeredOrSkipped = Object.keys(effectiveProfileAnswers).length;
-    const allCovered = answeredOrSkipped >= SELLER_PROFILE_QUESTION_IDS.length;
+    const missingQuestionIds = getMissingProfileQuestionIds(effectiveProfileAnswers);
+    const answeredOrSkipped = SELLER_PROFILE_QUESTION_IDS.length - missingQuestionIds.length;
+    const allCovered = missingQuestionIds.length === 0;
 
     if (!allCovered) {
+      const nextMissingQuestionId = missingQuestionIds[0];
+      const recoveryQuestion =
+        (await generateMissingProfileQuestion(
+          model,
+          state.messages || [],
+          effectiveProfileAnswers,
+          nextMissingQuestionId
+        )) ||
+        "Could you tell me a bit more about that?";
+
       console.log(LOG_TAG, "gatherSellerInfoNode profile generated too early", {
         answeredOrSkipped,
         required: SELLER_PROFILE_QUESTION_IDS.length,
+        nextMissingQuestionId,
         message: "Profile generated before all questions answered - continuing to gather",
       });
-      // Merge the current-turn extraction into state so we don't lose it, then continue gathering
+
       const profileAnswersUpdate =
         Object.keys(effectiveProfileAnswers).length > Object.keys(currentProfileAnswers).length
           ? Object.fromEntries(
               Object.entries(effectiveProfileAnswers).filter(([id]) => currentProfileAnswers[id] == null)
             )
           : null;
+
       return {
-        messages: [new AIMessage(content)],
+        messages: [new AIMessage(recoveryQuestion)],
         status: "gathering",
         questionCount: state.questionCount + 1,
         ...(profileAnswersUpdate && Object.keys(profileAnswersUpdate).length > 0 ? { profileAnswers: profileAnswersUpdate } : {}),
@@ -387,13 +445,17 @@ async function gatherSellerInfoNode(state) {
         profileAnswersUpdate = { [extracted.questionId]: extracted.value };
         console.log(LOG_TAG, "gatherSellerInfoNode profile update", extracted);
       }
-    } else {
+    } else if (!currentDomainPhaseComplete) {
       console.log(LOG_TAG, "last exchange: domain question", {
         counted: true,
         domainQuestionCountAfter: currentDomainCount + 1,
       });
-      // Last exchange was a domain question (no profile match) — count it
+
       domainQuestionCountIncrement = 1;
+    } else {
+      console.warn(LOG_TAG, "last exchange in profile phase was not classified; keeping Phase 2", {
+        questionCount: state.questionCount,
+      });
     }
   }
   const newDomainCount = currentDomainCount + domainQuestionCountIncrement;
@@ -495,7 +557,7 @@ function routeAfterReview(state) {
 
 /**
  * Node: createProfile
- * Embeds the seller profile in Pinecone (namespace seller-profile) and marks done.
+ * Persists the confirmed seller profile in Postgres and marks done.
  */
 async function createProfileNode(state, config) {
   console.log(LOG_TAG, "createProfileNode entry");
@@ -507,34 +569,38 @@ async function createProfileNode(state, config) {
     state.messages?.[0]?.id ??
     "unknown";
 
-  let embeddingId = null;
-  let profileMetadata = null;
+  const rawProfile = state.sellerProfile ?? "";
+  const sellerProfile = typeof rawProfile === "string" ? rawProfile.trim() : "";
 
-  try {
-    const result = await embedSellerProfile(state.sellerProfile, threadId);
-    embeddingId = result.embeddingId;
-    profileMetadata = result.profileMetadata;
-    console.log(LOG_TAG, "createProfileNode embed success", {
-      embeddingId,
-      chunkCount: result.chunkCount,
+  if (!sellerProfile) {
+    console.warn(LOG_TAG, "createProfileNode: sellerProfile is empty, skipping SellerProfile insert", {
+      threadId,
     });
-  } catch (err) {
-    console.error(LOG_TAG, "createProfileNode embed failed (non-blocking):", err.message);
-  }
+  } else {
+    console.log(LOG_TAG, "createProfileNode: preparing to persist SellerProfile", {
+      threadId,
+      sellerProfileLength: sellerProfile.length,
+    });
 
-  let matchedJobs = null;
-  let jobMatchingStatus = null;
-  if (state.sellerProfile && state.sellerProfile.trim().length > 0) {
     try {
-      matchedJobs = await findMatchingJobs(state.sellerProfile);
-      jobMatchingStatus = "found";
-      console.log(LOG_TAG, "createProfileNode job matching complete", {
-        jobMatchingStatus,
-        matchedCount: matchedJobs?.length ?? 0,
+      const profileMetadata = buildStructuredSellerProfile(sellerProfile);
+      const created = await prisma.sellerProfile.create({
+        data: {
+          threadId,
+          sellerProfile,
+          profileMetadata,
+        },
+      });
+
+      console.log(LOG_TAG, "createProfileNode: SellerProfile persisted successfully", {
+        sellerProfileId: created.id,
+        threadId: created.threadId,
       });
     } catch (err) {
-      console.error(LOG_TAG, "createProfileNode findMatchingJobs failed (non-blocking):", err.message);
-      jobMatchingStatus = "error";
+      console.error(LOG_TAG, "createProfileNode: failed to persist SellerProfile", {
+        threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -547,10 +613,6 @@ async function createProfileNode(state, config) {
   return {
     messages: [new AIMessage(response.content)],
     status: "done",
-    embeddingId,
-    profileMetadata,
-    matchedJobs,
-    jobMatchingStatus,
   };
 }
 

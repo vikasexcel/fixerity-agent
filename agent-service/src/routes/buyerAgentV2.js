@@ -2,6 +2,10 @@ import express from "express";
 import { v4 as uuidv4 } from "uuid";
 import { HumanMessage } from "@langchain/core/messages";
 import { buildBuyerGraph } from "../graph/buyerGraph.js";
+import {
+  saveBuyerThreadState,
+  loadBuyerThreadStateIntoGraph,
+} from "../services/buyerThreadState.js";
 
 const router = express.Router();
 
@@ -15,6 +19,11 @@ const JOB_POST_MARKER = "---JOB_POST_READY---";
  */
 function cleanMessage(content) {
   return content.replace(JOB_POST_MARKER, "").trim();
+}
+
+function getVisibleMatchedSellers(matchedSellers) {
+  if (!Array.isArray(matchedSellers)) return matchedSellers;
+  return matchedSellers.filter((seller) => Number(seller?.matchScore) > 0);
 }
 
 /**
@@ -45,6 +54,8 @@ router.post("/start", async (req, res) => {
     );
 
     const lastMessage = result.messages[result.messages.length - 1];
+
+    await saveBuyerThreadState(threadId, graph);
 
     res.json({
       threadId,
@@ -84,7 +95,15 @@ router.post("/chat", async (req, res) => {
     }
 
     // Check current state to see if we're at an interrupt point
-    const currentState = await getGraphState(threadId);
+    let currentState = await getGraphState(threadId);
+
+    if (!currentState?.values) {
+      // Try to restore from persisted thread state if graph has no memory (e.g. after restart)
+      const restored = await loadBuyerThreadStateIntoGraph(threadId, graph);
+      if (restored) {
+        currentState = await getGraphState(threadId);
+      }
+    }
     const currentStatus = currentState?.values?.status;
 
     let result;
@@ -113,6 +132,8 @@ router.post("/chat", async (req, res) => {
 
     const lastMessage = result.messages[result.messages.length - 1];
 
+    await saveBuyerThreadState(threadId, graph);
+
     const response = {
       threadId,
       message: cleanMessage(lastMessage.content),
@@ -126,7 +147,7 @@ router.post("/chat", async (req, res) => {
     }
 
     if (result.matchedSellers != null) {
-      response.matchedSellers = result.matchedSellers;
+      response.matchedSellers = getVisibleMatchedSellers(result.matchedSellers);
     }
     if (result.matchingStatus != null) {
       response.matchingStatus = result.matchingStatus;
@@ -147,7 +168,14 @@ router.get("/state/:threadId", async (req, res) => {
   try {
     const { threadId } = req.params;
 
-    const state = await getGraphState(threadId);
+    let state = await getGraphState(threadId);
+
+    if (!state?.values) {
+      const restored = await loadBuyerThreadStateIntoGraph(threadId, graph);
+      if (restored) {
+        state = await getGraphState(threadId);
+      }
+    }
 
     if (!state || !state.values || !state.values.messages) {
       return res.status(404).json({ error: "Thread not found" });
@@ -170,7 +198,7 @@ router.get("/state/:threadId", async (req, res) => {
       response.placeholders = state.values.placeholders;
     }
     if (state.values.matchedSellers != null) {
-      response.matchedSellers = state.values.matchedSellers;
+      response.matchedSellers = getVisibleMatchedSellers(state.values.matchedSellers);
     }
     if (state.values.matchingStatus != null) {
       response.matchingStatus = state.values.matchingStatus;

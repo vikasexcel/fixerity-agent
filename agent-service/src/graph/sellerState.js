@@ -42,26 +42,6 @@ const SellerAgentState = Annotation.Root({
     reducer: (prev, next) => (next ? { ...prev, ...next } : prev),
     default: () => ({}),
   }),
-  // Pinecone vector ID after embedding (null until embedded)
-  embeddingId: Annotation({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
-  // Structured metadata for the embedded profile (for embedding)
-  profileMetadata: Annotation({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
-  // Matched jobs for seller (after profile confirmed)
-  matchedJobs: Annotation({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
-  // "found" | "error" | null
-  jobMatchingStatus: Annotation({
-    reducer: (_prev, next) => next,
-    default: () => null,
-  }),
 });
 
 export { SellerAgentState };
