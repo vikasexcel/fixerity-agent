@@ -50,6 +50,13 @@ function addOrUpdateThread(list: ThreadMeta[], threadId: string, title: string):
 
 /** Render job post text so **Label:** is bold and the value shows clearly (like in the reference image). */
 function renderJobPostWithValues(text: string) {
+  if (!text || !text.trim()) {
+    return (
+      <p className="text-xs text-destructive mb-1.5 whitespace-pre-wrap">
+        Job post was empty. Please ask the assistant to regenerate the post.
+      </p>
+    );
+  }
   return text.split(/\r?\n/).map((line, i) => {
     const match = line.match(/^(\*\*[^*]+\*\*)\s*(.*)$/);
     if (match) {
@@ -323,7 +330,7 @@ export default function BuyerAgentPage() {
               Review the job post below. Reply to confirm or ask for changes.
             </p>
           )}
-          {jobPost && (
+          {jobPost != null && (
             <article
               className="rounded-lg border border-border bg-card p-4 max-w-3xl"
               aria-label="Generated job post"

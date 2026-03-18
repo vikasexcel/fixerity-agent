@@ -7,6 +7,7 @@ import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 const INDEX_NAME = "fixerity-agent";
 const NAMESPACE = "seller-jobs";
 const SELLER_PROFILE_NAMESPACE = "seller-profile";
+const CATEGORIES_NAMESPACE = process.env.PINECONE_CATEGORIES_NAMESPACE || "categories";
 const EMBEDDING_MODEL = "text-embedding-3-large";
 const EMBEDDING_DIMENSIONS = 1024;
 
@@ -208,6 +209,21 @@ function extractSellerMetadata(profileText) {
   return metadata;
 }
 
+function buildTaxonomyMetadata(taxonomy = {}) {
+  const normalized = {
+    categoryId: taxonomy.categoryId ?? taxonomy.category?.id,
+    categoryName: taxonomy.categoryName ?? taxonomy.category?.name,
+    subcategoryId: taxonomy.subcategoryId ?? taxonomy.subcategory?.id,
+    subcategoryName: taxonomy.subcategoryName ?? taxonomy.subcategory?.name,
+    serviceId: taxonomy.serviceId ?? taxonomy.service?.id,
+    serviceName: taxonomy.serviceName ?? taxonomy.service?.name,
+  };
+
+  return Object.fromEntries(
+    Object.entries(normalized).filter(([, value]) => value != null && String(value).trim() !== "")
+  );
+}
+
 // ─── Embedding ───────────────────────────────────────────────────────────────
 
 /**
@@ -230,9 +246,10 @@ async function generateEmbeddings(texts) {
  *
  * @param {string} jobPost – The full job post text
  * @param {string} threadId – The conversation thread ID (used for grouping)
+ * @param {object} [taxonomy={}] – Optional normalized taxonomy for the job
  * @returns {{ embeddingId: string|null, jobMetadata: object, chunkCount: number }}
  */
-async function embedJobPost(jobPost, threadId) {
+async function embedJobPost(jobPost, threadId, taxonomy = {}) {
   const log = (msg, data = {}) =>
     console.log("[Pinecone embedJobPost]", msg, Object.keys(data).length ? data : "");
 
@@ -250,7 +267,10 @@ async function embedJobPost(jobPost, threadId) {
   log("Starting embed", { jobPostLength: trimmedPost.length, threadId });
 
   const jobId = uuidv4();
-  const metadata = extractMetadata(jobPost);
+  const metadata = {
+    ...extractMetadata(jobPost),
+    ...buildTaxonomyMetadata(taxonomy),
+  };
 
   // Add standard metadata fields
   metadata.jobId = jobId;
@@ -335,9 +355,10 @@ async function embedJobPost(jobPost, threadId) {
  *
  * @param {string} sellerProfile – The full seller profile text
  * @param {string} threadId – The conversation thread ID (used for grouping)
+ * @param {object} [taxonomy={}] – Optional normalized taxonomy for the seller profile
  * @returns {{ embeddingId: string|null, profileMetadata: object, chunkCount: number }}
  */
-async function embedSellerProfile(sellerProfile, threadId) {
+async function embedSellerProfile(sellerProfile, threadId, taxonomy = {}) {
   const log = (msg, data = {}) =>
     console.log("[Pinecone embedSellerProfile]", msg, Object.keys(data).length ? data : "");
 
@@ -360,7 +381,10 @@ async function embedSellerProfile(sellerProfile, threadId) {
   });
 
   const profileId = uuidv4();
-  const metadata = extractSellerMetadata(sellerProfile);
+  const metadata = {
+    ...extractSellerMetadata(sellerProfile),
+    ...buildTaxonomyMetadata(taxonomy),
+  };
   metadata.profileId = profileId;
   metadata.threadId = threadId;
   metadata.createdAt = new Date().toISOString();
@@ -432,11 +456,237 @@ async function embedSellerProfile(sellerProfile, threadId) {
   };
 }
 
+// ─── Category retrieval (for buyer job classification) ───────────────────────
+
+const CATEGORY_SEARCH_TOP_K = 20;
+
+/**
+ * Generate a focused category search query from the full job post.
+ * The query is optimized for semantic search against the category taxonomy.
+ *
+ * @param {string} jobPost – Full job post text
+ * @returns {Promise<string>} – Search query string
+ */
+async function generateCategorySearchQuery(jobPost) {
+  if (!jobPost || typeof jobPost !== "string" || jobPost.trim().length === 0) {
+    return "";
+  }
+
+  const openai = getOpenAI();
+  const prompt = `You are a taxonomy classifier. Given a job post, produce a SHORT search query (1-2 sentences, max 100 words) that best describes the service type/category needed. Focus on: service domain, specific task, and industry. Output ONLY the query text, no preamble.
+
+Job post:
+${jobPost.slice(0, 3000)}
+
+Search query:`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      max_tokens: 150,
+    });
+    const query = (completion.choices?.[0]?.message?.content || "").trim();
+    return query;
+  } catch (err) {
+    console.error("[Pinecone generateCategorySearchQuery]", err.message);
+    return jobPost.slice(0, 500);
+  }
+}
+
+/**
+ * Search the categories namespace by embedding the query and returning top matches.
+ *
+ * @param {string} query – Category search query
+ * @param {number} [topK=20]
+ * @returns {Promise<Array<{ id: string, score: number, metadata: object }>>}
+ */
+async function searchCategories(query, topK = CATEGORY_SEARCH_TOP_K) {
+  if (!query || typeof query !== "string" || query.trim().length === 0) {
+    return [];
+  }
+
+  const [embedding] = await generateEmbeddings([query.trim()]);
+  if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+    return [];
+  }
+
+  const index = getPineconeIndex();
+  const ns = index.namespace(CATEGORIES_NAMESPACE);
+
+  const response = await ns.query({
+    vector: embedding,
+    topK,
+    includeMetadata: true,
+    includeValues: false,
+  });
+
+  return (response.matches || []).map((m) => ({
+    id: m.id,
+    score: m.score ?? 0,
+    metadata: m.metadata || {},
+  }));
+}
+
+/**
+ * From category search results, select the best service record and return full hierarchy.
+ * Prefers "service" records; falls back to "subcategory" then "category".
+ *
+ * @param {Array<{ id: string, score: number, metadata: object }>} matches
+ * @returns {{ categoryId: string|null, categoryName: string|null, subcategoryId: string|null, subcategoryName: string|null, serviceId: string|null, serviceName: string|null }}
+ */
+function selectBestServiceWithParents(matches) {
+  const result = {
+    categoryId: null,
+    categoryName: null,
+    subcategoryId: null,
+    subcategoryName: null,
+    serviceId: null,
+    serviceName: null,
+  };
+
+  for (const m of matches) {
+    const meta = m.metadata || {};
+    const recordType = meta.recordType;
+
+    if (recordType === "service") {
+      result.categoryId = meta.categoryId ?? result.categoryId;
+      result.categoryName = meta.categoryName ?? result.categoryName;
+      result.subcategoryId = meta.subcategoryId ?? result.subcategoryId;
+      result.subcategoryName = meta.subcategoryName ?? result.subcategoryName;
+      result.serviceId = meta.serviceId ?? meta.recordId?.replace(/^service:/, "") ?? result.serviceId;
+      result.serviceName = meta.serviceName ?? meta.title ?? result.serviceName;
+      return result;
+    }
+  }
+
+  for (const m of matches) {
+    const meta = m.metadata || {};
+    const recordType = meta.recordType;
+
+    if (recordType === "subcategory") {
+      result.categoryId = meta.categoryId ?? result.categoryId;
+      result.categoryName = meta.categoryName ?? result.categoryName;
+      result.subcategoryId = meta.subcategoryId ?? meta.recordId?.replace(/^subcategory:/, "") ?? result.subcategoryId;
+      result.subcategoryName = meta.subcategoryName ?? meta.title ?? result.subcategoryName;
+      return result;
+    }
+  }
+
+  for (const m of matches) {
+    const meta = m.metadata || {};
+    const recordType = meta.recordType;
+
+    if (recordType === "category") {
+      result.categoryId = meta.categoryId ?? meta.recordId?.replace(/^category:/, "") ?? result.categoryId;
+      result.categoryName = meta.categoryName ?? meta.title ?? result.categoryName;
+      return result;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Generate category search query, search categories namespace, and return best service with parent hierarchy.
+ *
+ * @param {string} jobPost – Full job post text
+ * @returns {Promise<{ searchQuery: string, category: object, subcategory: object, service: object }>}
+ */
+async function retrieveBestCategoryForJob(jobPost) {
+  const searchQuery = await generateCategorySearchQuery(jobPost);
+  const matches = await searchCategories(searchQuery);
+  const hierarchy = selectBestServiceWithParents(matches);
+
+  return {
+    searchQuery,
+    category: {
+      id: hierarchy.categoryId,
+      name: hierarchy.categoryName,
+    },
+    subcategory: {
+      id: hierarchy.subcategoryId,
+      name: hierarchy.subcategoryName,
+    },
+    service: {
+      id: hierarchy.serviceId,
+      name: hierarchy.serviceName,
+    },
+  };
+}
+
+/**
+ * Generate a focused category search query from a seller profile.
+ * Optimized for semantic search against the category taxonomy.
+ *
+ * @param {string} sellerProfile – Full seller profile text
+ * @returns {Promise<string>} – Search query string
+ */
+async function generateCategorySearchQueryForProfile(sellerProfile) {
+  if (!sellerProfile || typeof sellerProfile !== "string" || sellerProfile.trim().length === 0) {
+    return "";
+  }
+
+  const openai = getOpenAI();
+  const prompt = `You are a taxonomy classifier. Given a seller profile (skills, services offered, experience), produce a SHORT search query (1-2 sentences, max 100 words) that best describes the service type/category they offer. Focus on: service domain, specific skills/tasks, and industry. Output ONLY the query text, no preamble.
+
+Seller profile:
+${sellerProfile.slice(0, 3000)}
+
+Search query:`;
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+      max_tokens: 150,
+    });
+    const query = (completion.choices?.[0]?.message?.content || "").trim();
+    return query;
+  } catch (err) {
+    console.error("[Pinecone generateCategorySearchQueryForProfile]", err.message);
+    return sellerProfile.slice(0, 500);
+  }
+}
+
+/**
+ * Generate category search query from seller profile, search categories namespace, and return best service with parent hierarchy.
+ *
+ * @param {string} sellerProfile – Full seller profile text
+ * @returns {Promise<{ searchQuery: string, category: object, subcategory: object, service: object }>}
+ */
+async function retrieveBestCategoryForProfile(sellerProfile) {
+  const searchQuery = await generateCategorySearchQueryForProfile(sellerProfile);
+  const matches = await searchCategories(searchQuery);
+  const hierarchy = selectBestServiceWithParents(matches);
+
+  return {
+    searchQuery,
+    category: {
+      id: hierarchy.categoryId,
+      name: hierarchy.categoryName,
+    },
+    subcategory: {
+      id: hierarchy.subcategoryId,
+      name: hierarchy.subcategoryName,
+    },
+    service: {
+      id: hierarchy.serviceId,
+      name: hierarchy.serviceName,
+    },
+  };
+}
+
 // ─── Seller search & rerank (for buyer agent) ────────────────────────────────
 
 const RERANK_MODEL = "bge-reranker-v2-m3";
-const SEARCH_TOP_K = 50;
+const SEARCH_TOP_K = 100;
 const RERANK_TOP_N = 5;
+const SELLER_FINAL_TOP_N = 10;
+const LLM_INPUT_LIMIT = 20;
+const MIN_MATCH_SCORE = 1;
 
 const SELLER_MATCH_LOG_PREFIX = "[SellerMatch]";
 
@@ -456,6 +706,122 @@ function truncate(text, maxLen = 120) {
   return t.length <= maxLen ? t : t.slice(0, maxLen) + "…";
 }
 
+function summarizeTaxonomy(taxonomy = {}) {
+  const meta = buildTaxonomyMetadata(taxonomy);
+  return {
+    categoryId: meta.categoryId ?? null,
+    categoryName: meta.categoryName ?? null,
+    subcategoryId: meta.subcategoryId ?? null,
+    subcategoryName: meta.subcategoryName ?? null,
+    serviceId: meta.serviceId ?? null,
+    serviceName: meta.serviceName ?? null,
+  };
+}
+
+function buildRetrievalQuery(fallbackText, taxonomy = {}) {
+  const serviceName = taxonomy.service?.name || taxonomy.serviceName;
+  const subcategoryName = taxonomy.subcategory?.name || taxonomy.subcategoryName;
+  const categoryName = taxonomy.category?.name || taxonomy.categoryName;
+  const searchQuery = taxonomy.searchQuery?.trim();
+
+  if (searchQuery) {
+    return searchQuery;
+  }
+
+  const parts = [serviceName, subcategoryName, categoryName].filter(Boolean);
+  if (parts.length > 0) {
+    return `Service: ${parts.join(" > ")}. ${String(fallbackText || "").trim().slice(0, 500)}`.trim();
+  }
+
+  return String(fallbackText || "").trim();
+}
+
+function buildTaxonomyFilterCandidates(taxonomy = {}) {
+  const meta = summarizeTaxonomy(taxonomy);
+  const filters = [];
+
+  if (meta.serviceId) {
+    filters.push({
+      label: `serviceId=${meta.serviceId}`,
+      filter: { serviceId: { $eq: meta.serviceId } },
+    });
+  }
+  if (meta.subcategoryId) {
+    filters.push({
+      label: `subcategoryId=${meta.subcategoryId}`,
+      filter: { subcategoryId: { $eq: meta.subcategoryId } },
+    });
+  }
+  if (meta.categoryId) {
+    filters.push({
+      label: `categoryId=${meta.categoryId}`,
+      filter: { categoryId: { $eq: meta.categoryId } },
+    });
+  }
+
+  filters.push({ label: "none", filter: null });
+  return filters;
+}
+
+async function queryWithFilterFallback(ns, vector, topK, taxonomy = {}) {
+  const filterCandidates = buildTaxonomyFilterCandidates(taxonomy);
+
+  for (const candidate of filterCandidates) {
+    const response = await ns.query({
+      vector,
+      topK,
+      includeMetadata: true,
+      includeValues: false,
+      ...(candidate.filter ? { filter: candidate.filter } : {}),
+    });
+
+    const matches = response.matches || [];
+    if (matches.length > 0 || candidate.filter == null) {
+      return { matches, appliedFilter: candidate.label };
+    }
+  }
+
+  return { matches: [], appliedFilter: "none" };
+}
+
+function getTaxonomyMatchLevel(candidateMeta = {}, taxonomy = {}) {
+  const requested = summarizeTaxonomy(taxonomy);
+  if (requested.serviceId && candidateMeta.serviceId === requested.serviceId) return "service";
+  if (requested.subcategoryId && candidateMeta.subcategoryId === requested.subcategoryId) return "subcategory";
+  if (requested.categoryId && candidateMeta.categoryId === requested.categoryId) return "category";
+  return "none";
+}
+
+function fallbackMatchScore({ rank, metadata, taxonomy }) {
+  const level = getTaxonomyMatchLevel(metadata, taxonomy);
+  const baseByLevel = {
+    service: 72,
+    subcategory: 42,
+    category: 18,
+    none: 0,
+  };
+  const base = baseByLevel[level] ?? 0;
+  if (base === 0) {
+    return 0;
+  }
+
+  const rankPenalty = Math.min(24, Math.max(0, rank - 1) * 2);
+  return Math.max(1, base - rankPenalty);
+}
+
+function normalizeMatchScore(scored, fallbackScore = 0) {
+  if (scored?.isMatch === false) {
+    return 0;
+  }
+
+  const rawScore = Number(scored?.matchScore);
+  if (!Number.isFinite(rawScore)) {
+    return Math.max(0, fallbackScore);
+  }
+
+  return Math.min(100, Math.max(0, Math.round(rawScore)));
+}
+
 /**
  * Search seller-profile namespace by job post (embed job, query by vector).
  * Deduplicates by profileId and returns unique profiles with best chunk.
@@ -464,7 +830,7 @@ function truncate(text, maxLen = 120) {
  * @param {number} [topK=10] – Max number of unique profiles to consider
  * @returns {Promise<Array<{ profileId: string, profileText: string, metadata: object }>>}
  */
-async function searchSellerProfiles(jobPost, topK = 10) {
+async function searchSellerProfiles(jobPost, topK = 10, taxonomy = {}) {
   logSection("1. SEARCH – Query & raw results");
 
   if (jobPost == null || typeof jobPost !== "string" || jobPost.trim().length === 0) {
@@ -472,11 +838,13 @@ async function searchSellerProfiles(jobPost, topK = 10) {
     return [];
   }
 
-  logLine("Query (job post preview)", truncate(jobPost, 200));
+  const retrievalQuery = buildRetrievalQuery(jobPost, taxonomy);
+  logLine("Query (matching query preview)", truncate(retrievalQuery, 200));
   logLine("Namespace", SELLER_PROFILE_NAMESPACE);
   logLine("TopK requested", SEARCH_TOP_K);
+  logLine("Requested service", taxonomy.service?.name || taxonomy.serviceName || "unknown");
 
-  const [embedding] = await generateEmbeddings([jobPost.trim()]);
+  const [embedding] = await generateEmbeddings([retrievalQuery]);
   if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
     logLine("Status", "Skipped (no embedding)");
     return [];
@@ -487,14 +855,8 @@ async function searchSellerProfiles(jobPost, topK = 10) {
   const index = getPineconeIndex();
   const ns = index.namespace(SELLER_PROFILE_NAMESPACE);
 
-  const response = await ns.query({
-    vector: embedding,
-    topK: SEARCH_TOP_K,
-    includeMetadata: true,
-    includeValues: false,
-  });
-
-  const matches = response.matches || [];
+  const { matches, appliedFilter } = await queryWithFilterFallback(ns, embedding, SEARCH_TOP_K, taxonomy);
+  logLine("Applied filter", appliedFilter);
   logLine("Raw matches count", matches.length);
 
   if (matches.length === 0) {
@@ -554,7 +916,7 @@ async function searchSellerProfiles(jobPost, topK = 10) {
  * @param {number} [topN=5]
  * @returns {Promise<Array<{ profileId: string, profileText: string, metadata: object }>>}
  */
-async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N) {
+async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N, taxonomy = {}) {
   logSection("2. RERANK – Pinecone Inference");
 
   if (searchResults.length === 0) {
@@ -562,7 +924,8 @@ async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N)
     return [];
   }
 
-  logLine("Query (job post preview)", truncate(jobPost, 150));
+  const rerankQuery = buildRetrievalQuery(jobPost, taxonomy);
+  logLine("Query (rerank query preview)", truncate(rerankQuery, 150));
   logLine("Model", RERANK_MODEL);
   logLine("Input documents count", searchResults.length);
   logLine("TopN", topN);
@@ -577,7 +940,7 @@ async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N)
     const inference = getPineconeClient().inference;
     const result = await inference.rerank({
       model: RERANK_MODEL,
-      query: jobPost.trim(),
+      query: rerankQuery,
       documents,
       topN,
       returnDocuments: true,
@@ -618,7 +981,7 @@ async function rerankSellerProfiles(jobPost, searchResults, topN = RERANK_TOP_N)
  * @param {Array<{ profileId: string, profileText: string, metadata: object }>} profiles
  * @returns {Promise<Array<{ profileId: string, sellerName: string, profileText: string, matchScore: number, matchExplanation: string, metadata: object }>>}
  */
-async function scoreWithLLM(jobPost, profiles) {
+async function scoreWithLLM(jobPost, profiles, taxonomy = {}) {
   logSection("3. LLM SCORING – Match score & explanation");
 
   if (profiles.length === 0) {
@@ -632,16 +995,54 @@ async function scoreWithLLM(jobPost, profiles) {
   logLine("Job post length (chars)", jobPost.length);
 
   const openai = getOpenAI();
-  const systemPrompt = `You are a job-matching expert. For each seller profile, analyze how well they match the job requirements. Respond with a JSON array of objects. Each object must have: "profileIndex" (0-based index of the profile), "matchScore" (number 0-100), "matchExplanation" (2-3 sentences). No other text.`;
+  const taxonomySummary = summarizeTaxonomy(taxonomy);
+  const systemPrompt = `You are matching seller profiles to a buyer job.
+
+For each seller profile, read the buyer job and the seller profile text, then give:
+- matchScore: integer from 0 to 100
+- matchExplanation: short analysis in 1-2 sentences explaining why the score fits
+
+Scoring guidance:
+- 90-100: excellent match
+- 70-89: strong match
+- 40-69: decent match
+- 10-39: weak but related match
+- 0-9: very poor match or barely related
+
+Return ONLY a JSON array. Each object must contain:
+- profileIndex: number
+- matchScore: integer 0-100
+- matchExplanation: string`;
 
   const profileList = profiles
     .map(
-      (p, i) =>
-        `[Profile ${i}] (profileId: ${p.profileId})\n${(p.profileText || "").slice(0, 2000)}`
+      (p, i) => {
+        const meta = p.metadata || {};
+        return `[Profile ${i}] (profileId: ${p.profileId})
+Title: ${meta.title || "Unknown"}
+Service: ${meta.serviceName || "Unknown"}
+Subcategory: ${meta.subcategoryName || "Unknown"}
+Category: ${meta.categoryName || "Unknown"}
+Location: ${meta.location || "Unknown"}
+Rate: ${meta.rate || "Unknown"}
+Profile text:
+${(p.profileText || "").slice(0, 1800)}`;
+      }
     )
     .join("\n\n");
 
-  const userPrompt = `Job post:\n${jobPost.slice(0, 3000)}\n\nSeller profiles:\n${profileList}\n\nOutput JSON array with profileIndex, matchScore, matchExplanation for each profile.`;
+  const userPrompt = `Requested taxonomy:
+- Service: ${taxonomySummary.serviceName || "Unknown"} (${taxonomySummary.serviceId || "n/a"})
+- Subcategory: ${taxonomySummary.subcategoryName || "Unknown"} (${taxonomySummary.subcategoryId || "n/a"})
+- Category: ${taxonomySummary.categoryName || "Unknown"} (${taxonomySummary.categoryId || "n/a"})
+
+Buyer job:
+${jobPost.slice(0, 3200)}
+
+Seller profiles:
+${profileList}
+
+Score every seller profile against this buyer job and return the JSON array only.`;
 
   try {
     const completion = await openai.chat.completions.create({
@@ -650,7 +1051,7 @@ async function scoreWithLLM(jobPost, profiles) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.3,
+      temperature: 0.1,
     });
 
     const content = (completion.choices?.[0]?.message?.content || "").trim();
@@ -674,12 +1075,20 @@ async function scoreWithLLM(jobPost, profiles) {
       const title = meta.title || (p.profileText || "").split("\n")[0] || "Seller";
       const sellerName = title.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim() || "Seller";
       const scored = byIndex.get(i) || {};
+      const fallbackScore = fallbackMatchScore({ rank: i + 1, metadata: meta, taxonomy });
+      const normalizedScore = normalizeMatchScore(scored, fallbackScore);
       return {
         profileId: p.profileId,
         sellerName,
         profileText: p.profileText || "",
-        matchScore: Math.min(100, Math.max(0, Number(scored.matchScore) ?? 50)),
-        matchExplanation: String(scored.matchExplanation || "Match analysis not available.").slice(0, 500),
+        matchScore: normalizedScore,
+        matchExplanation: String(
+          scored.matchExplanation ||
+            (normalizedScore > 0
+              ? "Weak related match based on taxonomy and retrieval signals."
+              : "Not a relevant match.")
+        ).slice(0, 500),
+        vectorRank: i + 1,
         metadata: {
           location: meta.location,
           rate: meta.rate,
@@ -691,16 +1100,21 @@ async function scoreWithLLM(jobPost, profiles) {
     return result;
   } catch (err) {
     console.error(`${SELLER_MATCH_LOG_PREFIX} LLM failed:`, err.message);
-    logLine("Fallback", "Using default score 50 for all");
-    return profiles.map((p) => {
+    logLine("Fallback", "Using taxonomy-aware heuristic scores");
+    return profiles.map((p, i) => {
       const meta = p.metadata || {};
       const title = meta.title || (p.profileText || "").split("\n")[0] || "Seller";
+      const fallbackScore = fallbackMatchScore({ rank: i + 1, metadata: meta, taxonomy });
       return {
         profileId: p.profileId,
         sellerName: title.replace(/^#+\s*/, "").trim() || "Seller",
         profileText: p.profileText || "",
-        matchScore: 50,
-        matchExplanation: "Scoring unavailable.",
+        matchScore: fallbackScore,
+        matchExplanation:
+          fallbackScore > 0
+            ? "Relevant match based on taxonomy and retrieval signals."
+            : "Not a relevant match.",
+        vectorRank: i + 1,
         metadata: { location: meta.location, rate: meta.rate, ...meta },
       };
     });
@@ -708,19 +1122,19 @@ async function scoreWithLLM(jobPost, profiles) {
 }
 
 /**
- * Find best matching sellers for a job: search → rerank → LLM score.
+ * Find best matching sellers for a job: filtered search → LLM score.
  *
  * @param {string} jobPost – Full job post text
  * @returns {Promise<Array<{ profileId, sellerName, profileText, matchScore, matchExplanation, metadata }>>}
  */
-async function findMatchingSellers(jobPost) {
+async function findMatchingSellers(jobPost, taxonomy = {}) {
   console.log("\n" + "═".repeat(60));
   console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – START`);
   console.log("═".repeat(60));
   logLine("Job post length", (jobPost || "").length);
-  logLine("Pipeline", "search → rerank → LLM score");
+  logLine("Pipeline", "taxonomy-filtered search → LLM score → ranked top 10");
 
-  const searchResults = await searchSellerProfiles(jobPost, SEARCH_TOP_K);
+  const searchResults = await searchSellerProfiles(jobPost, SEARCH_TOP_K, taxonomy);
   if (searchResults.length === 0) {
     logSection("FINAL – No sellers matched");
     logLine("Result", "[]");
@@ -728,17 +1142,25 @@ async function findMatchingSellers(jobPost) {
     return [];
   }
 
-  const reranked = await rerankSellerProfiles(jobPost, searchResults, searchResults.length);
-  const result = await scoreWithLLM(jobPost, reranked);
+  const llmCandidates = searchResults.slice(0, LLM_INPUT_LIMIT);
+  logLine("Candidates sent to LLM", llmCandidates.length);
+  const scored = await scoreWithLLM(jobPost, llmCandidates, taxonomy);
 
-  const sorted = result
-    .slice()
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
+  const sorted = scored.slice().sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
 
-  logSection("4. FULL MATCH BREAKDOWN – All sellers by score (descending)");
-  logLine("Total shown", sorted.length);
+  const result = sorted.slice(0, SELLER_FINAL_TOP_N);
+
+  if (result.length === 0) {
+    logSection("4. FINAL – No sellers available after scoring");
+    logLine("Result", "[]");
+    console.log("");
+    return [];
+  }
+
+  logSection("4. FULL MATCH BREAKDOWN – All scored sellers");
+  logLine("Total shown", result.length);
   console.log("");
-  sorted.forEach((s, i) => {
+  result.forEach((s, i) => {
     console.log(`  ┌─ Rank ${i + 1} ─────────────────────────────────`);
     logLine("  │ profileId", s.profileId);
     logLine("  │ sellerName", s.sellerName);
@@ -750,10 +1172,10 @@ async function findMatchingSellers(jobPost) {
   });
 
   console.log("\n" + "═".repeat(60));
-  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – END (${sorted.length} sellers)`);
+  console.log(`${SELLER_MATCH_LOG_PREFIX} FIND MATCHING SELLERS – END (${result.length} sellers)`);
   console.log("═".repeat(60) + "\n");
 
-  return sorted;
+  return result;
 }
 
 // ─── Job search & rerank (for seller agent) ───────────────────────────────────
@@ -774,7 +1196,7 @@ function logJobSection(title) {
  * @param {number} [topK=10] – Max number of unique jobs to consider
  * @returns {Promise<Array<{ jobId: string, jobText: string, metadata: object }>>}
  */
-async function searchJobsForSeller(sellerProfile, topK = 10) {
+async function searchJobsForSeller(sellerProfile, topK = 10, taxonomy = {}) {
   logJobSection("1. SEARCH – Query & raw results");
 
   if (sellerProfile == null || typeof sellerProfile !== "string" || sellerProfile.trim().length === 0) {
@@ -782,11 +1204,13 @@ async function searchJobsForSeller(sellerProfile, topK = 10) {
     return [];
   }
 
-  logLine("Query (seller profile preview)", truncate(sellerProfile, 200));
+  const retrievalQuery = buildRetrievalQuery(sellerProfile, taxonomy);
+  logLine("Query (matching query preview)", truncate(retrievalQuery, 200));
   logLine("Namespace", NAMESPACE);
   logLine("TopK requested", SEARCH_TOP_K);
+  logLine("Seller service", taxonomy.service?.name || taxonomy.serviceName || "unknown");
 
-  const [embedding] = await generateEmbeddings([sellerProfile.trim()]);
+  const [embedding] = await generateEmbeddings([retrievalQuery]);
   if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
     logLine("Status", "Skipped (no embedding)");
     return [];
@@ -797,14 +1221,8 @@ async function searchJobsForSeller(sellerProfile, topK = 10) {
   const index = getPineconeIndex();
   const ns = index.namespace(NAMESPACE);
 
-  const response = await ns.query({
-    vector: embedding,
-    topK: SEARCH_TOP_K,
-    includeMetadata: true,
-    includeValues: false,
-  });
-
-  const matches = response.matches || [];
+  const { matches, appliedFilter } = await queryWithFilterFallback(ns, embedding, SEARCH_TOP_K, taxonomy);
+  logLine("Applied filter", appliedFilter);
   logLine("Raw matches count", matches.length);
 
   if (matches.length === 0) {
@@ -864,7 +1282,7 @@ async function searchJobsForSeller(sellerProfile, topK = 10) {
  * @param {number} [topN=5]
  * @returns {Promise<Array<{ jobId: string, jobText: string, metadata: object }>>}
  */
-async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N) {
+async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N, taxonomy = {}) {
   logJobSection("2. RERANK – Pinecone Inference");
 
   if (searchResults.length === 0) {
@@ -872,7 +1290,8 @@ async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N) {
     return [];
   }
 
-  logLine("Query (seller profile preview)", truncate(sellerProfile, 150));
+  const rerankQuery = buildRetrievalQuery(sellerProfile, taxonomy);
+  logLine("Query (rerank query preview)", truncate(rerankQuery, 150));
   logLine("Model", RERANK_MODEL);
   logLine("Input documents count", searchResults.length);
   logLine("TopN", topN);
@@ -887,7 +1306,7 @@ async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N) {
     const inference = getPineconeClient().inference;
     const result = await inference.rerank({
       model: RERANK_MODEL,
-      query: sellerProfile.trim(),
+      query: rerankQuery,
       documents,
       topN,
       returnDocuments: true,
@@ -928,7 +1347,7 @@ async function rerankJobs(sellerProfile, searchResults, topN = RERANK_TOP_N) {
  * @param {Array<{ jobId: string, jobText: string, metadata: object }>} jobs
  * @returns {Promise<Array<{ jobId: string, jobTitle: string, jobText: string, matchScore: number, matchExplanation: string, metadata: object }>>}
  */
-async function scoreJobsWithLLM(sellerProfile, jobs) {
+async function scoreJobsWithLLM(sellerProfile, jobs, taxonomy = {}) {
   logJobSection("3. LLM SCORING – Job match score & explanation");
 
   if (jobs.length === 0) {
@@ -942,16 +1361,55 @@ async function scoreJobsWithLLM(sellerProfile, jobs) {
   logLine("Seller profile length (chars)", sellerProfile.length);
 
   const openai = getOpenAI();
-  const systemPrompt = `You are a job-matching expert. For each job post, analyze how well it matches the seller's profile (skills, experience, location, availability, rate). Respond with a JSON array of objects. Each object must have: "jobIndex" (0-based index), "matchScore" (number 0-100), "matchExplanation" (2-3 sentences). No other text.`;
+  const taxonomySummary = summarizeTaxonomy(taxonomy);
+  const systemPrompt = `You are matching buyer jobs to a seller profile.
+
+For each job, read the seller profile and the buyer job text, then give:
+- matchScore: integer from 0 to 100
+- matchExplanation: short analysis in 1-2 sentences explaining why the score fits
+
+Scoring guidance:
+- 90-100: excellent match
+- 70-89: strong match
+- 40-69: decent match
+- 10-39: weak but related match
+- 0-9: very poor match or barely related
+
+Return ONLY a JSON array. Each object must contain:
+- jobIndex: number
+- matchScore: integer 0-100
+- matchExplanation: string`;
 
   const jobList = jobs
     .map(
-      (j, i) =>
-        `[Job ${i}] (jobId: ${j.jobId})\n${(j.jobText || "").slice(0, 2000)}`
+      (j, i) => {
+        const meta = j.metadata || {};
+        return `[Job ${i}] (jobId: ${j.jobId})
+Title: ${meta.title || "Unknown"}
+Service: ${meta.serviceName || "Unknown"}
+Subcategory: ${meta.subcategoryName || "Unknown"}
+Category: ${meta.categoryName || "Unknown"}
+Location: ${meta.location || "Unknown"}
+Budget: ${meta.budget || "Unknown"}
+Timeline: ${meta.timeline || "Unknown"}
+Job text:
+${(j.jobText || "").slice(0, 1800)}`;
+      }
     )
     .join("\n\n");
 
-  const userPrompt = `Seller profile:\n${sellerProfile.slice(0, 3000)}\n\nJobs:\n${jobList}\n\nOutput JSON array with jobIndex, matchScore, matchExplanation for each job.`;
+  const userPrompt = `Seller taxonomy:
+- Service: ${taxonomySummary.serviceName || "Unknown"} (${taxonomySummary.serviceId || "n/a"})
+- Subcategory: ${taxonomySummary.subcategoryName || "Unknown"} (${taxonomySummary.subcategoryId || "n/a"})
+- Category: ${taxonomySummary.categoryName || "Unknown"} (${taxonomySummary.categoryId || "n/a"})
+
+Seller profile:
+${sellerProfile.slice(0, 3200)}
+
+Jobs:
+${jobList}
+
+Score every job against this seller profile and return the JSON array only.`;
 
   try {
     const completion = await openai.chat.completions.create({
@@ -960,7 +1418,7 @@ async function scoreJobsWithLLM(sellerProfile, jobs) {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      temperature: 0.3,
+      temperature: 0.1,
     });
 
     const content = (completion.choices?.[0]?.message?.content || "").trim();
@@ -984,12 +1442,15 @@ async function scoreJobsWithLLM(sellerProfile, jobs) {
       const title = meta.title || (j.jobText || "").split("\n")[0] || "Job";
       const jobTitle = title.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim() || "Job";
       const scored = byIndex.get(i) || {};
+      const fallbackScore = fallbackMatchScore({ rank: i + 1, metadata: meta, taxonomy });
       return {
         jobId: j.jobId,
         jobTitle,
         jobText: j.jobText || "",
-        matchScore: Math.min(100, Math.max(0, Number(scored.matchScore) ?? 50)),
-        matchExplanation: String(scored.matchExplanation || "Match analysis not available.").slice(0, 500),
+        matchScore: normalizeMatchScore(scored, fallbackScore),
+        matchExplanation: String(
+          scored.matchExplanation || (fallbackScore > 0 ? "Relevant match based on taxonomy and retrieval signals." : "Not a relevant match.")
+        ).slice(0, 500),
         metadata: {
           budget: meta.budget,
           location: meta.location,
@@ -1000,15 +1461,20 @@ async function scoreJobsWithLLM(sellerProfile, jobs) {
     });
   } catch (err) {
     console.error(`${JOB_MATCH_LOG_PREFIX} LLM failed:`, err.message);
-    return jobs.map((j) => {
+    logLine("Fallback", "Using taxonomy-aware heuristic scores");
+    return jobs.map((j, i) => {
       const meta = j.metadata || {};
       const title = meta.title || (j.jobText || "").split("\n")[0] || "Job";
+      const fallbackScore = fallbackMatchScore({ rank: i + 1, metadata: meta, taxonomy });
       return {
         jobId: j.jobId,
         jobTitle: title.replace(/^#+\s*/, "").trim() || "Job",
         jobText: j.jobText || "",
-        matchScore: 50,
-        matchExplanation: "Scoring unavailable.",
+        matchScore: fallbackScore,
+        matchExplanation:
+          fallbackScore > 0
+            ? "Relevant match based on taxonomy and retrieval signals."
+            : "Not a relevant match.",
         metadata: { budget: meta.budget, location: meta.location, timeline: meta.timeline, ...meta },
       };
     });
@@ -1016,19 +1482,19 @@ async function scoreJobsWithLLM(sellerProfile, jobs) {
 }
 
 /**
- * Find best matching jobs for a seller: search → rerank → LLM score.
+ * Find best matching jobs for a seller: filtered search → LLM score.
  *
  * @param {string} sellerProfile – Full seller profile text
  * @returns {Promise<Array<{ jobId, jobTitle, jobText, matchScore, matchExplanation, metadata }>>}
  */
-async function findMatchingJobs(sellerProfile) {
+async function findMatchingJobs(sellerProfile, taxonomy = {}) {
   console.log("\n" + "═".repeat(60));
   console.log(`${JOB_MATCH_LOG_PREFIX} FIND MATCHING JOBS – START`);
   console.log("═".repeat(60));
   logLine("Seller profile length", (sellerProfile || "").length);
-  logLine("Pipeline", "search → rerank → LLM score");
+  logLine("Pipeline", "taxonomy-filtered search → LLM score → ranked jobs");
 
-  const searchResults = await searchJobsForSeller(sellerProfile, SEARCH_TOP_K);
+  const searchResults = await searchJobsForSeller(sellerProfile, SEARCH_TOP_K, taxonomy);
   if (searchResults.length === 0) {
     logJobSection("FINAL – No jobs matched");
     logLine("Result", "[]");
@@ -1036,14 +1502,20 @@ async function findMatchingJobs(sellerProfile) {
     return [];
   }
 
-  const reranked = await rerankJobs(sellerProfile, searchResults, searchResults.length);
-  const result = await scoreJobsWithLLM(sellerProfile, reranked);
+  const llmCandidates = searchResults.slice(0, LLM_INPUT_LIMIT);
+  logLine("Candidates sent to LLM", llmCandidates.length);
+  const result = await scoreJobsWithLLM(sellerProfile, llmCandidates, taxonomy);
 
-  const sorted = result
-    .slice()
-    .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
+  const sorted = result.slice().sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
 
-  logJobSection("4. FULL MATCH BREAKDOWN – All jobs by score (descending)");
+  if (sorted.length === 0) {
+    logJobSection("4. FINAL – No jobs available after scoring");
+    logLine("Result", "[]");
+    console.log("");
+    return [];
+  }
+
+  logJobSection("4. FULL MATCH BREAKDOWN – All scored jobs");
   logLine("Total shown", sorted.length);
   console.log("");
   sorted.forEach((job, i) => {
@@ -1072,6 +1544,8 @@ export {
   extractMetadata,
   extractSellerMetadata,
   generateEmbeddings,
+  retrieveBestCategoryForJob,
+  retrieveBestCategoryForProfile,
   findMatchingSellers,
   searchSellerProfiles,
   rerankSellerProfiles,
@@ -1082,5 +1556,6 @@ export {
   scoreJobsWithLLM,
   NAMESPACE,
   SELLER_PROFILE_NAMESPACE,
+  CATEGORIES_NAMESPACE,
   INDEX_NAME,
 };

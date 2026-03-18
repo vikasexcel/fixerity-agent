@@ -9,8 +9,16 @@
     "test:seller-profile": "node scripts/test-seller-profile.js",
     "test:seller-classifier": "node scripts/test-seller-classifier.js",
     "test:seller-e2e": "node scripts/test-seller-flow-e2e.js",
-    "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "embed:categories": "node scripts/import-category-embeddings.js",
+    "seed:seller-profiles": "node scripts/seed-seller-profiles.js",
+    "dev": "tsx --watch src/index.js",
+    "start": "tsx src/index.js",
+    "prisma:validate": "prisma validate",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:status": "prisma migrate status",
+    "prisma:studio": "prisma studio"
   },
   "keywords": [],
   "author": "",
@@ -37,5 +45,8 @@
     "sequelize": "^6.37.7",
     "uuid": "^13.0.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }

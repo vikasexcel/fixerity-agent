@@ -120,7 +120,8 @@ router.post("/chat", async (req, res) => {
     };
 
     // Include jobPost fields when a post has been generated
-    if (result.jobPost) {
+    // Use `!= null` instead of truthiness so we don't accidentally drop empty-string posts.
+    if (result.jobPost != null) {
       response.jobPost = result.jobPost;
       response.placeholders = result.placeholders;
     }
@@ -165,7 +166,7 @@ router.get("/state/:threadId", async (req, res) => {
       questionCount: state.values.questionCount,
     };
 
-    if (state.values.jobPost) {
+    if (state.values.jobPost != null) {
       response.jobPost = state.values.jobPost;
       response.placeholders = state.values.placeholders;
     }

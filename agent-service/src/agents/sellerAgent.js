@@ -1,7 +1,13 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedSellerProfile, findMatchingJobs } from "../services/pinecone.js";
+import { embedSellerProfile, findMatchingJobs, retrieveBestCategoryForProfile } from "../services/pinecone.js";
+import {
+  createSellerProfile,
+  updateSellerProfilePineconeId,
+  createJobMatches,
+  getBuyerJobIdsByPineconeJobIds,
+} from "../db/jobRepository.js";
 import { SELLER_PROFILE_QUESTIONS, SELLER_PROFILE_QUESTION_IDS } from "../data/sellerProfileQuestions.js";
 
 const LOG_TAG = "[SellerAgent]";
@@ -495,7 +501,7 @@ function routeAfterReview(state) {
 
 /**
  * Node: createProfile
- * Embeds the seller profile in Pinecone (namespace seller-profile) and marks done.
+ * Pipeline: category retrieval → persist seller profile → embed → job matching → persist matches → respond.
  */
 async function createProfileNode(state, config) {
   console.log(LOG_TAG, "createProfileNode entry");
@@ -507,45 +513,116 @@ async function createProfileNode(state, config) {
     state.messages?.[0]?.id ??
     "unknown";
 
+  let sellerProfileId = null;
   let embeddingId = null;
   let profileMetadata = null;
+  let matchedJobs = null;
+  let jobMatchingStatus = null;
+
+  let categoryResult = { searchQuery: null, category: null, subcategory: null, service: null };
+  if (state.sellerProfile && state.sellerProfile.trim().length > 0) {
+    try {
+      categoryResult = await retrieveBestCategoryForProfile(state.sellerProfile);
+      console.log(LOG_TAG, "createProfileNode category retrieval", {
+        searchQuery: categoryResult.searchQuery?.slice(0, 80),
+        service: categoryResult.service?.name,
+      });
+    } catch (err) {
+      console.error(LOG_TAG, "createProfileNode category retrieval failed (non-blocking):", err.message);
+    }
+  }
+
+  if (state.sellerProfile && state.sellerProfile.trim().length > 0) {
+    try {
+      const profile = await createSellerProfile({
+        threadId,
+        profileDescription: state.sellerProfile,
+        categorySearchQuery: categoryResult.searchQuery,
+        categoryId: categoryResult.category?.id ?? null,
+        categoryName: categoryResult.category?.name ?? null,
+        subcategoryId: categoryResult.subcategory?.id ?? null,
+        subcategoryName: categoryResult.subcategory?.name ?? null,
+        serviceId: categoryResult.service?.id ?? null,
+        serviceName: categoryResult.service?.name ?? null,
+      });
+      sellerProfileId = profile.id;
+      console.log(LOG_TAG, "createProfileNode seller profile persisted", { sellerProfileId });
+    } catch (err) {
+      console.error(LOG_TAG, "createProfileNode persist seller profile failed:", err.message);
+    }
+  }
 
   try {
-    const result = await embedSellerProfile(state.sellerProfile, threadId);
+    const result = await embedSellerProfile(state.sellerProfile, threadId, categoryResult);
     embeddingId = result.embeddingId;
     profileMetadata = result.profileMetadata;
     console.log(LOG_TAG, "createProfileNode embed success", {
       embeddingId,
       chunkCount: result.chunkCount,
     });
+    if (sellerProfileId) {
+      await updateSellerProfilePineconeId(sellerProfileId, embeddingId);
+    }
   } catch (err) {
     console.error(LOG_TAG, "createProfileNode embed failed (non-blocking):", err.message);
   }
 
-  let matchedJobs = null;
-  let jobMatchingStatus = null;
   if (state.sellerProfile && state.sellerProfile.trim().length > 0) {
     try {
-      matchedJobs = await findMatchingJobs(state.sellerProfile);
-      jobMatchingStatus = "found";
+      matchedJobs = await findMatchingJobs(state.sellerProfile, categoryResult);
+      jobMatchingStatus = matchedJobs?.length > 0 ? "found" : "none_found";
       console.log(LOG_TAG, "createProfileNode job matching complete", {
         jobMatchingStatus,
         matchedCount: matchedJobs?.length ?? 0,
       });
+
+      if (sellerProfileId && matchedJobs && matchedJobs.length > 0) {
+        const pineconeJobIds = matchedJobs.map((j) => j.jobId).filter(Boolean);
+        const jobIdMap = await getBuyerJobIdsByPineconeJobIds(pineconeJobIds);
+        let rank = 0;
+        const matchRecords = [];
+        for (const m of matchedJobs) {
+          const buyerJobId = jobIdMap.get(m.jobId);
+          if (!buyerJobId) continue;
+          rank += 1;
+          matchRecords.push({
+            buyerJobId,
+            vectorRank: rank,
+            llmScore: m.matchScore ?? 0,
+            matchExplanation: m.matchExplanation || "",
+            finalRank: rank,
+          });
+        }
+        if (matchRecords.length > 0) {
+          await createJobMatches(sellerProfileId, matchRecords);
+          console.log(LOG_TAG, "createProfileNode job matches persisted", { count: matchRecords.length });
+        }
+      }
     } catch (err) {
-      console.error(LOG_TAG, "createProfileNode findMatchingJobs failed (non-blocking):", err.message);
+      console.error(LOG_TAG, "createProfileNode findMatchingJobs/persist failed (non-blocking):", err.message);
       jobMatchingStatus = "error";
     }
   }
 
-  const model = createModel();
-  const confirmPrompt = `The seller has confirmed and their profile has been created successfully. Generate a brief, friendly confirmation message. Tell them their profile is now live and clients will be able to find them. Keep it short and warm (2-3 sentences max). Do NOT include the full profile again.`;
-  const response = await model.invoke([new SystemMessage(confirmPrompt)]);
+  let confirmationMessage =
+    "Your seller profile is live. Buyers can now discover your services.";
+
+  if (jobMatchingStatus === "error") {
+    confirmationMessage =
+      "Your seller profile is live. I couldn't generate job matches right now, but buyers can still discover your profile and matching can run again later.";
+  } else if ((matchedJobs?.length ?? 0) === 0) {
+    confirmationMessage =
+      "Your seller profile is live. I couldn't find any job matches to show yet, but relevant buyers can still discover your profile as matching jobs are posted.";
+  } else {
+    const count = matchedJobs.length;
+    confirmationMessage =
+      `Your seller profile is live. I found ${count} job match${count === 1 ? "" : "es"} ranked by match score.`;
+  }
 
   console.log(LOG_TAG, "createProfileNode done", { status: "done" });
 
   return {
-    messages: [new AIMessage(response.content)],
+    messages: [new AIMessage(confirmationMessage)],
     status: "done",
     embeddingId,
     profileMetadata,

@@ -1,7 +1,8 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { AIMessage, SystemMessage } from "@langchain/core/messages";
 import { AsyncLocalStorageProviderSingleton } from "@langchain/core/singletons";
-import { embedJobPost, findMatchingSellers } from "../services/pinecone.js";
+import { embedJobPost, findMatchingSellers, retrieveBestCategoryForJob, extractMetadata } from "../services/pinecone.js";
+import { createBuyerJob, updateBuyerJobPineconeId, updateBuyerJobStatus, createSellerMatches } from "../db/jobRepository.js";
 import { PROFILE_QUESTIONS, PROFILE_QUESTION_IDS } from "../data/profileQuestions.js";
 
 const LOG_TAG = "[BuyerAgent]";
@@ -98,6 +99,47 @@ function createModel() {
 }
 
 const JOB_POST_MARKER = "---JOB_POST_READY---";
+
+/**
+ * Extracts the actual job post block from the full assistant message.
+ *
+ * The system prompt instructs the marker to appear before the job post, but
+ * models sometimes place it at the end (after the job post) and only the
+ * trailing "Please review..." text remains after a naive split.
+ *
+ * Strategy:
+ * - Split around the marker.
+ * - Choose the side that contains a recognizable job-post label (`**Job Title:**`).
+ * - If present, trim everything before the first `**Job Title:**`.
+ * - Strip common trailing "review/confirm" sentences so the UI card shows only the job post.
+ */
+function extractJobPostContent(content) {
+  if (!content || typeof content !== "string") return "";
+  const markerIdx = content.indexOf(JOB_POST_MARKER);
+  if (markerIdx === -1) return content.trim();
+
+  const before = content.slice(0, markerIdx).trim();
+  const after = content.slice(markerIdx + JOB_POST_MARKER.length).trim();
+
+  const containsJobTitle = (s) => typeof s === "string" && /\*\*Job Title:\*\*/i.test(s);
+  let chosen = containsJobTitle(before) ? before : containsJobTitle(after) ? after : after;
+
+  // Ensure we start at the first recognizable job-post label (best-effort).
+  const startIdx = chosen.search(/\*\*Job Title:\*\*/i);
+  if (startIdx !== -1) chosen = chosen.slice(startIdx).trim();
+
+  // Strip common "please review / ready to go" suffix.
+  // This is the text that should not be part of the job post body shown in the UI card.
+  const reviewSuffixIdx = chosen.search(
+    /(please review this job post|review the job post|let me know if you would like to make any changes|ready to go|reply to confirm|request changes)/i
+  );
+  if (reviewSuffixIdx !== -1) chosen = chosen.slice(0, reviewSuffixIdx).trim();
+
+  // Remove the marker if it leaked into the chosen side.
+  chosen = chosen.replaceAll(JOB_POST_MARKER, "").trim();
+
+  return chosen;
+}
 
 /**
  * Return profile field IDs whose label (or a recognizable part) does not appear in the job post.
@@ -235,8 +277,8 @@ async function gatherInfoNode(state) {
   const isJobPostReady = content.includes(JOB_POST_MARKER);
 
   if (isJobPostReady) {
-    // Use the exact job post from the assistant message — do not repair or rewrite (so "Job post" card matches chat).
-    const jobPostContent = content.split(JOB_POST_MARKER)[1] ? content.split(JOB_POST_MARKER)[1].trim() : content;
+    // Extract robustly: the model may place the marker either before or after the job post.
+    const jobPostContent = extractJobPostContent(content);
 
     const placeholderRegex = /\[([A-Z][A-Z\s/\-_]*(?:\:.*?)?)\]/g;
     const placeholders = [];
@@ -395,8 +437,7 @@ function routeAfterReview(state) {
 
 /**
  * Node: createJob
- * Embeds the finalized job post in Pinecone and marks the job as done.
- * The buyer sees a confirmation message — they don't know about the embedding.
+ * Pipeline: category retrieval → persist job → embed to seller-jobs → seller matching → persist matches → respond.
  * @param {object} state - Graph state
  * @param {object} [config] - Run config (from graph.invoke); holds configurable.thread_id
  */
@@ -404,6 +445,7 @@ async function createJobNode(state, config) {
   console.log(LOG_TAG, "createJobNode entry");
 
   const model = createModel();
+  const jobPost = state.jobPost || "";
 
   const runnableConfig = AsyncLocalStorageProviderSingleton.getRunnableConfig?.();
   const threadId =
@@ -412,54 +454,106 @@ async function createJobNode(state, config) {
     state.messages?.[0]?.id ??
     "unknown";
 
+  const jobMetadata = extractMetadata(jobPost);
+  const jobTitle = jobMetadata?.title || jobPost.split("\n")[0]?.replace(/^#+\s*|\*\*/g, "").trim() || "Job";
+
+  let buyerJobId = null;
   let embeddingId = null;
-  let jobMetadata = null;
+  let matchedSellers = null;
+  let matchingStatus = "found";
+
+  let categoryResult = { searchQuery: null, category: null, subcategory: null, service: null };
+  try {
+    categoryResult = await retrieveBestCategoryForJob(jobPost);
+    console.log(LOG_TAG, "createJobNode category retrieval", {
+      searchQuery: categoryResult.searchQuery?.slice(0, 80),
+      service: categoryResult.service?.name,
+    });
+  } catch (err) {
+    console.error(LOG_TAG, "createJobNode category retrieval failed (non-blocking):", err.message);
+  }
 
   try {
-    const result = await embedJobPost(state.jobPost, threadId);
-    embeddingId = result.embeddingId;
-    jobMetadata = result.jobMetadata;
+    const job = await createBuyerJob({
+      threadId,
+      jobTitle,
+      jobDescription: jobPost,
+      categorySearchQuery: categoryResult.searchQuery,
+      categoryId: categoryResult.category?.id ?? null,
+      categoryName: categoryResult.category?.name ?? null,
+      subcategoryId: categoryResult.subcategory?.id ?? null,
+      subcategoryName: categoryResult.subcategory?.name ?? null,
+      serviceId: categoryResult.service?.id ?? null,
+      serviceName: categoryResult.service?.name ?? null,
+    });
+    buyerJobId = job.id;
+    console.log(LOG_TAG, "createJobNode job persisted", { buyerJobId });
+  } catch (err) {
+    console.error(LOG_TAG, "createJobNode persist job failed:", err.message);
+  }
+
+  try {
+    const embedResult = await embedJobPost(jobPost, threadId, categoryResult);
+    embeddingId = embedResult.embeddingId;
     console.log(LOG_TAG, "createJobNode embed success", {
       embeddingId,
-      chunkCount: result.chunkCount,
+      chunkCount: embedResult.chunkCount,
     });
+    if (buyerJobId) {
+      await updateBuyerJobPineconeId(buyerJobId, embeddingId);
+    }
   } catch (err) {
     console.error(LOG_TAG, "createJobNode embed failed (non-blocking):", err.message);
   }
 
-  let matchedSellers = null;
-  let matchingStatus = null;
-  if (state.jobPost && state.jobPost.trim().length > 0) {
-    console.log(LOG_TAG, "createJobNode starting seller matching", {
-      jobPostLength: state.jobPost.trim().length,
-      threadId,
-    });
+  if (jobPost.trim().length > 0) {
     try {
-      matchedSellers = await findMatchingSellers(state.jobPost);
-      matchingStatus = matchedSellers.length > 0 ? "found" : "found";
+      matchedSellers = await findMatchingSellers(jobPost, categoryResult);
+      matchingStatus = matchedSellers?.length > 0 ? "found" : "none_found";
       console.log(LOG_TAG, "createJobNode seller matching complete", {
-        matchingStatus,
         matchedCount: matchedSellers?.length ?? 0,
+        matchingStatus,
       });
+
+      if (buyerJobId && matchedSellers && matchedSellers.length > 0) {
+        const matchRecords = matchedSellers.map((s, i) => ({
+          profileId: s.profileId,
+          vectorRank: s.vectorRank ?? i + 1,
+          llmScore: s.matchScore ?? 0,
+          matchExplanation: s.matchExplanation || "",
+          finalRank: i + 1,
+        }));
+        await createSellerMatches(buyerJobId, matchRecords);
+        console.log(LOG_TAG, "createJobNode seller matches persisted", { count: matchRecords.length });
+      }
     } catch (err) {
       console.error(LOG_TAG, "createJobNode findMatchingSellers failed (non-blocking):", err.message);
       matchingStatus = "error";
     }
   }
 
-  const confirmPrompt = `The buyer has confirmed and the job post has been created successfully. Generate a brief, friendly confirmation message. Tell them their job post is now live and service providers will be able to see it. Keep it short and warm (2-3 sentences max). Do NOT include the job post again.`;
+  let confirmationMessage =
+    "Your job post is live. Relevant service providers can now discover it.";
 
-  const response = await model.invoke([
-    new SystemMessage(confirmPrompt),
-  ]);
+  if (matchingStatus === "error") {
+    confirmationMessage =
+      "Your job post is live. I couldn't generate seller matches right now, but providers can still discover your post and matching can run again later.";
+  } else if ((matchedSellers?.length ?? 0) === 0) {
+    confirmationMessage =
+      "Your job post is live. I couldn't find any seller matches to show yet, but providers can still discover your post as relevant profiles become available.";
+  } else {
+    const count = matchedSellers.length;
+    confirmationMessage =
+      `Your job post is live. I found ${count} seller match${count === 1 ? "" : "es"} ranked by match score, including weaker related options when exact fits are limited.`;
+  }
 
   console.log(LOG_TAG, "createJobNode done", { status: "done" });
 
   return {
-    messages: [new AIMessage(response.content)],
+    messages: [new AIMessage(confirmationMessage)],
     status: "done",
-    embeddingId: embeddingId,
-    jobMetadata: jobMetadata,
+    embeddingId,
+    jobMetadata,
     matchedSellers,
     matchingStatus,
   };
