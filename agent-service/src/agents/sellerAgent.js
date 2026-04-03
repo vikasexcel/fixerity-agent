@@ -261,7 +261,7 @@ Last AI message:\n${lastAiContent.slice(0, 1500)}\n\nUser reply:\n${lastUserCont
   }
 }
 
-async function gatherSellerInfoNode(state) {
+async function gatherSellerInfoNode(state, _config, _modelOverride = null) {
   console.log(LOG_TAG, "gatherSellerInfoNode entry", {
     questionCount: state.questionCount,
     status: state.status,
@@ -269,7 +269,7 @@ async function gatherSellerInfoNode(state) {
     domainPhaseComplete: state.domainPhaseComplete || false,
   });
 
-  const model = createModel();
+  const model = _modelOverride || createModel();
 
   // Build profile questions reference and state summary
   const profileQuestionsRef = buildSellerQuestionsReference();
@@ -317,26 +317,61 @@ async function gatherSellerInfoNode(state) {
     }
 
     const answeredOrSkipped = Object.keys(effectiveProfileAnswers).length;
-    const allCovered = answeredOrSkipped >= SELLER_PROFILE_QUESTION_IDS.length;
+    // Allow profile generation if at least 17 of 20 questions are tracked.
+    // The LLM classifier sometimes misses 1-2 questions (e.g. serviceType, insurance)
+    // when they were answered implicitly or phrased unusually, even though the LLM
+    // correctly included them in the generated profile. Requiring 100% tracking causes
+    // the profile to never reach the review/confirm stage.
+    const MIN_QUESTIONS_FOR_PROFILE = Math.max(17, SELLER_PROFILE_QUESTION_IDS.length - 3);
+    const allCovered = answeredOrSkipped >= MIN_QUESTIONS_FOR_PROFILE;
 
     if (!allCovered) {
-      console.log(LOG_TAG, "gatherSellerInfoNode profile generated too early", {
+      const unansweredIds = SELLER_PROFILE_QUESTION_IDS.filter((id) => effectiveProfileAnswers[id] == null);
+      console.log(LOG_TAG, "gatherSellerInfoNode profile generated too early — re-invoking to ask next question", {
         answeredOrSkipped,
-        required: SELLER_PROFILE_QUESTION_IDS.length,
-        message: "Profile generated before all questions answered - continuing to gather",
+        required: MIN_QUESTIONS_FOR_PROFILE,
+        unanswered: unansweredIds.length,
+        unansweredIds,
       });
-      // Merge the current-turn extraction into state so we don't lose it, then continue gathering
+
+      // Merge any current-turn extraction so we don't lose it
       const profileAnswersUpdate =
         Object.keys(effectiveProfileAnswers).length > Object.keys(currentProfileAnswers).length
           ? Object.fromEntries(
               Object.entries(effectiveProfileAnswers).filter(([id]) => currentProfileAnswers[id] == null)
             )
           : null;
+      const mergedAnswers = profileAnswersUpdate
+        ? { ...currentProfileAnswers, ...profileAnswersUpdate }
+        : currentProfileAnswers;
+
+      // Re-invoke model with a correction instruction — DO NOT send premature profile to user.
+      // The user must never see a profile before all questions are answered, otherwise they
+      // will try to confirm it while status is still "gathering", causing an infinite loop where
+      // their "go ahead" is fed back to gatherSellerInfoNode and the profile is re-generated
+      // repeatedly without sellerProfile ever being saved to state.
+      const updatedStateSummary = buildProfileStateSummary(mergedAnswers, true, currentDomainCount);
+      const correctionMessagesForLLM = [
+        new SystemMessage(
+          SYSTEM_PROMPT +
+            "\n\n---\n" +
+            buildSellerQuestionsReference() +
+            "\n\n" +
+            updatedStateSummary +
+            `\n\n⚠️ CORRECTION: You attempted to generate the profile but ${unansweredIds.length} profile question(s) are still unanswered: [${unansweredIds.join(", ")}]. Do NOT output the profile yet. Ask the next unanswered profile question naturally, continuing the conversation from where you left off.`
+        ),
+        ...state.messages,
+      ];
+      const correctionResponse = await model.invoke(correctionMessagesForLLM);
+
       return {
-        messages: [new AIMessage(content)],
+        messages: [new AIMessage(correctionResponse.content)],
         status: "gathering",
         questionCount: state.questionCount + 1,
-        ...(profileAnswersUpdate && Object.keys(profileAnswersUpdate).length > 0 ? { profileAnswers: profileAnswersUpdate } : {}),
+        domainPhaseComplete: true, // LLM attempted profile generation → domain phase is definitely done
+        ...(profileAnswersUpdate && Object.keys(profileAnswersUpdate).length > 0
+          ? { profileAnswers: profileAnswersUpdate }
+          : {}),
       };
     }
 
@@ -457,6 +492,7 @@ async function reviewSellerProfileNode(state) {
     "confirm",
     "yes",
     "looks good",
+    "all good",
     "approve",
     "create",
     "go ahead",
