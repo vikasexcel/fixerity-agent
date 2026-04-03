@@ -85,3 +85,36 @@ model JobMatch {
   @@map("job_matches")
 }
 
+/// Persisted conversation thread for buyer or seller agent.
+/// Stores the LangGraph thread_id so the in-memory checkpointer can be
+/// restored, and a snapshot of the full agent state so conversations can
+/// survive server restarts (state snapshot is re-hydrated on load).
+model Conversation {
+  id        String   @id @default(cuid())
+  threadId  String   @unique @map("thread_id")
+  agentType String   @map("agent_type") // "buyer" | "seller"
+  title     String   @default("New conversation")
+  status    String   @default("gathering") // mirrors agent state status
+  /// Full JSON snapshot of the agent state (persisted after every turn)
+  stateSnapshot Json? @map("state_snapshot")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages ConversationMessage[]
+
+  @@map("conversations")
+}
+
+/// Individual messages within a conversation (role + content).
+model ConversationMessage {
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  role           String   // "user" | "assistant"
+  content        String   @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_messages")
+}
+

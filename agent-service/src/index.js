@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import buyerAgentV2Router from "./routes/buyerAgentV2.js";
 import sellerAgentV2Router from "./routes/sellerAgentV2.js";
+import conversationRouter from "./routes/conversationRoutes.js";
 import { prisma } from "./db/prisma.js";
 
 const app = express();
@@ -21,6 +22,9 @@ app.use("/buyer-agentv2", buyerAgentV2Router);
 
 // Seller Agent V2 routes
 app.use("/seller-agentv2", sellerAgentV2Router);
+
+// Conversations (list + get by threadId)
+app.use("/conversations", conversationRouter);
 
 prisma
   .$connect()

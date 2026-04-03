@@ -17,35 +17,19 @@ import {
   type MatchedSeller,
   type MatchingStatus,
 } from '@/lib/buyer-agent-api';
+import { listConversations, type ConversationMeta } from '@/lib/conversations-api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { SellerMatchCard } from '@/components/seller-match-card';
 
-const THREADS_STORAGE_KEY = 'buyer_agent_threads';
-
 type ThreadMeta = { threadId: string; title: string; updatedAt: number };
 
-function loadThreadList(): ThreadMeta[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(THREADS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveThreadList(list: ThreadMeta[]) {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(list));
-}
-
-function addOrUpdateThread(list: ThreadMeta[], threadId: string, title: string): ThreadMeta[] {
-  const now = Date.now();
-  const filtered = list.filter((t) => t.threadId !== threadId);
-  return [{ threadId, title: title || 'New conversation', updatedAt: now }, ...filtered];
+function conversationMetaToThreadMeta(c: ConversationMeta): ThreadMeta {
+  return {
+    threadId: c.threadId,
+    title: c.title || 'New conversation',
+    updatedAt: new Date(c.updatedAt).getTime(),
+  };
 }
 
 /** Render job post text so **Label:** is bold and the value shows clearly (like in the reference image). */
@@ -101,17 +85,29 @@ export default function BuyerAgentPage() {
   const sellersStart = (sellersPage - 1) * MATCHES_PAGE_SIZE;
   const paginatedSellers = matchedSellers.slice(sellersStart, sellersStart + MATCHES_PAGE_SIZE);
 
-  const updateThreadList = useCallback((threadId: string, title: string) => {
-    setThreadList((prev) => {
-      const next = addOrUpdateThread(prev, threadId, title);
-      saveThreadList(next);
-      return next;
-    });
+  /** Refresh the sidebar thread list from the DB. */
+  const refreshThreadList = useCallback(async () => {
+    try {
+      const conversations = await listConversations('buyer');
+      setThreadList(conversations.map(conversationMetaToThreadMeta));
+    } catch {
+      // Non-fatal — sidebar may be stale, but the chat still works
+    }
   }, []);
 
+  /** Optimistically add/update an entry in the sidebar, then refresh from DB. */
+  const updateThreadList = useCallback((id: string, title: string) => {
+    setThreadList((prev) => {
+      const filtered = prev.filter((t) => t.threadId !== id);
+      return [{ threadId: id, title: title || 'New conversation', updatedAt: Date.now() }, ...filtered];
+    });
+    // Re-sync from DB after a short delay to pick up any server-side title changes
+    setTimeout(() => refreshThreadList(), 500);
+  }, [refreshThreadList]);
+
   useEffect(() => {
-    setThreadList(loadThreadList());
-  }, []);
+    refreshThreadList();
+  }, [refreshThreadList]);
 
   useEffect(() => {
     setSellersPage(1);

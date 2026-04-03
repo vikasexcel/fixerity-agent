@@ -2,6 +2,11 @@ import express from "express";
 import { v4 as uuidv4 } from "uuid";
 import { HumanMessage } from "@langchain/core/messages";
 import { buildBuyerGraph } from "../graph/buyerGraph.js";
+import {
+  upsertConversation,
+  addMessage,
+  getConversationByThreadId,
+} from "../db/conversationRepository.js";
 
 const router = express.Router();
 
@@ -25,6 +30,22 @@ async function getGraphState(threadId) {
 }
 
 /**
+ * Serialize the agent state for DB storage.
+ * Converts LangChain message objects to plain {role, content} objects.
+ */
+function serializeState(state) {
+  if (!state) return null;
+  const { messages, ...rest } = state;
+  return {
+    ...rest,
+    messages: (messages || []).map((m) => ({
+      role: m._getType() === "human" ? "user" : "assistant",
+      content: cleanMessage(m.content),
+    })),
+  };
+}
+
+/**
  * POST /buyer-agentv2/start
  * Start a new conversation. The buyer provides their initial description of what they need.
  * Body: { message } (optional — if omitted, a generic prompt is used)
@@ -45,10 +66,26 @@ router.post("/start", async (req, res) => {
     );
 
     const lastMessage = result.messages[result.messages.length - 1];
+    const assistantContent = cleanMessage(lastMessage.content);
+
+    // Persist conversation + both messages to DB (fire-and-forget but awaited for consistency)
+    try {
+      const conv = await upsertConversation({
+        threadId,
+        agentType: "buyer",
+        title: userMessage.slice(0, 60),
+        status: result.status,
+        stateSnapshot: serializeState(result),
+      });
+      await addMessage(conv.id, "user", userMessage);
+      await addMessage(conv.id, "assistant", assistantContent);
+    } catch (dbErr) {
+      console.error("[BuyerRoute] DB persist error on start:", dbErr);
+    }
 
     res.json({
       threadId,
-      message: cleanMessage(lastMessage.content),
+      message: assistantContent,
       status: result.status,
     });
   } catch (error) {
@@ -112,15 +149,30 @@ router.post("/chat", async (req, res) => {
     }
 
     const lastMessage = result.messages[result.messages.length - 1];
+    const assistantContent = cleanMessage(lastMessage.content);
+
+    // Persist to DB
+    try {
+      const conv = await upsertConversation({
+        threadId,
+        agentType: "buyer",
+        title: message.slice(0, 60),
+        status: result.status,
+        stateSnapshot: serializeState(result),
+      });
+      await addMessage(conv.id, "user", message);
+      await addMessage(conv.id, "assistant", assistantContent);
+    } catch (dbErr) {
+      console.error("[BuyerRoute] DB persist error on chat:", dbErr);
+    }
 
     const response = {
       threadId,
-      message: cleanMessage(lastMessage.content),
+      message: assistantContent,
       status: result.status,
     };
 
     // Include jobPost fields when a post has been generated
-    // Use `!= null` instead of truthiness so we don't accidentally drop empty-string posts.
     if (result.jobPost != null) {
       response.jobPost = result.jobPost;
       response.placeholders = result.placeholders;
@@ -143,44 +195,76 @@ router.post("/chat", async (req, res) => {
 /**
  * GET /buyer-agentv2/state/:threadId
  * Get the full state of a conversation.
+ * First tries the live LangGraph in-memory state; falls back to the DB snapshot
+ * (e.g. after a server restart where in-memory checkpointer was cleared).
  */
 router.get("/state/:threadId", async (req, res) => {
   try {
     const { threadId } = req.params;
 
+    // Try live graph state first
     const state = await getGraphState(threadId);
+    const hasLiveState = state?.values?.messages?.length > 0;
 
-    if (!state || !state.values || !state.values.messages) {
+    if (hasLiveState) {
+      const messages = state.values.messages.map((m) => ({
+        role: m._getType() === "human" ? "user" : "assistant",
+        content: cleanMessage(m.content),
+      }));
+
+      const response = {
+        threadId,
+        messages,
+        status: state.values.status,
+        questionCount: state.values.questionCount,
+      };
+
+      if (state.values.jobPost != null) {
+        response.jobPost = state.values.jobPost;
+        response.placeholders = state.values.placeholders;
+      }
+      if (state.values.matchedSellers != null) {
+        response.matchedSellers = state.values.matchedSellers;
+      }
+      if (state.values.matchingStatus != null) {
+        response.matchingStatus = state.values.matchingStatus;
+      }
+      if (state.values.sellerDecisions && Object.keys(state.values.sellerDecisions).length > 0) {
+        response.sellerDecisions = state.values.sellerDecisions;
+      }
+
+      return res.json(response);
+    }
+
+    // Fallback: load from DB snapshot (server restarted / in-memory state lost)
+    const conv = await getConversationByThreadId(threadId);
+    if (!conv) {
       return res.status(404).json({ error: "Thread not found" });
     }
 
-    const messages = state.values.messages.map((m) => ({
-      role: m._getType() === "human" ? "user" : "assistant",
-      content: cleanMessage(m.content),
-    }));
-
+    const snapshot = conv.stateSnapshot || {};
     const response = {
       threadId,
-      messages,
-      status: state.values.status,
-      questionCount: state.values.questionCount,
+      messages: conv.messages.map((m) => ({ role: m.role, content: m.content })),
+      status: conv.status,
+      questionCount: snapshot.questionCount ?? 0,
     };
 
-    if (state.values.jobPost != null) {
-      response.jobPost = state.values.jobPost;
-      response.placeholders = state.values.placeholders;
+    if (snapshot.jobPost != null) {
+      response.jobPost = snapshot.jobPost;
+      response.placeholders = snapshot.placeholders;
     }
-    if (state.values.matchedSellers != null) {
-      response.matchedSellers = state.values.matchedSellers;
+    if (snapshot.matchedSellers != null) {
+      response.matchedSellers = snapshot.matchedSellers;
     }
-    if (state.values.matchingStatus != null) {
-      response.matchingStatus = state.values.matchingStatus;
+    if (snapshot.matchingStatus != null) {
+      response.matchingStatus = snapshot.matchingStatus;
     }
-    if (state.values.sellerDecisions && Object.keys(state.values.sellerDecisions).length > 0) {
-      response.sellerDecisions = state.values.sellerDecisions;
+    if (snapshot.sellerDecisions && Object.keys(snapshot.sellerDecisions).length > 0) {
+      response.sellerDecisions = snapshot.sellerDecisions;
     }
 
-    res.json(response);
+    return res.json(response);
   } catch (error) {
     console.error("Error getting state:", error);
     res.status(500).json({ error: "Failed to get conversation state" });
@@ -219,6 +303,19 @@ router.post("/seller-decision", async (req, res) => {
       { configurable: { thread_id: threadId } },
       { sellerDecisions: { [profileId]: decision } }
     );
+
+    // Persist updated sellerDecisions into DB snapshot
+    try {
+      const updatedState = await getGraphState(threadId);
+      await upsertConversation({
+        threadId,
+        agentType: "buyer",
+        status: updatedState?.values?.status,
+        stateSnapshot: serializeState(updatedState?.values),
+      });
+    } catch (dbErr) {
+      console.error("[BuyerRoute] DB persist error on seller-decision:", dbErr);
+    }
 
     res.json({
       threadId,

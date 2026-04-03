@@ -12,7 +12,7 @@ services:
 
     # 🔒 Bind MySQL to localhost ONLY
     ports:
-      - "127.0.0.1:3307:3306"
+      - "127.0.0.1:20156:3306"
 
     volumes:
       - fixerity_data:/var/lib/mysql

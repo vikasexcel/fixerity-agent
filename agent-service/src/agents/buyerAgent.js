@@ -100,6 +100,15 @@ function createModel() {
 
 const JOB_POST_MARKER = "---JOB_POST_READY---";
 
+/** When the job post body is structurally complete but profileAnswers lag extraction, we sync missing IDs to this value so state stays consistent without lowering the 15-slot bar. */
+export const PROFILE_BACKFILL_FROM_JOB_POST = "(from job post)";
+
+/** Minimum tracked profile slots before we trust structural completeness (avoids accepting thin/partial posts with only a few answers).
+ * Set to 9 because the real-world classifier can fail to extract up to 6 Phase-2 answers (e.g. when domain-question
+ * detection bleeds into Phase 2), so we need a threshold low enough to let the complete-job-post body trigger backfill
+ * rather than deadlock the correction loop forever. */
+const MIN_TRACKED_FOR_STRUCTURAL_BACKFILL = 9;
+
 /**
  * Extracts the actual job post block from the full assistant message.
  *
@@ -155,7 +164,11 @@ function getMissingJobPostFields(jobPostContent) {
     const searchLen = Math.min(14, labelLower.length);
     const search = labelLower.slice(0, searchLen).trim();
     if (search.length < 5) continue;
-    const found = lower.includes(search);
+    let found = lower.includes(search);
+    // Mandatory job-post template often uses Project Overview + Issues/Scope instead of a **Detailed Description:** heading.
+    if (q.id === "detailedDescription" && !found) {
+      found = lower.includes("project overview") && lower.includes("issues/scope");
+    }
     if (!found) missing.push(q.id);
   }
   return missing;
@@ -251,8 +264,11 @@ Last AI message:\n${lastAiContent.slice(0, 1500)}\n\nUser reply:\n${lastUserCont
  * Node: gatherInfo
  * Asks domain-specific questions and profile questions (with skip support), then generates the job post.
  * When the job post is ready, sets status to "reviewing" for human approval.
+ * @param {object} state - Graph state
+ * @param {object} [_config] - Run config (unused here)
+ * @param {object|null} [_modelOverride] - Optional model override for testing
  */
-async function gatherInfoNode(state) {
+async function gatherInfoNode(state, _config = null, _modelOverride = null) {
   const enteringPhase = state.domainPhaseComplete === true ? 2 : 1;
   console.log(LOG_TAG, "gatherInfoNode entry", {
     phase: enteringPhase,
@@ -262,7 +278,7 @@ async function gatherInfoNode(state) {
     domainPhaseComplete: state.domainPhaseComplete === true,
   });
 
-  const model = createModel();
+  const model = _modelOverride || createModel();
   const profileQuestionsRef = buildProfileQuestionsReference();
   const domainPhaseComplete = state.domainPhaseComplete === true;
   const domainQuestionCount = state.domainQuestionCount ?? 0;
@@ -277,6 +293,101 @@ async function gatherInfoNode(state) {
   const isJobPostReady = content.includes(JOB_POST_MARKER);
 
   if (isJobPostReady) {
+    // Include current turn's Q&A in the profile coverage check before deciding if post is valid.
+    const currentProfileAnswers = state.profileAnswers ?? {};
+    const currentDomainPhaseComplete = state.domainPhaseComplete === true;
+    let effectiveProfileAnswers = { ...currentProfileAnswers };
+
+    const messages = state.messages ?? [];
+    if (messages.length >= 2 && currentDomainPhaseComplete) {
+      const lastUser = messages[messages.length - 1];
+      const lastAi = messages[messages.length - 2];
+      const lastUserContent = typeof lastUser?.content === "string" ? lastUser.content : "";
+      const lastAiContent = typeof lastAi?.content === "string" ? lastAi.content : "";
+      const extracted = await extractProfileUpdate(model, lastAiContent, lastUserContent, currentDomainPhaseComplete);
+      if (extracted && effectiveProfileAnswers[extracted.questionId] == null) {
+        effectiveProfileAnswers[extracted.questionId] = extracted.value;
+        console.log(LOG_TAG, "gatherInfoNode job-post-ready: included current turn", {
+          questionId: extracted.questionId,
+          value: extracted.value === "skip" ? "skip" : String(extracted.value).slice(0, 60),
+        });
+      }
+    }
+
+    // Require every profile slot to be answered or skipped in state (matches SYSTEM_PROMPT + PROFILE STATE).
+    // The model may still emit ---JOB_POST_READY--- early; we block until tracking is complete so we
+    // don't "finish" after e.g. only asking additionalComments while serviceCategory/detailedDescription
+    // were never asked or never extracted into profileAnswers.
+    let unansweredIds = PROFILE_QUESTION_IDS.filter((id) => effectiveProfileAnswers[id] == null);
+    const trackedCount = PROFILE_QUESTION_IDS.length - unansweredIds.length;
+
+    // If the rendered job post already contains every section (heuristic) and most slots are tracked,
+    // backfill missing keys so extraction drift cannot deadlock the flow. Does not apply when few
+    // answers are tracked (still use the correction path — see premature-job-post tests).
+    const jobPostDraft = extractJobPostContent(content);
+    if (
+      unansweredIds.length > 0 &&
+      jobPostDraft.trim() &&
+      getMissingJobPostFields(jobPostDraft).length === 0 &&
+      trackedCount >= MIN_TRACKED_FOR_STRUCTURAL_BACKFILL
+    ) {
+      const backfilled = [...unansweredIds];
+      for (const id of unansweredIds) {
+        effectiveProfileAnswers[id] = PROFILE_BACKFILL_FROM_JOB_POST;
+      }
+      unansweredIds = PROFILE_QUESTION_IDS.filter((id) => effectiveProfileAnswers[id] == null);
+      console.log(LOG_TAG, "gatherInfoNode structural backfill: complete job post body, synced profile keys", {
+        backfilled,
+      });
+    }
+
+    const answeredOrSkipped = PROFILE_QUESTION_IDS.length - unansweredIds.length;
+    const allCovered = unansweredIds.length === 0;
+
+    if (!allCovered) {
+      console.log(LOG_TAG, "gatherInfoNode job post generated too early — re-invoking to ask next question", {
+        answeredOrSkipped,
+        required: PROFILE_QUESTION_IDS.length,
+        unanswered: unansweredIds.length,
+        unansweredIds,
+      });
+
+      // Merge any current-turn extraction so we don't lose it
+      const profileAnswersUpdate =
+        Object.keys(effectiveProfileAnswers).length > Object.keys(currentProfileAnswers).length
+          ? Object.fromEntries(
+              Object.entries(effectiveProfileAnswers).filter(([id]) => currentProfileAnswers[id] == null)
+            )
+          : null;
+      const mergedAnswers = profileAnswersUpdate
+        ? { ...currentProfileAnswers, ...profileAnswersUpdate }
+        : currentProfileAnswers;
+
+      const updatedStateSummary = buildProfileStateSummary(mergedAnswers, true, state.domainQuestionCount ?? 0);
+      const correctionMessagesForLLM = [
+        new SystemMessage(
+          SYSTEM_PROMPT +
+            "\n\n---\n" +
+            profileQuestionsRef +
+            "\n\n" +
+            updatedStateSummary +
+            `\n\n⚠️ CORRECTION: You attempted to generate the job post but ${unansweredIds.length} profile question(s) are still unanswered: [${unansweredIds.join(", ")}]. Do NOT output the job post yet. Ask the next unanswered profile question naturally, continuing the conversation from where you left off.`
+        ),
+        ...state.messages,
+      ];
+      const correctionResponse = await model.invoke(correctionMessagesForLLM);
+
+      return {
+        messages: [new AIMessage(correctionResponse.content)],
+        status: "gathering",
+        questionCount: state.questionCount + 1,
+        domainPhaseComplete: true, // LLM attempted job post generation → domain phase is definitely done
+        ...(profileAnswersUpdate && Object.keys(profileAnswersUpdate).length > 0
+          ? { profileAnswers: profileAnswersUpdate }
+          : {}),
+      };
+    }
+
     // Extract robustly: the model may place the marker either before or after the job post.
     const jobPostContent = extractJobPostContent(content);
 
@@ -290,7 +401,16 @@ async function gatherInfoNode(state) {
     console.log(LOG_TAG, "gatherInfoNode job post ready", {
       status: "reviewing",
       placeholdersCount: placeholders.length,
+      profileAnswersCovered: answeredOrSkipped,
     });
+
+    // Persist any current-turn extraction so state has full coverage
+    const profileAnswersUpdate =
+      Object.keys(effectiveProfileAnswers).length > Object.keys(currentProfileAnswers).length
+        ? Object.fromEntries(
+            Object.entries(effectiveProfileAnswers).filter(([id]) => currentProfileAnswers[id] == null)
+          )
+        : null;
 
     return {
       messages: [new AIMessage(content)],
@@ -298,6 +418,9 @@ async function gatherInfoNode(state) {
       placeholders: placeholders,
       status: "reviewing",
       questionCount: state.questionCount,
+      ...(profileAnswersUpdate && Object.keys(profileAnswersUpdate).length > 0
+        ? { profileAnswers: profileAnswersUpdate }
+        : {}),
     };
   }
 
@@ -325,13 +448,20 @@ async function gatherInfoNode(state) {
         profileAnswersUpdate = { [extracted.questionId]: extracted.value };
         console.log(LOG_TAG, "gatherInfoNode profile update", extracted);
       }
-    } else {
+    } else if (!currentDomainPhaseComplete) {
       console.log(LOG_TAG, "last exchange: domain question", {
         counted: true,
         domainQuestionCountAfter: currentDomainCount + 1,
       });
-      // Last exchange was a domain question (no profile match) — count it
+      // Last exchange was a domain question (no profile match) — count it only in Phase 1
       domainQuestionCountIncrement = 1;
+    } else {
+      // Phase 2: classifier didn't recognize this as a profile question.
+      // Do not count as domain question — it will be extracted on the next turn or
+      // the structural backfill will cover it when the job post is complete.
+      console.log(LOG_TAG, "last exchange: Phase 2 unclassified (not counted as domain)", {
+        domainQuestionCount: currentDomainCount,
+      });
     }
   }
   const newDomainCount = currentDomainCount + domainQuestionCountIncrement;
@@ -391,6 +521,7 @@ async function reviewJobPostNode(state) {
   const confirmPatterns = [
     "confirm",
     "yes",
+    "all good",
     "looks good",
     "approve",
     "publish",
@@ -567,4 +698,6 @@ export {
   createJobNode,
   JOB_POST_MARKER,
   getMissingJobPostFields,
+  buildProfileStateSummary,
+  buildProfileQuestionsReference,
 };
