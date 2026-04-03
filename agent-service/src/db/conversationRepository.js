@@ -73,6 +73,21 @@ export async function listConversations(agentType) {
 }
 
 /**
+ * Update the title of a conversation.
+ * Throws if no conversation exists for the given threadId.
+ *
+ * @param {string} threadId
+ * @param {string} title
+ * @returns {Promise<object>}
+ */
+export async function updateConversationTitle(threadId, title) {
+  return prisma.conversation.update({
+    where: { threadId },
+    data: { title },
+  });
+}
+
+/**
  * Get a single conversation with its messages and state snapshot.
  *
  * @param {string} threadId

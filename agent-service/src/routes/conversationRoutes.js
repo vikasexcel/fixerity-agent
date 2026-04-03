@@ -2,6 +2,7 @@ import express from "express";
 import {
   listConversations,
   getConversationByThreadId,
+  updateConversationTitle,
 } from "../db/conversationRepository.js";
 
 const router = express.Router();
@@ -43,6 +44,33 @@ router.get("/:threadId", async (req, res) => {
   } catch (error) {
     console.error("[ConversationRoutes] Error getting conversation:", error);
     res.status(500).json({ error: "Failed to get conversation" });
+  }
+});
+
+/**
+ * PATCH /conversations/:threadId/title
+ * Set a custom title for a conversation. The title will not be overwritten by
+ * subsequent chat messages.
+ * Body: { title: string }
+ * Returns: { threadId, title }
+ */
+router.patch("/:threadId/title", async (req, res) => {
+  try {
+    const { threadId } = req.params;
+    const { title } = req.body;
+
+    if (!title || typeof title !== "string" || title.trim().length === 0) {
+      return res.status(400).json({ error: "title must be a non-empty string" });
+    }
+
+    const conversation = await updateConversationTitle(threadId, title.trim());
+    res.json({ threadId: conversation.threadId, title: conversation.title });
+  } catch (error) {
+    if (error.code === "P2025") {
+      return res.status(404).json({ error: "Conversation not found" });
+    }
+    console.error("[ConversationRoutes] Error updating title:", error);
+    res.status(500).json({ error: "Failed to update title" });
   }
 });
 

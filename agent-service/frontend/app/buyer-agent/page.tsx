@@ -17,7 +17,7 @@ import {
   type MatchedSeller,
   type MatchingStatus,
 } from '@/lib/buyer-agent-api';
-import { listConversations, type ConversationMeta } from '@/lib/conversations-api';
+import { listConversations, updateConversationTitle, type ConversationMeta } from '@/lib/conversations-api';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
 import { SellerMatchCard } from '@/components/seller-match-card';
@@ -78,7 +78,10 @@ export default function BuyerAgentPage() {
     Record<string, 'approved' | 'rejected' | 'contacted'>
   >({});
   const [sellersPage, setSellersPage] = useState(1);
+  const [renamingThreadId, setRenamingThreadId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const inputRef = React.useRef<HTMLTextAreaElement>(null);
+  const renameInputRef = React.useRef<HTMLInputElement>(null);
 
   const MATCHES_PAGE_SIZE = 10;
   const sellersTotalPages = Math.max(1, Math.ceil(matchedSellers.length / MATCHES_PAGE_SIZE));
@@ -191,8 +194,7 @@ export default function BuyerAgentPage() {
         if (res.placeholders?.length) setPlaceholders(res.placeholders);
         if (res.matchedSellers != null) setMatchedSellers(res.matchedSellers);
         if (res.matchingStatus != null) setMatchingStatus(res.matchingStatus);
-        const title = text.slice(0, 40) + (text.length > 40 ? '…' : '');
-        updateThreadList(threadId, title);
+        updateThreadList(threadId, threadList.find((t) => t.threadId === threadId)?.title ?? 'New conversation');
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to send message');
         setMessages((prev) => prev.slice(0, -1));
@@ -214,6 +216,34 @@ export default function BuyerAgentPage() {
     },
     [handleSend]
   );
+
+  const startRename = useCallback((t: ThreadMeta, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenamingThreadId(t.threadId);
+    setRenameValue(t.title);
+    setTimeout(() => renameInputRef.current?.select(), 0);
+  }, []);
+
+  const commitRename = useCallback(async () => {
+    if (!renamingThreadId) return;
+    const trimmed = renameValue.trim();
+    if (trimmed) {
+      try {
+        await updateConversationTitle(renamingThreadId, trimmed);
+        setThreadList((prev) =>
+          prev.map((t) => t.threadId === renamingThreadId ? { ...t, title: trimmed } : t)
+        );
+      } catch {
+        // silently ignore — title stays as-is in the UI
+      }
+    }
+    setRenamingThreadId(null);
+  }, [renamingThreadId, renameValue]);
+
+  const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+    if (e.key === 'Escape') { setRenamingThreadId(null); }
+  }, [commitRename]);
 
   const handleSellerDecision = useCallback(
     (profileId: string, decision: 'approved' | 'rejected' | 'contacted') => {
@@ -251,20 +281,44 @@ export default function BuyerAgentPage() {
         >
           <ul className="space-y-1">
             {threadList.map((t) => (
-              <li key={t.threadId}>
-                <button
-                  type="button"
-                  onClick={() => loadThread(t.threadId)}
-                  disabled={loading}
-                  className={cn(
-                    'w-full text-left rounded-md px-3 py-2 text-sm truncate focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50',
-                    threadId === t.threadId
-                      ? 'bg-accent text-accent-foreground'
-                      : 'hover:bg-muted text-foreground'
-                  )}
-                >
-                  {t.title}
-                </button>
+              <li key={t.threadId} className="group relative">
+                {renamingThreadId === t.threadId ? (
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={handleRenameKeyDown}
+                    className="w-full rounded-md px-3 py-2 text-sm bg-background border border-ring focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="Rename conversation"
+                  />
+                ) : (
+                  <div className="flex items-center">
+                    <button
+                      type="button"
+                      onClick={() => loadThread(t.threadId)}
+                      disabled={loading}
+                      className={cn(
+                        'flex-1 text-left rounded-md px-3 py-2 text-sm truncate focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50',
+                        threadId === t.threadId
+                          ? 'bg-accent text-accent-foreground'
+                          : 'hover:bg-muted text-foreground'
+                      )}
+                    >
+                      {t.title}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => startRename(t, e)}
+                      className="shrink-0 opacity-0 group-hover:opacity-100 p-1 mr-1 rounded text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label="Rename conversation"
+                      title="Rename"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>

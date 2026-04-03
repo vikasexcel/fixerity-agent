@@ -151,7 +151,6 @@ router.post("/chat", async (req, res) => {
       const conv = await upsertConversation({
         threadId,
         agentType: "seller",
-        title: message.slice(0, 60),
         status: result.status,
         stateSnapshot: serializeState(result),
       });

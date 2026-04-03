@@ -51,6 +51,28 @@ export async function listConversations(
 }
 
 /**
+ * Update the title of a conversation.
+ */
+export async function updateConversationTitle(
+  threadId: string,
+  title: string
+): Promise<{ threadId: string; title: string }> {
+  const base = getAgentBaseUrl();
+  const url = `${base}/conversations/${encodeURIComponent(threadId)}/title`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = (data as { error?: string }).error ?? res.statusText;
+    throw new Error(err);
+  }
+  return data as { threadId: string; title: string };
+}
+
+/**
  * Get a single conversation with messages + state snapshot.
  */
 export async function getConversation(
