@@ -18,6 +18,12 @@ return [
     'allowed_origins' => [
         'http://localhost:3000',
         'http://127.0.0.1:3000',
+        'http://localhost:3016',
+        'http://127.0.0.1:3016',
+        'http://localhost:20158',
+        'http://127.0.0.1:20158',
+        'http://116.202.210.102:3016',
+        'http://116.202.210.102:20158',
     ],
 
     'allowed_origins_patterns' => [],

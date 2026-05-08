@@ -1,43 +1,25 @@
 services:
-  redis:
-    image: redis:7.2
-    container_name: agent-service-redis
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: fixerity-agent-db-vector
     restart: unless-stopped
 
-    command: >
-      redis-server
-      --appendonly yes
-      --appendfsync everysec
-      --save 60 1000
-      --maxmemory 1gb
-      --maxmemory-policy allkeys-lru
+    environment:
+      POSTGRES_USER: fixerity
+      POSTGRES_PASSWORD: fixerity123
+      POSTGRES_DB: fixerity_agent_db_vector
 
     ports:
-      - "6379:6379"
+      - "20150:5432"
 
     volumes:
-      - agent-service-redis-data:/data
+      - fixerity-agent-db-vector-data:/var/lib/postgresql/data
 
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "pg_isready -U fixerity"]
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 5
 
-  redis-insight:
-    image: redis/redisinsight:latest
-    container_name: agent-service-redis-insight
-    restart: unless-stopped
-
-    ports:
-      - "5540:5540"
-
-    volumes:
-      - agent-service-redis-insight-data:/db
-
-    depends_on:
-      - redis
-
 volumes:
-  agent-service-redis-data:
-  agent-service-redis-insight-data:
+  fixerity-agent-db-vector-data:

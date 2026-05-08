@@ -32,8 +32,8 @@ export default function AuthPage() {
 
   useEffect(() => {
     if (session.isLoading) return;
-    if (session.user?.role === 'buyer') router.push('/buyer/dashboard');
-    else if (session.user?.role === 'seller') router.push('/seller/dashboard');
+    if (session.user?.role === 'buyer') router.push('/buyer-agent');
+    else if (session.user?.role === 'seller') router.push('/seller-agent');
   }, [session.isLoading, session.user, router]);
 
   const handleAuth = async (e: React.FormEvent) => {
@@ -72,9 +72,9 @@ export default function AuthPage() {
       }
 
       if (role === 'buyer') {
-        router.push('/buyer/dashboard');
+        router.push('/buyer-agent');
       } else {
-        router.push('/seller/dashboard');
+        router.push('/seller-agent');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong.');
