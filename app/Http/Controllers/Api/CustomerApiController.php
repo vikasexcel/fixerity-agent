@@ -137,6 +137,15 @@ class CustomerApiController extends Controller
             ->groupBy('other_service_sub_category.service_cat_id')
             ->orderBy('service_category.display_order', 'asc')->get();
 
+        // Fallback: if no "other" services (e.g. house cleaning), return main service_category list so agents/UI get categories (e.g. id 19)
+        if ($services->isEmpty()) {
+            $services = ServiceCategory::query()->select('service_category.id as service_category_id',
+                'service_category.'.$lang_prefix . 'name as service_category_name',
+                DB::raw("(CASE WHEN service_category.icon_name != '' THEN (concat('$service_category_icon_url','/',service_category.icon_name,'?v=0.3')) ELSE '' END) as service_category_icon"))
+                ->where('service_category.status', 1)
+                ->orderBy('service_category.display_order', 'asc')->get();
+        }
+
 //        return $services->count();
 //        $homepage_slider = HomePageBanner::query()->select('home_page_banner.service_id as service_category_id',
 //            'service_category.'.$lang_prefix . 'name as service_category_name',
@@ -179,6 +188,84 @@ class CustomerApiController extends Controller
             ]);
         }
 
+    }
+
+    /**
+     * Get user (customer) details by user_id.
+     * Returns: first_name, last_name, email, contact_number, profile_image, gender, etc.
+     */
+    public function postUserDetails(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            "user_id" => "required|integer",
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                "status" => 0,
+                "message" => $validator->errors()->first(),
+                "message_code" => 9,
+            ]);
+        }
+
+        $user_id = (int) $request->get('user_id');
+        $user = User::query()
+            ->select(
+                'id',
+                'first_name',
+                'last_name',
+                'email',
+                'contact_number',
+                'country_code',
+                'avatar',
+                'gender',
+                'currency',
+                'language',
+                'invite_code',
+                'emergency_contact',
+                'verified_at',
+                'status'
+            )
+            ->where('id', $user_id)
+            ->whereNull('deleted_at')
+            ->first();
+
+        if ($user === null) {
+            return response()->json([
+                "status" => 0,
+                "message" => __('user_messages.5') ?? "User not found",
+                "message_code" => 5,
+            ]);
+        }
+
+        $profile_image = null;
+        if ($user->avatar != null) {
+            $profile_image = filter_var($user->avatar, FILTER_VALIDATE_URL)
+                ? $user->avatar
+                : url('/assets/images/profile-images/customer/' . $user->avatar);
+        }
+
+        return response()->json([
+            "status" => 1,
+            "message" => __('user_messages.1') ?? "Success",
+            "message_code" => 1,
+            "data" => [
+                "user_id" => $user->id,
+                "first_name" => $user->first_name ?? "",
+                "last_name" => $user->last_name ?? "",
+                "email" => $user->email ?? "",
+                "contact_number" => $user->contact_number ?? "",
+                "country_code" => $user->country_code ?? "",
+                "profile_image" => $profile_image,
+                "gender" => $user->gender ?? 0,
+                "currency" => $user->currency ?? "",
+                "language" => $user->language ?? "",
+                "referral_code" => $user->invite_code ?? "",
+                "emergency_contact" => $user->emergency_contact ?? "",
+                "verified" => $user->verified_at != null ? 1 : 0,
+                "status" => $user->status ?? 1,
+            ],
+        ]);
     }
 
     public function postCustomerAddCard(Request $request)

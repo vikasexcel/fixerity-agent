@@ -85,6 +85,7 @@ Route::group(['middleware' => 'setLocaleLang'], function () {
             Route::post('/forgot-change-password', [ResetPasswordController::class,'postCustomerForgotChangePassword'])->name('post:customer:forgot_change_password');
 
             Route::post('/home', [CustomerApiController::class,'postHomepage'])->name('post:customer:homepage');
+            Route::post('/user-details', [CustomerApiController::class,'postUserDetails'])->name('post:customer:user_details');
 
             Route::post('/add-card', [CustomerApiController::class,'postCustomerAddCard'])->name('post:customer:add_card');
             Route::post('/delete-card', [CustomerApiController::class,'postCustomerRemoveCard'])->name('post:customer:remove_card');
