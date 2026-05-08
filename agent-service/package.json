@@ -6,7 +6,22 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:buyer": "node scripts/test-buyer-agent.js",
-    "start": "node --watch src/index.js"
+    "test:buyer-unit": "DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy tsx scripts/test-buyer-agent-unit.js",
+    "test:seller-profile": "node scripts/test-seller-profile.js",
+    "test:seller-classifier": "node scripts/test-seller-classifier.js",
+    "test:seller-e2e": "node scripts/test-seller-flow-e2e.js",
+    "test:conversation-persistence": "node scripts/test-conversation-persistence-e2e.js",
+    "test:seller-unit": "DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy tsx scripts/test-seller-agent-unit.js",
+    "embed:categories": "node scripts/import-category-embeddings.js",
+    "seed:seller-profiles": "node scripts/seed-seller-profiles.js",
+    "dev": "tsx --watch src/index.js",
+    "start": "tsx src/index.js",
+    "prisma:validate": "prisma validate",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:status": "prisma migrate status",
+    "prisma:studio": "prisma studio"
   },
   "keywords": [],
   "author": "",
@@ -16,14 +31,25 @@
     "@langchain/core": "^1.1.18",
     "@langchain/langgraph": "^1.1.2",
     "@langchain/openai": "^1.2.4",
+    "@langchain/textsplitters": "^1.0.1",
+    "@pinecone-database/pinecone": "^7.1.0",
+    "@prisma/adapter-pg": "^7.4.0",
+    "@prisma/client": "^7.4.0",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "langchain": "^1.2.16",
     "mem0ai": "^2.2.1",
     "mysql2": "^3.16.3",
+    "openai": "^6.25.0",
+    "pg": "^8.18.0",
+    "prisma": "^7.4.0",
     "redis": "^4.6.13",
     "sequelize": "^6.37.7",
+    "uuid": "^13.0.0",
     "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }

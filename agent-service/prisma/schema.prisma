@@ -1,0 +1,120 @@
+// This is your Prisma schema file.
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model BuyerJob {
+  id                    String   @id @default(cuid())
+  threadId              String   @map("thread_id")
+  jobTitle              String   @map("job_title")
+  jobDescription        String   @map("job_description") @db.Text
+  status                String   @default("published") // published | error
+  pineconeJobId         String?  @map("pinecone_job_id")
+  categorySearchQuery   String?  @map("category_search_query") @db.Text
+  categoryId            String?  @map("category_id")
+  categoryName          String?  @map("category_name")
+  subcategoryId         String?  @map("subcategory_id")
+  subcategoryName       String?  @map("subcategory_name")
+  serviceId             String?  @map("service_id")
+  serviceName           String?  @map("service_name")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  sellerMatches SellerMatch[]
+
+  @@map("buyer_jobs")
+}
+
+model SellerMatch {
+  id            String   @id @default(cuid())
+  buyerJobId    String   @map("buyer_job_id")
+  profileId     String   @map("profile_id")
+  vectorRank    Int      @map("vector_rank")
+  llmScore      Int      @map("llm_score")
+  matchExplanation String @map("match_explanation") @db.Text
+  finalRank     Int      @map("final_rank")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  buyerJob BuyerJob @relation(fields: [buyerJobId], references: [id], onDelete: Cascade)
+
+  @@unique([buyerJobId, finalRank])
+  @@map("seller_matches")
+}
+
+model SellerProfile {
+  id                    String   @id @default(cuid())
+  threadId              String   @map("thread_id")
+  profileDescription    String   @map("profile_description") @db.Text
+  status                String   @default("published") // published | error
+  pineconeProfileId     String?  @map("pinecone_profile_id")
+  categorySearchQuery   String?  @map("category_search_query") @db.Text
+  categoryId            String?  @map("category_id")
+  categoryName          String?  @map("category_name")
+  subcategoryId         String?  @map("subcategory_id")
+  subcategoryName       String?  @map("subcategory_name")
+  serviceId             String?  @map("service_id")
+  serviceName           String?  @map("service_name")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  jobMatches JobMatch[]
+
+  @@map("seller_profiles")
+}
+
+model JobMatch {
+  id               String   @id @default(cuid())
+  sellerProfileId  String   @map("seller_profile_id")
+  buyerJobId       String   @map("buyer_job_id")
+  vectorRank       Int      @map("vector_rank")
+  llmScore         Int      @map("llm_score")
+  matchExplanation String  @map("match_explanation") @db.Text
+  finalRank        Int      @map("final_rank")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  sellerProfile SellerProfile @relation(fields: [sellerProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([sellerProfileId, finalRank])
+  @@map("job_matches")
+}
+
+/// Persisted conversation thread for buyer or seller agent.
+/// Stores the LangGraph thread_id so the in-memory checkpointer can be
+/// restored, and a snapshot of the full agent state so conversations can
+/// survive server restarts (state snapshot is re-hydrated on load).
+model Conversation {
+  id        String   @id @default(cuid())
+  threadId  String   @unique @map("thread_id")
+  agentType String   @map("agent_type") // "buyer" | "seller"
+  title     String   @default("New conversation")
+  status    String   @default("gathering") // mirrors agent state status
+  /// Full JSON snapshot of the agent state (persisted after every turn)
+  stateSnapshot Json? @map("state_snapshot")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages ConversationMessage[]
+
+  @@map("conversations")
+}
+
+/// Individual messages within a conversation (role + content).
+model ConversationMessage {
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  role           String   // "user" | "assistant"
+  content        String   @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_messages")
+}
+
